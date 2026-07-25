@@ -791,12 +791,43 @@ check("an apostrophe in a comment does not break the scan",
       read(commentApos).contains("alias fine='echo ok'"), read(commentApos))
 check("the comment survives", read(commentApos).contains("# don't let this open a quote"))
 
-// ---------------------------------------------------------------------------
-print("\n24. A directory entry appearing before commit is refused")
+// An unquoted `#` inside a word is an ordinary character in zsh, not a comment
+// introducer. Treating it as one hides the trailing backslash behind it and orphans
+// the continuation line as a live command.
+let embeddedHash = scratch("""
+\(ManagedBlock.begin)
+alias tagged=echo#tag \\
+touch /tmp/aliasbar-hash-should-never-run
+alias sibling='4'
+\(ManagedBlock.end)
+""")
+_ = try! AliasWriter.apply(.delete(name: "tagged"), path: embeddedHash, allEntries: [])
+let eh = read(embeddedHash)
+check("an embedded # does not hide a line continuation",
+      !eh.contains("touch /tmp/aliasbar-hash-should-never-run"), eh)
+check("its sibling survives", eh.contains("alias sibling='4'"))
+check("zsh parses it", zshAccepts(embeddedHash))
 
-// The target is absent at read time. If anything is planted at that path before the
-// commit, renaming over it would destroy it, and with no original contents there is no
-// backup to recover from.
+// A genuine comment at a word boundary still terminates the scan.
+let realComment = scratch("""
+\(ManagedBlock.begin)
+alias plain='1' # a real trailing comment
+alias next='2'
+\(ManagedBlock.end)
+""")
+_ = try! AliasWriter.apply(.upsert(name: "plain", command: "echo updated", comment: nil),
+                           path: realComment, allEntries: [])
+let rc2 = read(realComment)
+check("a real trailing comment terminates the statement",
+      rc2.contains("alias plain='echo updated'"), rc2)
+check("the following alias survives", rc2.contains("alias next='2'"))
+
+// ---------------------------------------------------------------------------
+print("\n24. Symlinked targets are followed, not replaced")
+
+// Note on scope, stated honestly: this covers normal symlink following. It does NOT
+// reproduce the read-then-plant race, which would need an injection hook inside apply.
+// That race is narrowed by the lstat check but is not exercised here.
 let raceTarget = "\(sandbox)/appears-later.zshrc"
 let racePlanted = "\(sandbox)/planted-target"
 try! "planted content\n".write(toFile: racePlanted, atomically: true, encoding: .utf8)

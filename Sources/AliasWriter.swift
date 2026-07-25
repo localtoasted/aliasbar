@@ -350,15 +350,15 @@ enum AliasWriter {
 
                 // Walk forward until the statement is lexically complete.
                 var last = i
-                var (state, continues) = scan(lines[i], from: .unquoted)
-                while continues && last + 1 < end {
+                var state = scan(lines[i], from: LexState())
+                while state.continues && last + 1 < end {
                     last += 1
-                    (state, continues) = scan(lines[last], from: state)
+                    state = scan(lines[last], from: state)
                 }
                 // Still incomplete at the end marker means the block is already
                 // malformed. Consuming to the end would delete everything after it, so
                 // refuse and let the user look at their own file.
-                if continues {
+                if state.continues {
                     throw WriteError.malformedMarkers(
                         "the definition of \"\(name)\" is never terminated")
                 }
@@ -378,9 +378,18 @@ enum AliasWriter {
         /// remainder as a bare command that runs at shell startup.
         enum QuoteState { case unquoted, single, double }
 
-        /// Advances the lexer across one line. Returns the state at end of line and
-        /// whether the statement continues onto the next one.
-        func scan(_ line: String, from entering: QuoteState) -> (QuoteState, Bool) {
+        /// Everything the lexer needs to carry from one line to the next.
+        struct LexState {
+            var quote: QuoteState = .unquoted
+            /// Whether the next character begins a new word. `#` introduces a comment
+            /// only at a word boundary; inside a word it is an ordinary character.
+            var atWordStart = true
+            /// Whether the statement continues onto the following line.
+            var continues = false
+        }
+
+        /// Advances the lexer across one line.
+        func scan(_ line: String, from entering: LexState) -> LexState {
             var state = entering
             var index = line.startIndex
             var trailingEscape = false
@@ -389,11 +398,12 @@ enum AliasWriter {
                 let ch = line[index]
                 trailingEscape = false
 
-                switch state {
+                switch state.quote {
                 case .single:
                     // Wholly literal. A backslash here is just a backslash, so the very
                     // next apostrophe closes the string.
-                    if ch == "'" { state = .unquoted }
+                    if ch == "'" { state.quote = .unquoted }
+                    state.atWordStart = false
 
                 case .double:
                     if ch == "\\" {
@@ -401,21 +411,37 @@ enum AliasWriter {
                         if next == line.endIndex { trailingEscape = true; index = next; continue }
                         index = next
                     } else if ch == "\"" {
-                        state = .unquoted
+                        state.quote = .unquoted
                     }
+                    state.atWordStart = false
 
                 case .unquoted:
                     if ch == "\\" {
                         let next = line.index(after: index)
                         if next == line.endIndex { trailingEscape = true; index = next; continue }
                         index = next
+                        state.atWordStart = false
                     } else if ch == "'" {
-                        state = .single
+                        state.quote = .single
+                        state.atWordStart = false
                     } else if ch == "\"" {
-                        state = .double
-                    } else if ch == "#" {
-                        // A comment runs to end of line and cannot open anything.
-                        return (state, false)
+                        state.quote = .double
+                        state.atWordStart = false
+                    } else if ch == "#" && state.atWordStart {
+                        // A real comment: runs to end of line, opens nothing, and
+                        // cannot carry a line continuation.
+                        state.continues = false
+                        return state
+                    } else if ch == " " || ch == "\t" {
+                        state.atWordStart = true
+                    } else if ch == ";" || ch == "|" || ch == "&"
+                                || ch == "(" || ch == ")" || ch == "{" || ch == "}" {
+                        state.atWordStart = true
+                    } else {
+                        // Includes `#` mid-word, which zsh treats as an ordinary
+                        // character. Missing that would let `echo#tag\` hide a
+                        // continuation and orphan the next line as a live command.
+                        state.atWordStart = false
                     }
                 }
                 index = line.index(after: index)
@@ -424,8 +450,11 @@ enum AliasWriter {
             // The statement continues if a quote is still open, or if the line ended on
             // an unescaped backslash. In single quotes a trailing backslash is literal,
             // but the open quote already means continuation.
-            let continues = state != .unquoted || trailingEscape
-            return (state, continues)
+            state.continues = state.quote != .unquoted || trailingEscape
+            // A backslash-newline splices the lines together, so the next line resumes
+            // mid-word rather than at a word boundary.
+            if trailingEscape { state.atWordStart = false }
+            return state
         }
 
         guard let begin = bounds.begin, let end = bounds.end else {
