@@ -29,6 +29,8 @@ enum AliasWriter {
         case modifiedElsewhere
         case renameSourceMissing(String)
         case multilineCommand
+        case wouldBreakSyntax(String)
+        case collateralDamage(String)
 
         var errorDescription: String? {
             switch self {
@@ -54,6 +56,10 @@ enum AliasWriter {
                 return "\"\(name)\" is no longer in AliasBar's block, so it can't be renamed. Something else edited your shell config. Reopen and try again."
             case .multilineCommand:
                 return "An alias has to be a single line. For anything multi-line, write a shell function instead."
+            case .collateralDamage(let names):
+                return "That edit would also have removed \(names), which you didn't ask to change, so nothing was written. Edit the line by hand instead."
+            case .wouldBreakSyntax(let why):
+                return "That edit would have left your shell config unable to parse, so nothing was written. Edit the line by hand instead. (zsh said: \(why))"
             }
         }
     }
@@ -315,9 +321,142 @@ enum AliasWriter {
         var text = output.joined(separator: "\n")
         if endedWithNewline || !text.isEmpty { text += "\n" }
 
+        try guardSyntax(original: original, rewritten: text)
+        try guardCollateral(before: lines, after: output, operation: operation)
+
         let backup = try writeBackup(of: original, for: target)
         try atomicWrite(text, to: target, expecting: snapshotAtRead, matching: original)
         return backup
+    }
+
+    // MARK: - Collateral guard
+
+    /// Refuses any edit that removed an alias it was not asked to remove.
+    ///
+    /// A mis-computed span fails in two directions, and the two need different guards.
+    /// Truncation leaves a statement unterminated, which `guardSyntax` catches because the
+    /// file stops parsing. **Over-deletion does not**: swallowing the next alias along
+    /// with the target produces a file that parses perfectly and is simply missing a line
+    /// the user never asked to lose. `zsh -n` is blind to it by construction.
+    ///
+    /// That is Codex round 9's route 7. `alias doomed=x;# comment \` followed by
+    /// `alias victim='2'` deletes both, because zsh ends the statement at the `;` while
+    /// the lexer reads the backslash as a continuation.
+    ///
+    /// So this compares the alias names inside the block before and after, and refuses
+    /// unless the difference is exactly what the operation asked for. Like the syntax
+    /// guard, it does not need the lexer to be correct. It only needs to notice when the
+    /// lexer was wrong, which is the property that actually protects the user.
+    private static func guardCollateral(before: [String],
+                                        after: [String],
+                                        operation: Operation) throws {
+        guard let namesBefore = try? blockAliasNames(in: before),
+              let namesAfter = try? blockAliasNames(in: after) else { return }
+
+        // What the caller actually asked to disappear. Everything else must survive.
+        let intentionallyRemoved: Set<String>
+        switch operation {
+        case .delete(let name):
+            intentionallyRemoved = [name]
+        case .rename(let from, _, _):
+            intentionallyRemoved = [from]
+        case .upsert:
+            intentionallyRemoved = []
+        }
+
+        let lost = namesBefore.subtracting(namesAfter).subtracting(intentionallyRemoved)
+        guard lost.isEmpty else {
+            let names = lost.sorted().map { "\"\($0)\"" }.joined(separator: ", ")
+            throw WriteError.collateralDamage(names)
+        }
+    }
+
+    /// The alias names defined inside the managed block, one entry per definition line.
+    private static func blockAliasNames(in lines: [String]) throws -> Set<String> {
+        let bounds = try locateBlock(in: lines)
+        var names: Set<String> = []
+        guard let begin = bounds.begin, let end = bounds.end, end > begin + 1 else {
+            return names
+        }
+        for i in (begin + 1)..<end {
+            let line = lines[i].trimmingCharacters(in: .whitespaces)
+            guard line.hasPrefix("alias ") else { continue }
+            let rest = String(line.dropFirst("alias ".count))
+            if let (name, _) = ZshrcParser.splitAliasAssignment(rest) { names.insert(name) }
+        }
+        return names
+    }
+
+    // MARK: - Syntax guard
+
+    /// Refuses any edit that would leave the file unable to parse.
+    ///
+    /// **Why this exists.** Deciding which lines a shell statement occupies means knowing
+    /// where that statement ends, and `scan(_:from:)` answers that with a hand-written
+    /// lexer. Nine adversarial review rounds found eight distinct inputs where it was
+    /// wrong, each one looking correct when it was written: a newline in a value, a
+    /// trailing backslash, an embedded `#`, word-boundary state carried across a
+    /// continuation, `}` inside `${...}`, `)` inside `$((...))`, a `;` before a comment,
+    /// and nesting constructs that continue across lines with neither an open quote nor a
+    /// backslash. When a span is computed wrong, the edit truncates or overruns a
+    /// statement, and the remainder does not sit inertly in the file. It runs at shell
+    /// startup.
+    ///
+    /// The lesson from eight routes is not that the next patch will be the correct one.
+    /// It is that zsh's grammar is too large to re-implement by hand with confidence. So
+    /// the authority on whether the result parses is **zsh itself**, via `zsh -n`, which
+    /// parses without executing anything.
+    ///
+    /// This does not make the lexer correct. It makes every remaining lexer bug fail
+    /// loudly and harmlessly instead of silently corrupting a shell.
+    ///
+    /// The comparison is deliberately relative: an rc file that already fails `zsh -n`
+    /// before the edit stays editable, because refusing there would lock the user out of
+    /// the app over a pre-existing problem AliasBar did not cause and cannot fix.
+    private static func guardSyntax(original: String, rewritten: String) throws {
+        // Nothing to compare against if zsh is not where it should be. Not a reason to
+        // block an edit; the rest of the writer's guards still apply.
+        guard FileManager.default.isExecutableFile(atPath: "/bin/zsh") else { return }
+
+        guard let (newOK, complaint) = parses(rewritten) else { return }
+        if newOK { return }
+
+        // The result does not parse. Only refuse if the input did, so that a file which
+        // was already broken does not become permanently uneditable.
+        guard let (oldOK, _) = parses(original), oldOK else { return }
+
+        throw WriteError.wouldBreakSyntax(complaint)
+    }
+
+    /// Runs `zsh -n` over `text`. Returns nil if the check could not be run at all, in
+    /// which case the caller treats the result as unknown rather than as a failure.
+    private static func parses(_ text: String) -> (Bool, String)? {
+        let scratch = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("aliasbar-syntax-\(UUID().uuidString).zsh")
+        guard (try? text.write(to: scratch, atomically: true, encoding: .utf8)) != nil else {
+            return nil
+        }
+        defer { try? FileManager.default.removeItem(at: scratch) }
+
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/bin/zsh")
+        // `-n` parses without executing. `-f` skips startup files, so the check measures
+        // this file alone and cannot be influenced by the user's own configuration.
+        task.arguments = ["-f", "-n", scratch.path]
+        let errPipe = Pipe()
+        task.standardError = errPipe
+        task.standardOutput = Pipe()
+
+        guard (try? task.run()) != nil else { return nil }
+
+        // `-n` never executes, so it terminates on its own. The read has to happen before
+        // the wait or a complaint larger than the pipe buffer would deadlock.
+        let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
+        task.waitUntilExit()
+
+        let complaint = String(data: errData, encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return (task.terminationStatus == 0, complaint.isEmpty ? "syntax error" : complaint)
     }
 
     /// Produces the new file contents.

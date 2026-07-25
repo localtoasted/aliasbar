@@ -931,6 +931,86 @@ check("a symlink at the target path is not replaced by a regular file",
 check("the planted file kept its original content",
       read(racePlanted).contains("planted content"))
 
+print("\n25. The zsh -n guard refuses edits that would break the file")
+
+// Codex round 9 found two more lexer routes. Rather than patch the lexer an eighth time,
+// the writer now asks zsh whether the result parses. These tests assert the OUTCOME that
+// matters: whatever the lexer computes, the file is never left broken and live code is
+// never orphaned.
+
+// Route 7: a separator before a comment. zsh treats `;` as a token boundary, so `#`
+// starts a comment, the backslash is inert, and `victim` is a separate statement.
+let sepComment = scratch("""
+\(ManagedBlock.begin)
+alias doomed=x;# comment \\
+alias victim='2'
+\(ManagedBlock.end)
+""")
+let sepBefore = read(sepComment)
+let sepResult = Result { try AliasWriter.apply(.delete(name: "doomed"), path: sepComment, allEntries: []) }
+let sepAfter = read(sepComment)
+switch sepResult {
+case .success:
+    check("route 7: if the delete succeeded, victim survived it",
+          sepAfter.contains("alias victim='2'"), sepAfter)
+case .failure:
+    check("route 7: the edit was refused and the file is untouched",
+          sepAfter == sepBefore, sepAfter)
+}
+check("route 7: the file still parses either way", zshAccepts(sepComment), sepAfter)
+
+// Route 8: constructs that continue across newlines with neither an open quote nor a
+// trailing backslash. All four parse in zsh; none of them look like continuations.
+for (label, body) in [
+    ("cmdsub",  "alias doomed=$(print one\nprint two)"),
+    ("arith",   "alias doomed=$((1 +\n2))"),
+    ("param",   "alias doomed=${missing:-one\ntwo}"),
+    ("procsub", "alias doomed=<(print one\nprint two)"),
+] {
+    let f = scratch("""
+    \(ManagedBlock.begin)
+    \(body)
+    alias bystander='9'
+    \(ManagedBlock.end)
+    """)
+    let before = read(f)
+    let outcome = Result { try AliasWriter.apply(.delete(name: "doomed"), path: f, allEntries: []) }
+    let after = read(f)
+    switch outcome {
+    case .success:
+        check("\(label): the delete left no unmatched syntax behind", zshAccepts(f), after)
+        check("\(label): the bystander survived", after.contains("alias bystander='9'"), after)
+    case .failure:
+        check("\(label): the edit was refused and the file is untouched", after == before, after)
+    }
+}
+
+// The guard must not lock the user out of a file that was already broken before AliasBar
+// touched it. Refusing there would make the app unusable over a problem it did not cause.
+let alreadyBroken = scratch("""
+\(ManagedBlock.begin)
+alias fine='1'
+\(ManagedBlock.end)
+if [ -z "$UNCLOSED"
+""")
+check("a file that already fails zsh -n is confirmed broken up front", !zshAccepts(alreadyBroken))
+let brokenResult = Result { try AliasWriter.apply(.delete(name: "fine"), path: alreadyBroken, allEntries: []) }
+check("the guard still allows edits to an already-broken file",
+      (try? brokenResult.get()) != nil, read(alreadyBroken))
+check("and the edit it was asked for actually happened",
+      !read(alreadyBroken).contains("alias fine='1'"), read(alreadyBroken))
+
+// An ordinary edit must not be slowed or blocked by the guard.
+let guardNormal = scratch("""
+\(ManagedBlock.begin)
+alias keep='1'
+\(ManagedBlock.end)
+""")
+_ = try! AliasWriter.apply(.upsert(name: "added", command: "echo hi", comment: nil),
+                           path: guardNormal, allEntries: [])
+check("the guard lets a normal upsert through", read(guardNormal).contains("alias added="))
+check("and the result parses", zshAccepts(guardNormal))
+
 // ---------------------------------------------------------------------------
 print("\n" + String(repeating: "-", count: 60))
 print("\(passes) passed, \(failures) failed")
