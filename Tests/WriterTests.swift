@@ -839,6 +839,32 @@ check("a spliced mid-word continuation is spanned",
       !nsc.contains("#stillthesameword"), nsc)
 check("its sibling survives", nsc.contains("alias other='3'"))
 
+// Braces inside a word are ordinary characters. Treating `}` as a word boundary made a
+// following `#` look like a comment introducer, hiding the continuation behind it.
+let braceWord = scratch("""
+\(ManagedBlock.begin)
+alias braced=echo${HOME}#tag \\
+touch /tmp/aliasbar-brace-should-never-run
+alias braceSibling='5'
+\(ManagedBlock.end)
+""")
+_ = try! AliasWriter.apply(.delete(name: "braced"), path: braceWord, allEntries: [])
+let bw = read(braceWord)
+check("a brace inside a word does not create a comment boundary",
+      !bw.contains("touch /tmp/aliasbar-brace-should-never-run"), bw)
+check("its sibling survives", bw.contains("alias braceSibling='5'"))
+
+// A standalone brace is still a boundary, because whitespace around it sets one.
+let standaloneBrace = scratch("""
+\(ManagedBlock.begin)
+alias grouped='1'
+alias plain2='2'
+\(ManagedBlock.end)
+""")
+_ = try! AliasWriter.apply(.delete(name: "grouped"), path: standaloneBrace, allEntries: [])
+check("an ordinary delete near braces still works",
+      read(standaloneBrace).contains("alias plain2='2'"))
+
 // A genuine comment at a word boundary still terminates the scan.
 let realComment = scratch("""
 \(ManagedBlock.begin)

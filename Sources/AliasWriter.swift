@@ -435,7 +435,15 @@ enum AliasWriter {
                     } else if ch == " " || ch == "\t" {
                         state.atWordStart = true
                     } else if ch == ";" || ch == "|" || ch == "&"
-                                || ch == "(" || ch == ")" || ch == "{" || ch == "}" {
+                                || ch == "(" || ch == ")" {
+                        // Shell metacharacters genuinely break words. Braces do not:
+                        // `{` and `}` are reserved words only when they stand alone, and
+                        // inside a word they are ordinary characters — `${FOO}` and
+                        // `a{b,c}` are single words. Treating `}` as a boundary made a
+                        // following `#` look like a comment introducer, which is the
+                        // same truncation bug by yet another route. Standalone braces
+                        // are already handled, because they are surrounded by
+                        // whitespace, which does set a boundary.
                         state.atWordStart = true
                     } else {
                         // Includes `#` mid-word, which zsh treats as an ordinary
