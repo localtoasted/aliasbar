@@ -4,11 +4,12 @@ import SwiftUI
 /// architectures. Each one commits to a distinct material: a printed ledger, a
 /// blueprint, a library index card, a dictionary page, a phosphor terminal.
 enum ThemeName: String, CaseIterable, Identifiable {
-    case phosphor, ledger, blueprint, index, dictionary, system
+    case slate, phosphor, ledger, blueprint, index, dictionary, system
     var id: String { rawValue }
 
     var label: String {
         switch self {
+        case .slate: return "Slate"
         case .phosphor: return "Phosphor"
         case .ledger: return "Ledger"
         case .blueprint: return "Blueprint"
@@ -20,6 +21,7 @@ enum ThemeName: String, CaseIterable, Identifiable {
 
     var blurb: String {
         switch self {
+        case .slate: return "Clean, quiet, modern"
         case .phosphor: return "Green CRT terminal"
         case .ledger: return "Ruled accounting paper"
         case .blueprint: return "Cyanotype technical drawing"
@@ -51,6 +53,28 @@ struct Theme {
 
     static func current(_ name: ThemeName) -> Theme {
         switch name {
+        case .slate:
+            // The default. Near-black tinted toward blue rather than pure grey, a single
+            // indigo accent, and one clear step between text, dim, and faint. Names stay
+            // monospaced because they are things you type; everything else is the system
+            // sans, which reads far better at small sizes than a terminal face does.
+            return Theme(
+                background: Color(red: 0.043, green: 0.047, blue: 0.055),
+                surface: Color(red: 0.086, green: 0.094, blue: 0.110),
+                rule: Color(red: 0.212, green: 0.227, blue: 0.263),
+                text: Color(red: 0.949, green: 0.957, blue: 0.973),
+                dim: Color(red: 0.612, green: 0.639, blue: 0.702),
+                faint: Color(red: 0.408, green: 0.435, blue: 0.502),
+                accent: Color(red: 0.416, green: 0.451, blue: 0.902),
+                aliasTint: Color(red: 0.416, green: 0.451, blue: 0.902),
+                functionTint: Color(red: 0.541, green: 0.361, blue: 0.859),
+                cornerRadius: 6,
+                isLight: false,
+                bodyDesign: .default,
+                nameDesign: .monospaced,
+                usesMaterial: false
+            )
+
         case .phosphor:
             return Theme(
                 background: Color(red: 0.043, green: 0.063, blue: 0.051),
@@ -178,7 +202,7 @@ struct Theme {
 /// Reads the current theme once and hands it down, so views never touch Settings
 /// directly for appearance.
 private struct ThemeKey: EnvironmentKey {
-    static let defaultValue = Theme.current(.phosphor)
+    static let defaultValue = Theme.current(.slate)
 }
 
 extension EnvironmentValues {

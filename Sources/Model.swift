@@ -253,7 +253,16 @@ enum ZshrcParser {
 /// Counts how many times each name has actually been run, by reading ~/.zsh_history.
 /// Strictly read-only, strictly local: nothing here writes or transmits anything.
 enum HistoryScanner {
-    static var path: String { NSHomeDirectory() + "/.zsh_history" }
+    /// ALIASBAR_HISTORY points the scanner at a different history file. Exists so the
+    /// test and demo harnesses can run against fixture data instead of the developer's
+    /// real shell history, which must never end up in a screenshot.
+    static var path: String {
+        if let override = ProcessInfo.processInfo.environment["ALIASBAR_HISTORY"],
+           !override.isEmpty {
+            return (override as NSString).expandingTildeInPath
+        }
+        return NSHomeDirectory() + "/.zsh_history"
+    }
 
     /// Command words extracted from history, with their invocation counts.
     /// Keyed by the command word only, so `gs` and `gs --short` both count for `gs`.

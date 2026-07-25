@@ -26,6 +26,7 @@ enum AliasWriter {
         case definedOutsideBlock(name: String, file: String, line: Int)
         case backupFailed(String)
         case writeFailed(String)
+        case modifiedElsewhere
 
         var errorDescription: String? {
             switch self {
@@ -45,6 +46,8 @@ enum AliasWriter {
                 return "Couldn't write a backup, so nothing was changed: \(why)"
             case .writeFailed(let why):
                 return "Couldn't save your shell config: \(why)"
+            case .modifiedElsewhere:
+                return "Something else changed your shell config while AliasBar had it open, so nothing was written. Reopen and try again."
             }
         }
     }
@@ -164,6 +167,61 @@ enum AliasWriter {
     enum Operation {
         case upsert(name: String, command: String, comment: String?)
         case delete(name: String)
+        /// Renaming is one operation, never a delete followed by an insert. Split into
+        /// two commits, the second can fail on a clash, a permission change, a full
+        /// disk, or a concurrent edit, and the user is left with the original already
+        /// gone and an error message.
+        case rename(from: String, to: String, command: String)
+    }
+
+    /// Identity of the file as it stood when it was read, used to detect anyone else
+    /// writing to it before this change is committed.
+    private struct FileSnapshot: Equatable {
+        var device: dev_t
+        var inode: ino_t
+        var size: off_t
+        var modified: timespec
+
+        static func == (a: FileSnapshot, b: FileSnapshot) -> Bool {
+            a.device == b.device && a.inode == b.inode && a.size == b.size
+                && a.modified.tv_sec == b.modified.tv_sec
+                && a.modified.tv_nsec == b.modified.tv_nsec
+        }
+
+        static func of(_ path: String) -> FileSnapshot? {
+            var info = stat()
+            guard stat(path, &info) == 0 else { return nil }
+            return FileSnapshot(device: info.st_dev, inode: info.st_ino,
+                                size: info.st_size, modified: info.st_mtimespec)
+        }
+    }
+
+    /// Follows a symlink chain to the file that actually holds the content.
+    ///
+    /// This matters more than it looks. Plenty of people symlink `~/.zshrc` into a
+    /// dotfiles repo. Renaming a temp file over the *link* would replace the link with
+    /// a regular file and leave the repo copy untouched, quietly detaching the user's
+    /// config from version control. A content backup cannot undo that, because what was
+    /// lost is the link itself.
+    static func resolveTarget(_ path: String) throws -> String {
+        var current = (path as NSString).expandingTildeInPath
+        var hops = 0
+        while true {
+            var info = stat()
+            guard lstat(current, &info) == 0 else { return current }
+            guard (info.st_mode & S_IFMT) == S_IFLNK else { return current }
+
+            hops += 1
+            guard hops <= 16 else {
+                throw WriteError.malformedMarkers("symlink chain at \(path) is too deep")
+            }
+            guard let destination = try? FileManager.default
+                .destinationOfSymbolicLink(atPath: current) else { return current }
+            current = destination.hasPrefix("/")
+                ? destination
+                : (current as NSString).deletingLastPathComponent + "/" + destination
+            current = (current as NSString).standardizingPath
+        }
     }
 
     /// Applies an operation to the rc file at `path`.
@@ -175,7 +233,22 @@ enum AliasWriter {
     static func apply(_ operation: Operation,
                       path: String,
                       allEntries: [ShellEntry]) throws -> String {
-        if case .upsert(let name, let command, _) = operation {
+        // Both writing operations validate identically, and both must run every check
+        // before anything is committed.
+        var nameToWrite: String?
+        var commandToWrite: String?
+        switch operation {
+        case .upsert(let name, let command, _):
+            nameToWrite = name
+            commandToWrite = command
+        case .rename(_, let to, let command):
+            nameToWrite = to
+            commandToWrite = command
+        case .delete:
+            break
+        }
+
+        if let name = nameToWrite, let command = commandToWrite {
             try validate(name: name, command: command)
             // A definition outside the block wins or loses depending on file order, and
             // either way this writer has no business rewriting a line it did not author.
@@ -186,62 +259,122 @@ enum AliasWriter {
             }
         }
 
+        // Everything from here operates on the file the content actually lives in, not
+        // on a symlink pointing at it.
+        let target = try resolveTarget(path)
+
         let original: String
         do {
-            original = try String(contentsOfFile: path, encoding: .utf8)
+            original = try String(contentsOfFile: target, encoding: .utf8)
         } catch {
             // An rc file that does not exist yet is a legitimate starting state.
-            if FileManager.default.fileExists(atPath: path) == false {
+            if FileManager.default.fileExists(atPath: target) == false {
                 original = ""
             } else {
                 throw WriteError.unreadable(error.localizedDescription)
             }
         }
+        // Captured now, re-checked immediately before the replacement. Atomic rename
+        // prevents a half-written file; it does nothing about a lost update, where an
+        // editor or a dotfile syncer writes between our read and our commit and we
+        // silently stomp their version.
+        let snapshotAtRead = FileSnapshot.of(target)
 
         // Whether the file ends in a newline is a property worth preserving exactly.
         let endedWithNewline = original.hasSuffix("\n") || original.isEmpty
         var lines = original.components(separatedBy: "\n")
         if endedWithNewline && lines.last == "" { lines.removeLast() }
 
-        let bounds = try locateBlock(in: lines)
-
-        // Read the current block, mutate that list, then re-emit the whole block. This
-        // keeps the block canonical and means a delete cannot leave a dangling comment.
-        var managed = try managedAliases(in: lines)
-        switch operation {
-        case .upsert(let name, let command, _):
-            let clean = command.trimmingCharacters(in: .whitespacesAndNewlines)
-            if let idx = managed.firstIndex(where: { $0.name == name }) {
-                managed[idx] = (name, clean)
-            } else {
-                managed.append((name, clean))
-            }
-        case .delete(let name):
-            managed.removeAll { $0.name == name }
-        }
-
-        var block: [String] = [ManagedBlock.begin, ManagedBlock.notice]
-        block += managed.map { aliasLine(name: $0.name, command: $0.command) }
-        block.append(ManagedBlock.end)
-
-        var output: [String]
-        if let begin = bounds.begin, let end = bounds.end {
-            output = Array(lines[..<begin]) + block + Array(lines[(end + 1)...])
-        } else {
-            output = lines
-            // Separate a fresh block from whatever the file already ended with.
-            if let last = output.last, !last.trimmingCharacters(in: .whitespaces).isEmpty {
-                output.append("")
-            }
-            output += block
-        }
+        let output = try rewrite(lines: lines, applying: operation)
 
         var text = output.joined(separator: "\n")
         if endedWithNewline || !text.isEmpty { text += "\n" }
 
-        let backup = try writeBackup(of: original, for: path)
-        try atomicWrite(text, to: path)
+        let backup = try writeBackup(of: original, for: target)
+        try atomicWrite(text, to: target, expecting: snapshotAtRead)
         return backup
+    }
+
+    /// Produces the new file contents.
+    ///
+    /// Edits happen line by line inside the block rather than by regenerating it from a
+    /// parsed alias list. Regenerating is tidier but destructive: anything inside the
+    /// markers that is not a plain `alias` line, including comments the user added, a
+    /// function, or a hand-repair after a bad merge, would vanish on the next save with
+    /// no warning. Only the specific line being changed is touched.
+    private static func rewrite(lines: [String], applying operation: Operation) throws -> [String] {
+        let bounds = try locateBlock(in: lines)
+
+        /// Index of the line inside the block defining `name`, if any.
+        func indexOfAlias(named name: String, begin: Int, end: Int) -> Int? {
+            guard end > begin + 1 else { return nil }
+            for i in (begin + 1)..<end {
+                let line = lines[i].trimmingCharacters(in: .whitespaces)
+                guard line.hasPrefix("alias ") else { continue }
+                let rest = String(line.dropFirst("alias ".count))
+                if let (existing, _) = ZshrcParser.splitAliasAssignment(rest), existing == name {
+                    return i
+                }
+            }
+            return nil
+        }
+
+        guard let begin = bounds.begin, let end = bounds.end else {
+            // No block yet. A delete or rename has nothing to act on.
+            switch operation {
+            case .delete, .rename:
+                return lines
+            case .upsert(let name, let command, _):
+                var output = lines
+                if let last = output.last, !last.trimmingCharacters(in: .whitespaces).isEmpty {
+                    output.append("")
+                }
+                output += [ManagedBlock.begin,
+                           ManagedBlock.notice,
+                           aliasLine(name: name,
+                                     command: command.trimmingCharacters(in: .whitespacesAndNewlines)),
+                           ManagedBlock.end]
+                return output
+            }
+        }
+
+        var output = lines
+
+        switch operation {
+        case .upsert(let name, let command, _):
+            let line = aliasLine(name: name,
+                                 command: command.trimmingCharacters(in: .whitespacesAndNewlines))
+            if let idx = indexOfAlias(named: name, begin: begin, end: end) {
+                output[idx] = line
+            } else {
+                output.insert(line, at: end)
+            }
+
+        case .delete(let name):
+            if let idx = indexOfAlias(named: name, begin: begin, end: end) {
+                output.remove(at: idx)
+            }
+
+        case .rename(let from, let to, let command):
+            let line = aliasLine(name: to,
+                                 command: command.trimmingCharacters(in: .whitespacesAndNewlines))
+            let oldIndex = indexOfAlias(named: from, begin: begin, end: end)
+            let newIndex = indexOfAlias(named: to, begin: begin, end: end)
+
+            if let newIndex {
+                // The destination name already exists in the block: overwrite it and
+                // drop the old line. Both edits land in this one set of contents, so
+                // there is no window where the alias exists under neither name.
+                output[newIndex] = line
+                if let oldIndex, oldIndex != newIndex { output.remove(at: oldIndex) }
+            } else if let oldIndex {
+                output[oldIndex] = line
+            } else {
+                output.insert(line, at: end)
+            }
+        }
+
+        return output
     }
 
     // MARK: - Backup
@@ -267,7 +400,8 @@ enum AliasWriter {
     /// Writes via a temp file in the same directory, then `rename`, which is atomic
     /// within a filesystem. Permissions and ownership are copied onto the replacement
     /// first, so the rc file does not silently become mode 600 or change owner.
-    private static func atomicWrite(_ text: String, to path: String) throws {
+    private static func atomicWrite(_ text: String, to path: String,
+                                    expecting snapshotAtRead: FileSnapshot?) throws {
         let fm = FileManager.default
         let directory = (path as NSString).deletingLastPathComponent
         let tempPath = directory + "/.aliasbar-write-\(UUID().uuidString)"
@@ -279,6 +413,14 @@ enum AliasWriter {
             try text.write(toFile: tempPath, atomically: false, encoding: .utf8)
         } catch {
             throw WriteError.writeFailed(error.localizedDescription)
+        }
+
+        // Last check before committing: has anyone else written to this file since we
+        // read it? Narrowing the race to the gap between here and rename(2) is the best
+        // that can be done without holding a lock the rest of the world would ignore.
+        if FileSnapshot.of(path) != snapshotAtRead {
+            try? fm.removeItem(atPath: tempPath)
+            throw WriteError.modifiedElsewhere
         }
 
         if let attributes = originalAttributes {

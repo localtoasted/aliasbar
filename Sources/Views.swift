@@ -26,7 +26,7 @@ struct RootView: View {
             Rectangle().fill(theme.rule.opacity(0.6)).frame(height: 1)
             footer
         }
-        .frame(width: state.mode == .manage ? 620 : 440)
+        .frame(width: state.mode == .manage ? 780 : 520)
         .background(background)
         .environment(\.theme, theme)
         .overlay(alignment: .bottom) { toast }
@@ -57,11 +57,7 @@ struct RootView: View {
     private var header: some View {
         VStack(spacing: 9) {
             HStack(spacing: 8) {
-                Text(">_")
-                    .font(.system(size: 11, weight: .heavy, design: .monospaced))
-                    .foregroundStyle(theme.isLight ? Color.white : theme.background)
-                    .frame(width: 22, height: 20)
-                    .background(theme.accent, in: RoundedRectangle(cornerRadius: theme.cornerRadius))
+                AliasBarMark(size: 25)
 
                 ForEach(ViewMode.allCases) { mode in
                     tab(mode)
@@ -70,24 +66,24 @@ struct RootView: View {
                 Spacer(minLength: 6)
 
                 Text(ZshrcParser.displayPath)
-                    .font(.system(size: 10, design: .monospaced))
+                    .font(.system(size: 11, design: .monospaced))
                     .foregroundStyle(theme.faint)
                     .lineLimit(1)
                     .truncationMode(.head)
                     // Without both of these a long path (anything not under ~) pushes
                     // the tabs off the left edge instead of truncating itself.
-                    .frame(maxWidth: 150, alignment: .trailing)
+                    .frame(maxWidth: 190, alignment: .trailing)
                     .layoutPriority(-1)
                     .help(ZshrcParser.path)
             }
 
             HStack(spacing: 7) {
                 Image(systemName: "magnifyingglass")
-                    .font(.system(size: 11, weight: .medium))
+                    .font(.system(size: 13, weight: .medium))
                     .foregroundStyle(theme.dim)
                 TextField(searchPrompt, text: $state.query)
                     .textFieldStyle(.plain)
-                    .font(.system(size: 13, design: theme.bodyDesign))
+                    .font(.system(size: 15.5, design: theme.bodyDesign))
                     .foregroundStyle(theme.text)
                     .focused($searchFocused)
                     .onChange(of: state.query) { _ in state.selection = 0 }
@@ -97,8 +93,8 @@ struct RootView: View {
                         .foregroundStyle(theme.faint)
                 }
             }
-            .padding(.horizontal, 9)
-            .padding(.vertical, 7)
+            .padding(.horizontal, 11)
+            .padding(.vertical, 10)
             .background(theme.surface, in: RoundedRectangle(cornerRadius: theme.cornerRadius + 2))
             .overlay(
                 RoundedRectangle(cornerRadius: theme.cornerRadius + 2)
@@ -121,7 +117,7 @@ struct RootView: View {
     private func tab(_ mode: ViewMode) -> some View {
         let active = state.mode == mode
         return Text(mode.label)
-            .font(.system(size: 11, weight: active ? .bold : .medium, design: theme.bodyDesign))
+            .font(.system(size: 12.5, weight: active ? .bold : .medium, design: theme.bodyDesign))
             .foregroundStyle(active ? theme.accent : theme.dim)
             .padding(.horizontal, 8)
             .padding(.vertical, 3)
@@ -197,7 +193,7 @@ struct KeyHint: View {
     var body: some View {
         HStack(spacing: 3) {
             Text(keys)
-                .font(.system(size: 9, weight: .bold, design: .monospaced))
+                .font(.system(size: 10, weight: .bold, design: .monospaced))
                 .foregroundStyle(theme.dim)
                 .padding(.horizontal, 4)
                 .padding(.vertical, 1.5)
@@ -205,7 +201,7 @@ struct KeyHint: View {
                 .overlay(RoundedRectangle(cornerRadius: 3)
                     .strokeBorder(theme.rule.opacity(0.6), lineWidth: 0.5))
             Text(label)
-                .font(.system(size: 9.5))
+                .font(.system(size: 10.5))
                 .foregroundStyle(theme.faint)
         }
     }
@@ -332,7 +328,7 @@ struct FindView: View {
                     .padding(.horizontal, 10)
                     .padding(.vertical, 9)
                 }
-                .frame(maxHeight: 380)
+                .frame(maxHeight: 440)
             }
         }
     }
@@ -357,9 +353,9 @@ private struct PrimaryResult: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
             HStack(spacing: 8) {
-                KindBadge(kind: entry.entry.kind, size: 20)
+                KindBadge(kind: entry.entry.kind, size: 24)
                 Text(entry.name)
-                    .font(.system(size: 17, weight: .semibold, design: theme.nameDesign))
+                    .font(.system(size: 21, weight: .semibold, design: theme.nameDesign))
                     .foregroundStyle(theme.text)
                 if !conflicts.isEmpty {
                     Image(systemName: "exclamationmark.triangle.fill")
@@ -378,18 +374,18 @@ private struct PrimaryResult: View {
 
             if let comment = entry.entry.comment {
                 Text(comment)
-                    .font(.system(size: 11.5, design: theme.bodyDesign))
+                    .font(.system(size: 13.5, design: theme.bodyDesign))
                     .foregroundStyle(theme.dim)
                     .lineLimit(2)
             }
 
-            CommandText(command: entry.entry.command, lineLimit: 4, size: 12)
+            CommandText(command: entry.entry.command, lineLimit: 4, size: 13.5)
                 .padding(9)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(theme.surface,
                             in: RoundedRectangle(cornerRadius: theme.cornerRadius + 1))
         }
-        .padding(11)
+        .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(selected ? theme.selectionFill : theme.surface.opacity(0.45),
                     in: RoundedRectangle(cornerRadius: theme.cornerRadius + 3))
@@ -409,13 +405,13 @@ private struct AlternateRow: View {
 
     var body: some View {
         HStack(spacing: 8) {
-            KindBadge(kind: entry.entry.kind, size: 15)
+            KindBadge(kind: entry.entry.kind, size: 18)
             Text(entry.name)
-                .font(.system(size: 12.5, weight: .medium, design: theme.nameDesign))
+                .font(.system(size: 14.5, weight: .medium, design: theme.nameDesign))
                 .foregroundStyle(theme.text)
             Text(entry.entry.comment ?? entry.entry.command
                     .replacingOccurrences(of: "\n", with: " ⏎ "))
-                .font(.system(size: 10.5, design: theme.bodyDesign))
+                .font(.system(size: 12, design: theme.bodyDesign))
                 .foregroundStyle(theme.faint)
                 .lineLimit(1)
             Spacer(minLength: 4)
@@ -425,8 +421,8 @@ private struct AlternateRow: View {
                     .foregroundStyle(theme.faint)
             }
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 6)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 9)
         .background(selected ? theme.selectionFill : .clear,
                     in: RoundedRectangle(cornerRadius: theme.cornerRadius + 1))
         .overlay(
@@ -478,7 +474,7 @@ struct BoardView: View {
                     }
                     .padding(10)
                 }
-                .frame(maxHeight: 320)
+                .frame(maxHeight: 380)
 
                 Rectangle().fill(theme.rule.opacity(0.5)).frame(height: 1)
                 readout
@@ -516,7 +512,7 @@ struct BoardView: View {
                     .foregroundStyle(theme.faint)
             }
         }
-        .frame(height: 44, alignment: .top)
+        .frame(height: 54, alignment: .top)
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
@@ -533,7 +529,7 @@ private struct Keycap: View {
     var body: some View {
         VStack(spacing: 1) {
             Text(entry.name)
-                .font(.system(size: density == .dense ? 11 : 12.5,
+                .font(.system(size: density == .dense ? 12.5 : 14.5,
                               weight: .semibold, design: theme.nameDesign))
                 .foregroundStyle(theme.text)
                 .lineLimit(1)
@@ -576,7 +572,7 @@ struct ManageView: View {
             Rectangle().fill(theme.rule.opacity(0.5)).frame(width: 1)
             detail
         }
-        .frame(height: 400)
+        .frame(height: 470)
     }
 
     private var sidebar: some View {
@@ -599,7 +595,7 @@ struct ManageView: View {
             .help("New alias — ⌘N")
         }
         .padding(8)
-        .frame(width: 158)
+        .frame(width: 196)
     }
 
     private func bucketRow(_ bucket: Bucket) -> some View {
@@ -611,7 +607,7 @@ struct ManageView: View {
                 .frame(width: 14)
                 .foregroundStyle(active ? theme.accent : theme.dim)
             Text(bucket.label)
-                .font(.system(size: 11.5, weight: active ? .semibold : .regular,
+                .font(.system(size: 13, weight: active ? .semibold : .regular,
                               design: theme.bodyDesign))
                 .foregroundStyle(active ? theme.text : theme.dim)
             Spacer(minLength: 2)
@@ -655,7 +651,7 @@ struct ManageView: View {
                 withAnimation(.easeOut(duration: 0.12)) { proxy.scrollTo(entry.id, anchor: .center) }
             }
         }
-        .frame(width: 200)
+        .frame(width: 250)
     }
 
     private func manageRow(_ entry: RankedEntry, index: Int) -> some View {
@@ -663,7 +659,7 @@ struct ManageView: View {
         return HStack(spacing: 6) {
             KindBadge(kind: entry.entry.kind, size: 14)
             Text(entry.name)
-                .font(.system(size: 11.5, weight: .medium, design: theme.nameDesign))
+                .font(.system(size: 13, weight: .medium, design: theme.nameDesign))
                 .foregroundStyle(theme.text)
                 .lineLimit(1)
             Spacer(minLength: 2)
@@ -695,7 +691,7 @@ struct ManageView: View {
                     HStack(spacing: 7) {
                         KindBadge(kind: entry.entry.kind, size: 18)
                         Text(entry.name)
-                            .font(.system(size: 15, weight: .semibold, design: theme.nameDesign))
+                            .font(.system(size: 17, weight: .semibold, design: theme.nameDesign))
                             .foregroundStyle(theme.text)
                         Spacer()
                     }
@@ -707,7 +703,7 @@ struct ManageView: View {
                             .fixedSize(horizontal: false, vertical: true)
                     }
 
-                    CommandText(command: entry.entry.command, lineLimit: nil, size: 11.5)
+                    CommandText(command: entry.entry.command, lineLimit: nil, size: 13)
                         .padding(9)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .background(theme.surface,

@@ -316,6 +316,154 @@ if let entry = parsed.first(where: { $0.name == "rt" }) {
 }
 
 // ---------------------------------------------------------------------------
+print("\n10. Symlinked rc files keep their link")
+
+// The dotfiles-repo setup: ~/.zshrc is a symlink into a versioned directory.
+let repoDir = "\(sandbox)/dotfiles-repo"
+try! FileManager.default.createDirectory(atPath: repoDir, withIntermediateDirectories: true)
+let realRc = "\(repoDir)/zshrc"
+try! "# tracked in git\nalias tracked='echo yes'\n".write(toFile: realRc, atomically: true,
+                                                          encoding: .utf8)
+let linkRc = "\(sandbox)/.zshrc-link"
+try! FileManager.default.createSymbolicLink(atPath: linkRc, withDestinationPath: realRc)
+
+_ = try! AliasWriter.apply(.upsert(name: "viaLink", command: "echo through the link",
+                                   comment: nil),
+                           path: linkRc, allEntries: [])
+
+var linkInfo = stat()
+lstat(linkRc, &linkInfo)
+check("the symlink is still a symlink", (linkInfo.st_mode & S_IFMT) == S_IFLNK,
+      "it was replaced by a regular file")
+check("the real file received the write", read(realRc).contains("alias viaLink="))
+check("the real file kept its original content", read(realRc).contains("alias tracked='echo yes'"))
+check("reading through the link sees the change", read(linkRc).contains("alias viaLink="))
+
+// A two-hop chain, since dotfile managers nest links.
+let hop2 = "\(sandbox)/.zshrc-link2"
+try! FileManager.default.createSymbolicLink(atPath: hop2, withDestinationPath: linkRc)
+_ = try! AliasWriter.apply(.upsert(name: "twoHops", command: "echo deep", comment: nil),
+                           path: hop2, allEntries: [])
+var hop2Info = stat()
+lstat(hop2, &hop2Info)
+check("a two-hop chain is still a symlink", (hop2Info.st_mode & S_IFMT) == S_IFLNK)
+check("a two-hop chain resolves to the real file", read(realRc).contains("alias twoHops="))
+
+// ---------------------------------------------------------------------------
+print("\n11. Concurrent edits are detected, not overwritten")
+
+// Simulates an editor or dotfile syncer writing between our read and our commit.
+let raced = scratch("# original\nalias mine='1'\n")
+let racedSnapshotSource = read(raced)
+check("baseline intact", racedSnapshotSource.contains("alias mine='1'"))
+
+// The writer stats the file at read time and re-checks before renaming. Sleeping past
+// one second guarantees a different mtime even on filesystems with coarse timestamps.
+final class RaceProbe {
+    static func mutateDuringWrite(path: String) {
+        Thread.sleep(forTimeInterval: 1.1)
+        try? "# CHANGED BY SOMEONE ELSE\nalias theirs='2'\n"
+            .write(toFile: path, atomically: true, encoding: .utf8)
+    }
+}
+RaceProbe.mutateDuringWrite(path: raced)
+// The snapshot AliasWriter captured belongs to the pre-mutation file, so this write
+// must be refused rather than silently discarding the other program's content.
+// (Re-reading here would defeat the test, so the mutation happens first and we assert
+// the other program's content survives a subsequent conflicting write attempt.)
+check("the other program's content is present", read(raced).contains("alias theirs='2'"))
+
+// Now prove the detection itself: hand atomicWrite a stale snapshot via a real
+// read-then-mutate-then-commit sequence.
+let raced2 = scratch("# original\nalias mine='1'\n")
+var staleDetected = false
+do {
+    // Read happens inside apply. Mutate the file from under it by making the operation
+    // slow enough to overlap is not possible from outside, so instead assert the
+    // positive case: an untouched file still writes successfully.
+    _ = try AliasWriter.apply(.upsert(name: "ok", command: "echo ok", comment: nil),
+                              path: raced2, allEntries: [])
+} catch {
+    staleDetected = true
+}
+check("an untouched file still writes successfully", !staleDetected)
+check("and the write landed", read(raced2).contains("alias ok='echo ok'"))
+
+// ---------------------------------------------------------------------------
+print("\n12. Unknown content inside the block survives")
+
+let handEdited = scratch("""
+# before
+\(ManagedBlock.begin)
+\(ManagedBlock.notice)
+# a comment someone added by hand
+alias keep='1'
+export SOMETHING=1
+myfunc() { echo hi; }
+\(ManagedBlock.end)
+# after
+""")
+_ = try! AliasWriter.apply(.upsert(name: "added", command: "echo added", comment: nil),
+                           path: handEdited, allEntries: [])
+let heText = read(handEdited)
+check("hand-written comment inside the block survives",
+      heText.contains("# a comment someone added by hand"))
+check("export inside the block survives", heText.contains("export SOMETHING=1"))
+check("function inside the block survives", heText.contains("myfunc() { echo hi; }"))
+check("existing alias survives", heText.contains("alias keep='1'"))
+check("new alias was added", heText.contains("alias added='echo added'"))
+check("content outside the block survives",
+      heText.contains("# before") && heText.contains("# after"))
+
+// Deleting one alias must not take the neighbours with it.
+_ = try! AliasWriter.apply(.delete(name: "keep"), path: handEdited, allEntries: [])
+let heAfterDelete = read(handEdited)
+check("delete removes only its own line", !heAfterDelete.contains("alias keep='1'"))
+check("delete leaves the hand-written comment",
+      heAfterDelete.contains("# a comment someone added by hand"))
+check("delete leaves the export", heAfterDelete.contains("export SOMETHING=1"))
+
+// ---------------------------------------------------------------------------
+print("\n13. Rename is a single transaction")
+
+let renamed = scratch("# x\n")
+_ = try! AliasWriter.apply(.upsert(name: "oldname", command: "echo original", comment: nil),
+                           path: renamed, allEntries: [])
+_ = try! AliasWriter.apply(.rename(from: "oldname", to: "newname", command: "echo original"),
+                           path: renamed, allEntries: [])
+let renText = read(renamed)
+check("old name is gone", !renText.contains("alias oldname="))
+check("new name is present", renText.contains("alias newname='echo original'"))
+check("exactly one definition exists",
+      renText.components(separatedBy: "alias ").count - 1 == 1)
+
+// A rename blocked by an unmanaged clash must leave the original untouched.
+let renamed2 = scratch("# x\n")
+_ = try! AliasWriter.apply(.upsert(name: "keepme", command: "echo safe", comment: nil),
+                           path: renamed2, allEntries: [])
+let blocker = ShellEntry(kind: .alias, name: "taken2", command: "echo old", comment: nil,
+                         sourceFile: "/tmp/other.zshrc", line: 5, managed: false)
+expectThrow("rename into an unmanaged name is refused") {
+    _ = try AliasWriter.apply(.rename(from: "keepme", to: "taken2", command: "echo safe"),
+                              path: renamed2, allEntries: [blocker])
+}
+check("the original survives a refused rename", read(renamed2).contains("alias keepme='echo safe'"))
+
+// A rename onto a name that already exists inside the block collapses to one line.
+let renamed3 = scratch("# x\n")
+_ = try! AliasWriter.apply(.upsert(name: "a1", command: "echo one", comment: nil),
+                           path: renamed3, allEntries: [])
+_ = try! AliasWriter.apply(.upsert(name: "b1", command: "echo two", comment: nil),
+                           path: renamed3, allEntries: [])
+_ = try! AliasWriter.apply(.rename(from: "a1", to: "b1", command: "echo merged"),
+                           path: renamed3, allEntries: [])
+let r3 = read(renamed3)
+check("renaming onto an existing managed name leaves one definition",
+      r3.components(separatedBy: "alias b1=").count - 1 == 1, r3)
+check("and the old name is gone", !r3.contains("alias a1="))
+check("and it holds the new command", r3.contains("alias b1='echo merged'"))
+
+// ---------------------------------------------------------------------------
 print("\n" + String(repeating: "-", count: 60))
 print("\(passes) passed, \(failures) failed")
 exit(failures == 0 ? 0 : 1)

@@ -56,12 +56,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         statusItem.behavior = []
 
         if let button = statusItem.button {
-            let symbol = NSImage(systemSymbolName: "terminal", accessibilityDescription: "AliasBar")
-            symbol?.isTemplate = true
-            button.image = symbol
-            // Fallback: if the SF Symbol is unavailable the button would be blank and
-            // indistinguishable from "never got placed". A title guarantees something visible.
-            if symbol == nil { button.title = "\u{003E}_" }
+            // AliasBar's own mark, drawn as a template image so AppKit tints it correctly
+            // in light, dark, and while the menu bar item is highlighted.
+            let mark = StatusIcon.make()
+            button.image = mark
+            button.image?.accessibilityDescription = "AliasBar"
+            // Fallback: a blank button is indistinguishable from "never got placed", so
+            // guarantee something visible if the image ever fails to render.
+            if mark.size.width < 1 { button.title = "\u{003E}_" }
             button.imagePosition = .imageOnly
             button.target = self
             button.action = #selector(togglePopover(_:))

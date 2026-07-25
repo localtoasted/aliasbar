@@ -22,7 +22,10 @@ final class HotkeyManager {
 
     /// Arbitrary four-char code identifying our hotkey in Carbon's global namespace.
     private let signature: OSType = 0x414C4253 // 'ALBS'
-    private let hotkeyID: UInt32 = 1
+    /// The id of the registration currently in force. Compared against the id carried by
+    /// each event so a retired registration cannot fire.
+    fileprivate var activeID: UInt32 = 0
+    private var idCounter: UInt32 = 0
 
     private init() {}
 
@@ -36,25 +39,43 @@ final class HotkeyManager {
     /// UI must never claim one combination is taken and another is free.
     @discardableResult
     func register(_ combo: HotkeyCombo, onFire: @escaping () -> Void) -> Bool {
-        unregister()
-        self.onFire = onFire
+        guard installHandler() else {
+            Diag.log("hotkey event handler could not be installed")
+            return false
+        }
 
-        installHandlerIfNeeded()
-
-        let eventID = EventHotKeyID(signature: signature, id: hotkeyID)
+        // Register the candidate *before* tearing down the working one. Unregistering
+        // first means a rejected combination leaves the app with no shortcut at all,
+        // which is worst exactly when it matters most: the menu bar icon is hidden and
+        // the hotkey is the only way in.
+        var candidateRef: EventHotKeyRef?
+        let eventID = EventHotKeyID(signature: signature, id: nextHotkeyID())
         let status = RegisterEventHotKey(combo.keyCode,
                                          combo.modifiers,
                                          eventID,
                                          GetApplicationEventTarget(),
                                          0,
-                                         &hotKeyRef)
-        if status != noErr {
-            Diag.log("hotkey registration failed for \(combo.displayString) status=\(status)")
-            hotKeyRef = nil
+                                         &candidateRef)
+        guard status == noErr, let candidateRef else {
+            Diag.log("hotkey registration failed for \(combo.displayString) status=\(status); "
+                     + "keeping the previous shortcut")
             return false
         }
+
+        // The new one is live, so it is now safe to drop the old one.
+        if let previous = hotKeyRef { UnregisterEventHotKey(previous) }
+        hotKeyRef = candidateRef
+        activeID = eventID.id
+        self.onFire = onFire
         Diag.log("hotkey registered: \(combo.displayString)")
         return true
+    }
+
+    /// Each registration gets a fresh id so the old and new can coexist for the moment
+    /// between registering the replacement and retiring the original.
+    private func nextHotkeyID() -> UInt32 {
+        idCounter += 1
+        return idCounter
     }
 
     func unregister() {
@@ -64,8 +85,12 @@ final class HotkeyManager {
         }
     }
 
-    private func installHandlerIfNeeded() {
-        guard eventHandler == nil else { return }
+    /// Installs the Carbon event handler once. Returns false if it could not be
+    /// installed, because in that case a "successful" hotkey registration would never
+    /// actually deliver anything and reporting success would be a lie.
+    @discardableResult
+    private func installHandler() -> Bool {
+        guard eventHandler == nil else { return true }
         var spec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard),
                                  eventKind: UInt32(kEventHotKeyPressed))
 
@@ -83,19 +108,24 @@ final class HotkeyManager {
                                            MemoryLayout<EventHotKeyID>.size,
                                            nil,
                                            &firedID)
-            guard status == noErr, firedID.id == manager.hotkeyID else {
+            guard status == noErr, firedID.id == manager.activeID else {
                 return OSStatus(eventNotHandledErr)
             }
             DispatchQueue.main.async { manager.onFire?() }
             return noErr
         }
 
-        InstallEventHandler(GetApplicationEventTarget(),
-                            callback,
-                            1,
-                            &spec,
-                            Unmanaged.passUnretained(self).toOpaque(),
-                            &eventHandler)
+        let result = InstallEventHandler(GetApplicationEventTarget(),
+                                         callback,
+                                         1,
+                                         &spec,
+                                         Unmanaged.passUnretained(self).toOpaque(),
+                                         &eventHandler)
+        if result != noErr {
+            eventHandler = nil
+            return false
+        }
+        return true
     }
 }
 

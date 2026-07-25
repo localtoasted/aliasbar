@@ -113,8 +113,8 @@ enum BoardDensity: String, CaseIterable, Identifiable {
         case .dense: return "Dense"
         }
     }
-    var keyWidth: CGFloat { self == .dense ? 58 : 74 }
-    var keyHeight: CGFloat { self == .dense ? 34 : 42 }
+    var keyWidth: CGFloat { self == .dense ? 70 : 88 }
+    var keyHeight: CGFloat { self == .dense ? 40 : 48 }
 }
 
 // MARK: - Hotkey
@@ -294,7 +294,7 @@ final class AppSettings: ObservableObject {
         defaultView = decode(Key.defaultView, ViewMode.find)
         searchScope = decode(Key.searchScope, SearchScope.everything)
         sortOrder = decode(Key.sortOrder, SortOrder.usage)
-        themeName = decode(Key.theme, ThemeName.phosphor)
+        themeName = decode(Key.theme, ThemeName.slate)
         boardDensity = decode(Key.boardDensity, BoardDensity.comfortable)
 
         rcPathOverride = store.string(forKey: Key.rcPath)

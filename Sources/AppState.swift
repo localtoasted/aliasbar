@@ -134,10 +134,28 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// The selected entry, or nil when the selection no longer points at anything.
+    ///
+    /// Deliberately does **not** fall back to the first item. The selection is an index
+    /// into a list that reloads whenever the rc file changes, so after an edit the same
+    /// index can name a different alias. Silently substituting `list.first` would mean
+    /// Enter acts on something the user never highlighted. Better to do nothing.
     var selectedEntry: RankedEntry? {
         let list = activeList
-        guard list.indices.contains(selection) else { return list.first }
+        guard list.indices.contains(selection) else { return nil }
         return list[selection]
+    }
+
+    /// Re-points the selection at `id` after the underlying list has changed, so an
+    /// edit or a reload keeps the highlight on the same alias rather than on whatever
+    /// slid into that row.
+    private func restoreSelection(to id: String?) {
+        guard let id else { clampSelection(); return }
+        if let index = activeList.firstIndex(where: { $0.id == id }) {
+            selection = index
+        } else {
+            clampSelection()
+        }
     }
 
     // MARK: - Lifecycle
@@ -358,17 +376,22 @@ final class AppState: ObservableObject {
         let entries = store.ranked.map(\.entry)
 
         do {
-            // A rename is a delete plus an insert; doing the delete first keeps the old
-            // name from lingering if the new one fails validation.
-            if target.mode == .edit, target.originalName != name, !target.originalName.isEmpty {
-                try AliasWriter.validate(name: name, command: command)
-                _ = try AliasWriter.apply(.delete(name: target.originalName),
-                                          path: path, allEntries: entries)
-            }
-            _ = try AliasWriter.apply(.upsert(name: name, command: command, comment: nil),
-                                      path: path, allEntries: entries)
+            // A rename is one operation. Doing it as delete-then-insert means the second
+            // half can fail on a clash, a permission change, a full disk, or a
+            // concurrent edit, leaving the alias gone under both names.
+            let isRename = target.mode == .edit
+                && target.originalName != name
+                && !target.originalName.isEmpty
+            let operation: AliasWriter.Operation = isRename
+                ? .rename(from: target.originalName, to: name, command: command)
+                : .upsert(name: name, command: command, comment: nil)
+            _ = try AliasWriter.apply(operation, path: path, allEntries: entries)
             editor = nil
+            errorMessage = nil
             store.reload()
+            // Follow the alias that was just written, by name, rather than leaving the
+            // cursor on whatever row index it happened to occupy before the reload.
+            restoreSelection(to: activeList.first { $0.name == name }?.id)
             show(toast: "Saved \(name). Run `source \(ZshrcParser.displayPath)` to use it now.")
         } catch {
             errorMessage = error.localizedDescription
