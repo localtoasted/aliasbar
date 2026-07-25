@@ -476,6 +476,8 @@ final class AppState: ObservableObject {
             finish()
 
         case true:
+            Diag.log("deliver: pasting \(payload.count) chars, "
+                     + "accessibility trusted=\(Typist.isTrusted)")
             guard Typist.isTrusted else {
                 // Never fail silently and never lose the user's action: put it on the
                 // clipboard anyway, so the worst case is one extra ⌘V.

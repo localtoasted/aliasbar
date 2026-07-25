@@ -37,6 +37,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             forName: .aliasBarHotkeyFired, object: nil, queue: .main
         ) { [weak self] _ in self?.summon() }
 
+        // Worth recording every launch. The app is ad-hoc signed, so every rebuild gets a
+        // new code identity and macOS silently stops honouring the Accessibility grant —
+        // the entry stays visible in System Settings while `AXIsProcessTrusted` returns
+        // false. Without this line that failure is invisible from the outside.
+        Diag.log("accessibility trusted=\(Typist.isTrusted) "
+                 + "enterAction=\(settings.enterAction.rawValue)")
+
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
             self?.reportPlacement()
         }
