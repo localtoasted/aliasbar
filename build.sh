@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # AliasBar build script
-# Compiles main.swift, assembles AliasBar.app, ad-hoc codesigns, installs to ~/Applications
+# Compiles Sources/*.swift, assembles AliasBar.app, ad-hoc codesigns, installs to ~/Applications
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILD_DIR="${PROJECT_DIR}/.build"
@@ -17,8 +17,13 @@ mkdir -p "${BUILD_DIR}"
 
 echo "==> Compiling ${APP_NAME}"
 ARCH="$(uname -m)"
-swiftc -O -parse-as-library -target "${ARCH}-apple-macos13.0" \
-    "${PROJECT_DIR}/main.swift" \
+SOURCES=("${PROJECT_DIR}"/Sources/*.swift)
+if [ ${#SOURCES[@]} -eq 0 ]; then
+    echo "No sources found in ${PROJECT_DIR}/Sources" >&2
+    exit 1
+fi
+swiftc -O -target "${ARCH}-apple-macos13.0" \
+    "${SOURCES[@]}" \
     -o "${BUILD_DIR}/${APP_NAME}"
 
 echo "==> Assembling app bundle"
