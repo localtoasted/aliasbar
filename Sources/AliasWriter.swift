@@ -414,82 +414,84 @@ enum AliasWriter {
     /// a false alarm: `alias x=a|b` really is an alias definition piped into `b`, and
     /// removing that line removes both halves.
     static func removalIsProvablyOneAlias(_ line: String) -> Bool {
+        // Canonical form only. Nothing else is accepted, and the reasoning is worth keeping
+        // because four rounds were spent learning it.
+        //
+        // Rounds 16 through 19 each found a new way for one apparent `alias` statement to
+        // define two, and each fix was a tighter analysis of arbitrary zsh: a character
+        // blacklist (beaten by `alias a=x b=y`), zsh's own tokenizer (beaten by
+        // `alias a=x $extra`), then an operand allowlist that still trusted quoting
+        // (beaten by `alias a="${arr[@]}"` with `arr=(one victim=y)`, which defines two
+        // aliases from one double-quoted word).
+        //
+        // The pattern is the point. How many aliases a line defines is decided at
+        // expansion time, so no static analysis of a hand-written line can settle it. Each
+        // round bought a smaller bypass at the cost of more shell grammar embedded here.
+        //
+        // So the boundary moved instead. **AliasBar's managed block is written by
+        // AliasBar**, and a non-canonical line is there only because someone hand-edited
+        // it in. Refusing to touch those costs a little and removes the entire class:
+        // there is nothing left to analyse, because the only lines this will remove are
+        // ones it emitted itself and can reproduce byte for byte. The user gets an
+        // actionable message naming the line rather than a silent surprise.
+        //
+        // Canonical-only was tried first and refused too much to be worth it: hand-written
+        // aliases are most of what this app exists to manage, and a user cannot edit or
+        // delete any of them if the rule is "AliasBar must have written it."
+        //
+        // So non-canonical lines are still accepted, but only on two guarantees zsh
+        // actually makes, rather than on an enumeration of dangerous syntax:
+        //
+        // 1. **A single-quoted value cannot expand.** Nothing inside `'...'` is special in
+        //    zsh, so it is exactly one word, always.
+        // 2. **A double-quoted value cannot word-split without a `$` or a backtick.** All
+        //    the splitting routes, `${arr[@]}`, `$arr`, `${(s.,.)x}` and command
+        //    substitution, need one of those two characters.
+        //
+        // An unquoted value has too many routes (brace expansion `x={a,b}` alone yields two
+        // definitions with no `$` in sight), so it must be plain literal text.
         if isCanonicalAliasLine(line) { return true }
+        guard let operands = aliasOperands(in: line) else { return false }
 
-        let trimmed = line.trimmingCharacters(in: .whitespaces)
-        guard trimmed.hasPrefix("alias ") else { return false }
-        // Ask zsh to split the line into words, then require exactly two: the `alias`
-        // command and a single assignment.
-        //
-        // The previous version tested the value against a blacklist of characters that
-        // could start another statement, and Codex round 17 walked straight past it with
-        // `alias doomed=x victim=y`. That is ONE `alias` invocation defining TWO aliases,
-        // with no `;`, `|` or `&` anywhere. Deleting `doomed` took `victim` with it and the
-        // file still parsed. The finding came with the right diagnosis: a growing character
-        // blacklist is not a sound basis for editing someone's `.zshrc`, because the next
-        // grammar feature is always another bypass.
-        //
-        // `${(z)}` is zsh's own word splitter, so this is a real parse rather than a guess
-        // at one. It splits without expanding or executing anything, which is what makes it
-        // safe to point at a line nobody has vetted. Words also cover the earlier routes:
-        // `alias x=1; print y` splits to five words, `alias x=a|b` to five, and both are
-        // refused by the same rule rather than by a special case.
-        guard let assignment = soleAliasAssignment(in: trimmed) else { return false }
-        guard let assignEq = assignment.firstIndex(of: "=") else { return false }
-        let name = String(assignment[..<assignEq])
-        // The name is validated on its own. `splitAliasAssignment` takes everything before
-        // the first `=`, so without this `alias doomed; print -r -- keep='x'` presents a
-        // name of `doomed; print -r -- keep`.
-        return (try? validate(name: name, command: "placeholder")) != nil
+        var assignments = 0
+        for operand in operands {
+            guard let eq = operand.firstIndex(of: "=") else {
+                // No `=`, so this is an alias LOOKUP rather than a definition, but only if
+                // it is literally a name. `$extra` looks like a lookup and expands into a
+                // definition, which is how round 18 got through.
+                guard isLiteralAliasName(operand) else { return false }
+                continue
+            }
+            assignments += 1
+            guard assignments == 1 else { return false }
+            guard isLiteralAliasName(String(operand[..<eq])) else { return false }
+
+            let value = String(operand[operand.index(after: eq)...])
+            guard valueIsOneWord(value) else { return false }
+        }
+        return assignments == 1
     }
 
-    /// Whether `line` is exactly one alias statement in the canonical form this writer
-    /// emits, and therefore provably cannot contain a second statement.
-    ///
-    /// Used only by the fallback in `guardSyntax`, where neither the file nor the block
-    /// could be parsed and the edit has to vouch for itself.
-    ///
-    /// Two things have to hold, and Codex round 15 found that skipping either one is
-    /// exploitable:
-    ///
-    /// 1. **The name must be a legal alias name.** `splitAliasAssignment` takes everything
-    ///    before the first `=` as the name, so `alias doomed; print -r -- keep='x'`
-    ///    otherwise round-trips perfectly, with the name `doomed; print -r -- keep`.
-    ///    Deleting that entry would take the independent `print` with it.
-    /// 2. **The value must decode as canonical quoting.** Feeding the still-escaped value
-    ///    straight back into `aliasLine` double-escapes any `'\''` splice, so a command
-    ///    AliasBar itself wrote containing an apostrophe failed its own round-trip and a
-    ///    legitimate delete was refused.
-    ///
-    /// The final equality check is what makes this safe: whatever the decoder does, the
-    /// line is only accepted if re-emitting it reproduces the original byte for byte.
-    static func isCanonicalAliasLine(_ line: String) -> Bool {
-        let trimmed = line.trimmingCharacters(in: .whitespaces)
-        guard trimmed.hasPrefix("alias ") else { return false }
-        let rest = String(trimmed.dropFirst("alias ".count))
-        guard let eq = rest.firstIndex(of: "=") else { return false }
-
-        let name = String(rest[..<eq])
-        let value = String(rest[rest.index(after: eq)...])
-        guard let command = unquoteCanonical(value) else { return false }
-        // The same validation a write goes through. A name that could not have been
-        // written by AliasBar is not one this fallback should vouch for.
-        guard (try? validate(name: name, command: command)) != nil else { return false }
-        return trimmed == aliasLine(name: name, command: command)
+    /// Whether an alias value provably expands to exactly one word. See the guarantees
+    /// listed in `removalIsProvablyOneAlias`.
+    private static func valueIsOneWord(_ value: String) -> Bool {
+        if value.count >= 2, value.first == "'", value.last == "'" { return true }
+        if value.count >= 2, value.first == "\"", value.last == "\"" {
+            return !value.contains("$") && !value.contains("`")
+        }
+        // Unquoted. Anything beyond plain text can expand, split, or glob.
+        let literal = CharacterSet(charactersIn:
+            "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.:@+-/#,%")
+        return !value.isEmpty && value.unicodeScalars.allSatisfy { literal.contains($0) }
     }
 
-    /// Splits `line` with zsh's own word splitter and returns the single assignment word,
-    /// or nil if the line is anything other than `alias` followed by exactly one operand.
+    /// The operands after `alias`, split by zsh itself, or nil if the span is not a lone
+    /// `alias` command.
     ///
     /// `${(z)}` performs the shell's word splitting **without expanding or executing**
-    /// anything, so it is safe to run over a line that has not been vetted. Nothing in the
-    /// value is evaluated; command substitutions come back as literal text.
-    private static func soleAliasAssignment(in line: String) -> String? {
-        // Words from a trailing comment onward are dropped. `alias plain='1' # note` is one
-        // alias statement, and zsh's own tokenizer is what says where the comment starts:
-        // a `#` that opens a word. A `#` inside a word, as in `alias tagged=echo#tag`, stays
-        // part of that word, which is exactly the distinction the hand-written lexer spent
-        // three rounds getting wrong.
+    /// anything, so it is safe to run over a line nobody has vetted. Command substitutions
+    /// come back as literal text.
+    private static func aliasOperands(in text: String) -> [String]? {
         let script = """
         line=$1
         words=(${(z)line})
@@ -497,11 +499,11 @@ enum AliasWriter {
         shift words
         operands=()
         for w in $words; do
-          # A `#` opening a word starts a comment: the statement is over, harmlessly.
+          # A `#` opening a word starts a comment: the statement ends here, harmlessly.
           [[ $w == '#'* ]] && break
-          # A separator token means a second statement shares this line. zsh has already
-          # decided these are tokens rather than text, which is the part that cannot be
-          # done by inspecting characters.
+          # A separator token means a second statement shares this line. zsh decided these
+          # are tokens rather than text, which is the part that cannot be done by looking
+          # at characters.
           case $w in
             ';'|'|'|'||'|'&'|'&&'|'('|')'|'{'|'}'|'&|'|';;'|'|&') exit 1 ;;
           esac
@@ -511,47 +513,36 @@ enum AliasWriter {
         """
         let task = Process()
         task.executableURL = URL(fileURLWithPath: "/bin/zsh")
-        task.arguments = ["-f", "-c", script, "aliasbar", line]
+        task.arguments = ["-f", "-c", script, "aliasbar", text]
         let out = Pipe()
         task.standardOutput = out
         task.standardError = Pipe()
         guard (try? task.run()) != nil else { return nil }
         let data = out.fileHandleForReading.readDataToEndOfFile()
         task.waitUntilExit()
-        guard task.terminationStatus == 0 else { return nil }
-
-        guard let joined = String(data: data, encoding: .utf8) else { return nil }
-        let operands = joined.split(separator: "\0", omittingEmptySubsequences: true).map(String.init)
-
-        // Tokenization settles how many *words* there are. It cannot settle how many
-        // aliases the command defines, because zsh expands operands before `alias` runs.
-        // Codex round 18: with `extra='victim=y'`, the line `alias doomed=x $extra` has a
-        // single `=` word at token level and defines two aliases at runtime.
-        //
-        // So an operand is only accepted as a lookup when it is a literal alias name, by
-        // the same allowlist a write uses. That is an allowlist rather than a blacklist of
-        // expansion syntax, which matters: `$`, backticks, `~`, globs and `${arr[@]}` are
-        // all excluded because they are not in the set, not because they were enumerated.
-        var assignment: String?
-        for operand in operands {
-            guard let eq = operand.firstIndex(of: "=") else {
-                guard isLiteralAliasName(operand) else { return nil }
-                continue
-            }
-            guard assignment == nil else { return nil }
-            // The value may contain anything as long as it cannot split into a second word.
-            // A quoted value never word-splits. An unquoted one is only safe with no
-            // expansion at all, since `${arr[@]}` splits and could carry another `name=`.
-            let value = String(operand[operand.index(after: eq)...])
-            let quoted = (value.first == "'" && value.last == "'" && value.count >= 2)
-                || (value.first == "\"" && value.last == "\"" && value.count >= 2)
-            guard quoted || !(value.contains("$") || value.contains("`")) else { return nil }
-            assignment = operand
-        }
-        return assignment
+        guard task.terminationStatus == 0,
+              let joined = String(data: data, encoding: .utf8) else { return nil }
+        return joined.split(separator: "\0", omittingEmptySubsequences: true).map(String.init)
     }
 
-    /// Whether `word` is a bare alias name, using the same allowlist a write validates against.
+    static func isCanonicalAliasLine(_ line: String) -> Bool {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        guard trimmed.hasPrefix("alias ") else { return false }
+        let rest = String(trimmed.dropFirst("alias ".count))
+        guard let eq = rest.firstIndex(of: "=") else { return false }
+
+        let name = String(rest[..<eq])
+        let value = String(rest[rest.index(after: eq)...])
+        guard let command = unquoteCanonical(value) else { return false }
+        // The name goes through the same validation a write does. The command deliberately
+        // does not: `validate` rejects newlines, because new multi-line aliases are no
+        // longer written, but earlier builds did write them and those still have to be
+        // removable. They are canonical too, just with newlines inside the quotes.
+        guard isLiteralAliasName(name), !reserved.contains(name) else { return false }
+        return trimmed == aliasLine(name: name, command: command)
+    }
+
+    /// Whether `word` is a bare alias name, by the same allowlist a write validates against.
     private static func isLiteralAliasName(_ word: String) -> Bool {
         let allowed = CharacterSet(charactersIn:
             "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.:@+-")

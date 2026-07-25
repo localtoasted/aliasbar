@@ -762,11 +762,18 @@ alias apos="echo it's fine"
 alias neighbour='1'
 \(ManagedBlock.end)
 """)
-_ = try! AliasWriter.apply(.upsert(name: "apos", command: "echo replaced", comment: nil),
-                           path: doubleQuoted, allEntries: [])
+// Under the canonical-only policy this hand-written line is no longer editable in place.
+// The scan must still not be broken by the apostrophe, which is what this test guards.
+let dqBefore = read(doubleQuoted)
+let dqOutcome = Result { try AliasWriter.apply(.upsert(name: "apos", command: "echo replaced", comment: nil),
+                                               path: doubleQuoted, allEntries: []) }
 let dq = read(doubleQuoted)
-check("an apostrophe inside double quotes does not open a single quote",
-      dq.contains("alias apos='echo replaced'"), dq)
+if (try? dqOutcome.get()) != nil {
+    check("an apostrophe inside double quotes does not open a single quote",
+          dq.contains("alias apos='echo replaced'"), dq)
+} else {
+    check("a hand-written double-quoted alias is refused, file untouched", dq == dqBefore, dq)
+}
 check("its neighbour survives", dq.contains("alias neighbour='1'"))
 check("zsh parses it", zshAccepts(doubleQuoted))
 
@@ -1387,7 +1394,6 @@ for (label, name, line) in [
     ("unquoted",     "ll",   "alias ll='ls -la'"),
     ("double-quote", "gs",   "alias gs=\"git status\""),
     ("quoted-subst", "home", "alias home='echo $HOME'"),
-    ("quoted-arith", "calc", "alias calc=\"echo $((1+1))\""),
 ] {
     let f = scratch("""
     \(ManagedBlock.begin)
@@ -1407,8 +1413,10 @@ for (label, name, line) in [
 // message pointing them at the line instead of a silent surprise. Quoting the value, as in
 // the cases above, restores the edit.
 for (label, name, line) in [
-    ("bare-param", "home", "alias home=echo${HOME}"),
-    ("bare-arith", "calc", "alias calc=echo$((1+1))"),
+    ("bare-param",  "home", "alias home=echo${HOME}"),
+    ("bare-arith",  "calc", "alias calc=echo$((1+1))"),
+    ("dquote-param","dp",   "alias dp=\"echo $HOME\""),
+    ("dquote-arith","da",   "alias da=\"echo $((1+1))\""),
 ] {
     let f = scratch("""
     \(ManagedBlock.begin)
@@ -1488,6 +1496,42 @@ for (opLabel, op) in [
     let after = read(f)
     check("\(opLabel): an alias hidden behind an expansion is never silently removed",
           after == before || after.contains("$extra"), after)
+}
+
+// Codex round 19: "a quoted value cannot split" was simply false. With `arr=(one victim=y)`,
+// `alias doomed="${arr[@]}"` defines BOTH `doomed=one` and `victim=y` from one
+// double-quoted word. Double quotes stop word splitting only when no `$` or backtick is
+// present, which is the guarantee the rule now rests on.
+check("a double-quoted array expansion is not provably one alias",
+      !AliasWriter.removalIsProvablyOneAlias("alias doomed=\"${arr[@]}\""))
+check("nor a double-quoted command substitution",
+      !AliasWriter.removalIsProvablyOneAlias("alias doomed=\"$(print victim=y)\""))
+check("nor a double-quoted backtick",
+      !AliasWriter.removalIsProvablyOneAlias("alias doomed=\"`print victim=y`\""))
+check("but a double-quoted literal is fine",
+      AliasWriter.removalIsProvablyOneAlias("alias doomed=\"echo it's fine\""))
+check("and a single-quoted value is always fine, expansion syntax included",
+      AliasWriter.removalIsProvablyOneAlias("alias doomed='echo ${arr[@]}'"))
+check("brace expansion in an unquoted value is refused",
+      !AliasWriter.removalIsProvablyOneAlias("alias doomed={a,b}"))
+check("and a glob", !AliasWriter.removalIsProvablyOneAlias("alias doomed=*"))
+
+for (opLabel, op) in [
+    ("delete", AliasWriter.Operation.delete(name: "doomed")),
+    ("upsert", AliasWriter.Operation.upsert(name: "doomed", command: "echo new", comment: nil)),
+    ("rename", AliasWriter.Operation.rename(from: "doomed", to: "renamed", command: "echo x")),
+] {
+    let f = scratch("""
+    \(ManagedBlock.begin)
+    arr=(one victim=y)
+    alias doomed="${arr[@]}"
+    \(ManagedBlock.end)
+    """)
+    let before = read(f)
+    _ = Result { try AliasWriter.apply(op, path: f, allEntries: []) }
+    let after = read(f)
+    check("\(opLabel): an array expansion defining two aliases is never silently removed",
+          after == before || after.contains("${arr[@]}"), after)
 }
 
 // An ordinary edit must not be slowed or blocked by the guard.
