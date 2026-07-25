@@ -1837,6 +1837,39 @@ check("a wider key never means more columns",
 
 
 // ---------------------------------------------------------------------------
+// Motion: the off switch, and the two sources that feed it
+// ---------------------------------------------------------------------------
+
+let fullPlan = MotionPlan.resolve(.full, reduceMotion: false)
+check("full motion moves things", fullPlan.movesThings)
+check("full motion fades", fullPlan.fades)
+check("full motion staggers", fullPlan.stagger(3) != nil)
+check("full motion returns an animation", fullPlan(Motion.standard) != nil)
+
+let reducedPlan = MotionPlan.resolve(.reduced, reduceMotion: false)
+check("reduced motion moves nothing", !reducedPlan.movesThings)
+check("reduced motion still fades", reducedPlan.fades)
+check("reduced motion still animates", reducedPlan(Motion.standard) != nil)
+
+let nonePlan = MotionPlan.resolve(.none, reduceMotion: false)
+check("no motion moves nothing", !nonePlan.movesThings)
+check("no motion does not fade", !nonePlan.fades)
+check("no motion returns no animation", nonePlan(Motion.standard) == nil)
+check("no motion does not stagger", nonePlan.stagger(0) == nil)
+
+// The system setting is an accessibility setting, not a preference: it can only take
+// motion away, never give it back.
+check("the system setting overrides a full preference",
+      !MotionPlan.resolve(.full, reduceMotion: true).movesThings)
+check("the system setting leaves fades alone",
+      MotionPlan.resolve(.full, reduceMotion: true).fades)
+check("the system setting cannot revive motion the user turned off",
+      MotionPlan.resolve(.none, reduceMotion: true)(Motion.standard) == nil)
+check("neither source can be overridden by the other into more motion",
+      !MotionPlan.resolve(.reduced, reduceMotion: true).movesThings)
+
+
+// ---------------------------------------------------------------------------
 print("\n" + String(repeating: "-", count: 60))
 print("\(passes) passed, \(failures) failed")
 exit(failures == 0 ? 0 : 1)

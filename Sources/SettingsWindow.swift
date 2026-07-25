@@ -26,6 +26,7 @@ struct SettingsView: View {
     @State private var renaming = false
     @State private var newPresetName = ""
     @State private var transferNotice: String?
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private var theme: Theme { settings.theme(systemIsDark: settings.systemIsDark) }
 
@@ -162,6 +163,8 @@ struct SettingsView: View {
         .frame(width: 720, height: 540)
         .background(theme.background)
         .environment(\.theme, theme)
+        .environment(\.motion, MotionPlan.resolve(settings.motionLevel,
+                                                  reduceMotion: reduceMotion))
     }
 
     // MARK: Sidebar
@@ -199,6 +202,7 @@ struct SettingsView: View {
                 .background(active ? theme.selectionFill : .clear,
                             in: RoundedRectangle(cornerRadius: theme.cornerRadius + 1))
                 .contentShape(Rectangle())
+                .live()
                 .onTapGesture { section = item }
             }
             Spacer()
@@ -439,6 +443,15 @@ struct SettingsView: View {
                             .foregroundStyle(theme.dim)
                             .frame(width: 36, alignment: .trailing)
                     }
+                }
+            }
+
+            SettingsGroup("Motion") {
+                SettingsRow("Animation",
+                            hint: "Reduced keeps fades and drops everything that moves. macOS's own Reduce Motion is obeyed on top of this, whatever it says here.") {
+                    ThemedSegments(selection: $settings.motionLevel,
+                                   options: MotionLevel.allCases,
+                                   label: { $0.label })
                 }
             }
 
@@ -753,6 +766,7 @@ struct ThemedButton: View {
                     .strokeBorder(theme.rule.opacity(0.6), lineWidth: 1))
         }
         .buttonStyle(.plain)
+        .live()
     }
 }
 
@@ -922,6 +936,7 @@ struct ThemeSwatch: View {
                               lineWidth: selected ? 2 : 1)
         )
         .contentShape(Rectangle())
+        .live()
     }
 }
 

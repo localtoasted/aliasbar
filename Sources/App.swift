@@ -84,6 +84,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         let popover = NSPopover()
         popover.contentViewController = hosting
         popover.behavior = .transient
+        // The popover's own animation is AppKit's, not ours: it slides from the status
+        // item and cannot be curve-matched to anything else. The palette does the real
+        // entrance.
         popover.animates = false
         popover.delegate = self
         return popover
@@ -111,6 +114,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         case .palette:
             let palette = palette ?? makePalette()
             self.palette = palette
+            // Read every time rather than at construction: the setting can change while
+            // the app is running, and a window that keeps fading after you turned fading
+            // off is the bug this line exists to prevent.
+            palette.animates = settings.motionLevel != .none
             palette.show()
         case .menuBar:
             guard let button = statusItem.button else { return }

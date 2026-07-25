@@ -127,6 +127,29 @@ enum PresentationStyle: String, CaseIterable, Identifiable {
     }
 }
 
+/// How much motion the app is allowed.
+///
+/// Separate from the system's Reduce Motion, which is honoured unconditionally and is not
+/// a preference. This is for the person whose machine is busy, or who simply does not want
+/// it — and who should not have to change a system-wide accessibility setting to say so.
+enum MotionLevel: String, CaseIterable, Identifiable {
+    /// Everything: transforms, stagger, the window growing into place.
+    case full
+    /// Fades only. Nothing moves or scales, nothing waits its turn.
+    case reduced
+    /// Instant.
+    case none
+
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .full: return "Full"
+        case .reduced: return "Reduced"
+        case .none: return "None"
+        }
+    }
+}
+
 enum BoardDensity: String, CaseIterable, Identifiable {
     case comfortable, dense
     var id: String { rawValue }
@@ -243,6 +266,7 @@ final class AppSettings: ObservableObject {
         static let savedPresets = "savedPresets"
         static let followsSystemAppearance = "followsSystemAppearance"
         static let boardDensity = "boardDensity"
+        static let motionLevel = "motionLevel"
         static let presentationStyle = "presentationStyle"
         static let rcPath = "rcPathOverride"
         static let showFunctions = "showFunctions"
@@ -317,6 +341,9 @@ final class AppSettings: ObservableObject {
     }
     @Published var boardDensity: BoardDensity {
         didSet { defaults.set(boardDensity.rawValue, forKey: Key.boardDensity) }
+    }
+    @Published var motionLevel: MotionLevel {
+        didSet { defaults.set(motionLevel.rawValue, forKey: Key.motionLevel) }
     }
     @Published var presentationStyle: PresentationStyle {
         didSet { defaults.set(presentationStyle.rawValue, forKey: Key.presentationStyle) }
@@ -393,6 +420,7 @@ final class AppSettings: ObservableObject {
         // light ground and choosing one is a choice, not an accident to be corrected.
         followsSystemAppearance = store.object(forKey: Key.followsSystemAppearance) as? Bool ?? false
         boardDensity = decode(Key.boardDensity, BoardDensity.comfortable)
+        motionLevel = decode(Key.motionLevel, MotionLevel.full)
         // Centred by default. The menu bar popover is the fallback, not the other way
         // round: on a laptop with a full menu bar the icon is not reliably placed, and
         // the hotkey is how this gets opened in practice anyway.

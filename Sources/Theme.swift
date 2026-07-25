@@ -137,10 +137,68 @@ enum Motion {
     static let standard = Animation.timingCurve(0.22, 1, 0.36, 1, duration: 0.18)
     /// Entrance is allowed to be slower than response; nothing is waiting on it.
     static let entrance = Animation.timingCurve(0.22, 1, 0.36, 1, duration: 0.28)
+    /// The window arriving. Shorter than a row's entrance — it is the thing you are
+    /// waiting for, not decoration around it.
+    static let windowIn = Animation.timingCurve(0.22, 1, 0.36, 1, duration: 0.14)
+    /// Leaving is faster than arriving. Nobody wants to watch a dismissal.
+    static let windowOut = Animation.easeOut(duration: 0.09)
+    /// Hover and press want to feel like contact rather than like animation.
+    static let hover = Animation.easeOut(duration: 0.09)
+    static let press = Animation.easeOut(duration: 0.06)
     /// Rows arrive in sequence rather than all at once, capped so a long list does not
     /// turn the reveal into a wait.
     static func stagger(_ index: Int) -> Animation {
         entrance.delay(Double(min(index, 8)) * 0.02)
+    }
+}
+
+/// How much of that motion is actually allowed right now.
+///
+/// Two independent sources, and they are not the same kind of thing. The system's Reduce
+/// Motion is an accessibility setting and is obeyed without asking. `MotionLevel` is the
+/// user's own preference. Whichever is more restrictive wins.
+///
+/// Everything animated asks this rather than reaching for `Motion` directly, which is what
+/// keeps the off switch honest: there is one place to forget, and it is this one.
+struct MotionPlan {
+    var level: MotionLevel = .full
+
+    /// Transforms — scale, offset, travel. The first thing to go.
+    var movesThings: Bool { level == .full }
+    /// Fades survive "Reduced": a cross-fade carries the same information as a slide and
+    /// costs nothing to watch.
+    var fades: Bool { level != .none }
+
+    /// The animation to use, or nil for "apply it instantly".
+    func callAsFunction(_ base: Animation) -> Animation? {
+        level == .none ? nil : base
+    }
+
+    /// Stagger collapses to a plain entrance at Reduced — a queue of fades is still a
+    /// queue, and waiting is the part people object to.
+    func stagger(_ index: Int) -> Animation? {
+        switch level {
+        case .full: return Motion.stagger(index)
+        case .reduced: return Motion.entrance
+        case .none: return nil
+        }
+    }
+
+    /// Resolves the user's setting against the system's, taking the stricter of the two.
+    static func resolve(_ level: MotionLevel, reduceMotion: Bool) -> MotionPlan {
+        guard reduceMotion else { return MotionPlan(level: level) }
+        return MotionPlan(level: level == .none ? .none : .reduced)
+    }
+}
+
+private struct MotionPlanKey: EnvironmentKey {
+    static let defaultValue = MotionPlan()
+}
+
+extension EnvironmentValues {
+    var motion: MotionPlan {
+        get { self[MotionPlanKey.self] }
+        set { self[MotionPlanKey.self] = newValue }
     }
 }
 
@@ -149,23 +207,64 @@ enum Motion {
 /// Keyed on identity, not on the list: a row that survives a keystroke does not replay
 /// its entrance, so typing filters the list without the surviving rows flickering.
 struct Arriving: ViewModifier {
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.motion) private var motion
     let index: Int
     @State private var arrived = false
 
     func body(content: Content) -> some View {
         content
-            .opacity(arrived ? 1 : 0)
-            .offset(y: arrived ? 0 : 4)
+            .opacity(arrived || !motion.fades ? 1 : 0)
+            .offset(y: arrived || !motion.movesThings ? 0 : 4)
             .onAppear {
-                guard !reduceMotion else { arrived = true; return }
-                withAnimation(Motion.stagger(index)) { arrived = true }
+                guard let animation = motion.stagger(index) else { arrived = true; return }
+                withAnimation(animation) { arrived = true }
             }
     }
 }
 
 extension View {
     func arriving(_ index: Int) -> some View { modifier(Arriving(index: index)) }
+
+    /// Makes a control answer the pointer. A thing that does not respond to a hover reads
+    /// as a picture of a control rather than a control.
+    func live(pressDrop: CGFloat = 0) -> some View {
+        modifier(LiveSurface(pressDrop: pressDrop))
+    }
+}
+
+/// Hover and press states for anything clickable.
+///
+/// The press treatment is deliberately physical: a keycap travels downward and loses its
+/// contact shadow, because that is what a key does. Everything else just dims slightly,
+/// which is enough to say "yes, I felt that" without turning a settings row into a toy.
+struct LiveSurface: ViewModifier {
+    @Environment(\.motion) private var motion
+    /// How far the surface travels when pressed. Zero for flat controls.
+    var pressDrop: CGFloat = 0
+    @State private var hovering = false
+    @State private var pressing = false
+
+    func body(content: Content) -> some View {
+        content
+            .brightness(brightness)
+            .scaleEffect(motion.movesThings && pressing ? 0.985 : 1)
+            .offset(y: motion.movesThings && pressing ? pressDrop : 0)
+            .animation(motion(pressing ? Motion.press : Motion.hover), value: pressing)
+            .animation(motion(Motion.hover), value: hovering)
+            .onHover { hovering = $0 }
+            // A zero-duration long press is the only way to see the *down* edge of a click
+            // in SwiftUI. `onTapGesture` fires on release and knows nothing about the hold,
+            // which is exactly the half we need here.
+            .onLongPressGesture(minimumDuration: 0, pressing: { pressing = $0 }, perform: {})
+    }
+
+    /// Brightness rather than an overlay, so it works over a material, a paper ground, and
+    /// a tinted keycap without any of them needing to know about it.
+    private var brightness: Double {
+        guard motion.fades else { return 0 }
+        if pressing { return -0.04 }
+        return hovering ? 0.06 : 0
+    }
 }
 
 /// Reads the current theme once and hands it down, so views never touch Settings

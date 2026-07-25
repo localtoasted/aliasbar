@@ -56,9 +56,15 @@ final class PaletteController: NSObject, NSWindowDelegate {
 
     var isShown: Bool { panel?.isVisible ?? false }
 
+    /// Whether the window itself is allowed to fade. Set from settings before each show,
+    /// because the panel's own animation and the SwiftUI entrance are two separate things
+    /// and wiring one while forgetting the other is exactly how half a fade ships.
+    var animates = true
+
     func show() {
         let panel = panel ?? makePanel()
         self.panel = panel
+        panel.alphaValue = 1
         // Sizing has to happen before positioning, and it has to be forced rather than
         // waited for. Left to itself the hosting controller reports its real size a beat
         // *after* the window is placed, so the window is centred at its placeholder
@@ -73,8 +79,21 @@ final class PaletteController: NSObject, NSWindowDelegate {
     }
 
     func close() {
-        panel?.orderOut(nil)
-        onClose()
+        guard let panel, animates, panel.isVisible else {
+            panel?.orderOut(nil)
+            onClose()
+            return
+        }
+        // Fade, then order out. Leaving is faster than arriving — nobody wants to watch a
+        // dismissal, and the window is usually already behind whatever regained focus.
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.09
+            panel.animator().alphaValue = 0
+        } completionHandler: { [weak self] in
+            panel.orderOut(nil)
+            panel.alphaValue = 1
+            self?.onClose()
+        }
     }
 
     private func makePanel() -> PalettePanel {

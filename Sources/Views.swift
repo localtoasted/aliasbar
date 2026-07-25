@@ -6,6 +6,15 @@ struct RootView: View {
     @ObservedObject var state: AppState
     @ObservedObject var settings: AppSettings
     @FocusState private var searchFocused: Bool
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    /// Drives the window's entrance. Deliberately not gating anything: focus and key
+    /// handling do not wait on it, so ⌥⌘A then `gs⏎` lands the paste with the window
+    /// still growing.
+    @State private var arrived = false
+
+    private var motion: MotionPlan {
+        MotionPlan.resolve(settings.motionLevel, reduceMotion: reduceMotion)
+    }
     // The system appearance matters only when the chosen look defines a second ground
     // and the user opted into following it; `settings.theme(systemIsDark:)` decides that.
     //
@@ -26,6 +35,12 @@ struct RootView: View {
                 case .manage: ManageView(state: state, settings: settings)
                 }
             }
+            // Cross-fade rather than cut, and only the body — the header holds the tabs
+            // you just clicked, and moving it would pull the ground out from under the
+            // pointer.
+            .id(state.mode)
+            .transition(.opacity)
+            .animation(motion(Motion.standard), value: state.mode)
             // Fixed, not merely bounded. Every view fills this and scrolls inside it, so
             // no view can move the window by having more or less to show.
             .frame(height: WindowLayout.bodyHeight)
@@ -41,6 +56,11 @@ struct RootView: View {
         // placeholder in near-white on paper, which is to say not at all.
         .preferredColorScheme(theme.isLight ? .light : .dark)
         .background(background)
+        // Grows into place from its top edge rather than out of its centre, because the
+        // top edge is where it is anchored and where the eye already is.
+        .scaleEffect(arrived || !motion.movesThings ? 1 : 0.98, anchor: .top)
+        .opacity(arrived || !motion.fades ? 1 : 0)
+        .environment(\.motion, motion)
         .overlay(alignment: .top) { topHighlight }
         .environment(\.theme, theme)
         .overlay(alignment: .bottom) { toast }
@@ -51,14 +71,26 @@ struct RootView: View {
             RemovalConfirmSheet(state: state, confirmation: confirmation)
                 .environment(\.theme, theme)
         }
-        .onAppear { searchFocused = true }
+        .onAppear {
+            searchFocused = true
+            enter()
+        }
         .onChange(of: state.mode) { _ in searchFocused = true }
         // Re-focus on every open, not just the first. Without this the second summon
         // renders the popover with the field looking focused but swallowing nothing,
         // which is indistinguishable from a broken hotkey.
         .onChange(of: state.showCount) { _ in
             DispatchQueue.main.async { searchFocused = true }
+            arrived = false
+            enter()
         }
+    }
+
+    /// Plays the entrance. Focus is already set by the time this runs, so nothing about
+    /// the animation can swallow a keystroke.
+    private func enter() {
+        guard let animation = motion(Motion.windowIn) else { arrived = true; return }
+        withAnimation(animation) { arrived = true }
     }
 
     @ViewBuilder
@@ -188,6 +220,7 @@ struct RootView: View {
                     .strokeBorder(active ? theme.accent.opacity(0.4) : .clear, lineWidth: 1)
             )
             .contentShape(Rectangle())
+            .live()
             .onTapGesture { state.mode = mode; state.selection = 0 }
             .help("\(mode.label) — ⌘\(mode == .find ? "1" : mode == .board ? "2" : "3")")
     }
@@ -235,6 +268,7 @@ struct RootView: View {
             }
             .buttonStyle(.plain)
             .foregroundStyle(theme.dim)
+            .live()
             .help("Settings — ⌘,")
         }
         .frame(height: 16)
@@ -252,7 +286,7 @@ struct RootView: View {
                 .padding(.vertical, 7)
                 .background(theme.accent, in: Capsule())
                 .padding(.bottom, 44)
-                .transition(.opacity)
+                .transition(.opacity.combined(with: .offset(y: 6)))
         }
     }
 }
@@ -365,6 +399,7 @@ struct FindView: View {
     /// treats a selection change as the same view moving and slides it there — rather
     /// than one fill switching off and another switching on.
     @Namespace private var highlight
+    @Environment(\.motion) private var motion
 
     var body: some View {
         if state.historyMode { history } else { aliases }
@@ -402,7 +437,7 @@ struct FindView: View {
                     }
                     .padding(.horizontal, 10)
                     .padding(.vertical, 9)
-                    .animation(Motion.standard, value: state.selection)
+                    .animation(motion(Motion.standard), value: state.selection)
                 }
                 .frame(maxHeight: .infinity)
             }
@@ -463,7 +498,7 @@ struct FindView: View {
                     // The capsule below only travels if the selection change is animated.
                     // Animating the container rather than each caller means every route
                     // into the selection — arrows, typing, a click — moves it the same way.
-                    .animation(Motion.standard, value: state.selection)
+                    .animation(motion(Motion.standard), value: state.selection)
                 }
                 .frame(maxHeight: .infinity)
             }
@@ -811,6 +846,9 @@ private struct Keycap: View {
         // Dimming rather than hiding: the grid never reflows, so position stays learnable.
         .opacity(dimmed ? 0.22 : 1)
         .contentShape(Rectangle())
+        // A key travels when you press it. One point is enough to feel and small enough
+        // that a grid of fifty does not look like it is breathing.
+        .live(pressDrop: 1)
     }
 }
 
@@ -881,6 +919,7 @@ struct ManageView: View {
         .background(active ? theme.selectionFill : .clear,
                     in: RoundedRectangle(cornerRadius: theme.cornerRadius + 1))
         .contentShape(Rectangle())
+        .live()
         .onTapGesture { state.bucket = bucket; state.selection = 0 }
     }
 
@@ -941,6 +980,7 @@ struct ManageView: View {
         .background(selected ? theme.selectionFill : .clear,
                     in: RoundedRectangle(cornerRadius: theme.cornerRadius))
         .contentShape(Rectangle())
+        .live()
         .onTapGesture { state.selection = index }
     }
 
