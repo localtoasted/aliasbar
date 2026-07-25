@@ -305,6 +305,11 @@ enum HistoryScanner {
         var iterator = line.startIndex
 
         func flush() {
+            // A shell command word cannot be arbitrarily long, and history files pick up
+            // junk: terminal mouse-tracking escape sequences land as one enormous line
+            // full of semicolons, which splits into hundreds of meaningless tokens.
+            // They could never match an alias name, but there is no reason to keep them.
+            if current.count > 64 { current = "" }
             if atCommandPosition && !current.isEmpty {
                 // Skip env-var prefixes (FOO=bar cmd) and leading `sudo`, so the real
                 // command word gets the credit.

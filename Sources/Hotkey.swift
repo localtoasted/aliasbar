@@ -26,8 +26,14 @@ final class HotkeyManager {
 
     private init() {}
 
-    /// (Re)registers the combination. Returns false when the combination is already
-    /// claimed by another application, which is the case worth telling the user about.
+    /// (Re)registers the combination.
+    ///
+    /// A `true` return means only that the registration was accepted. It does **not**
+    /// mean the combination is free. From the HIToolbox header: "The same hot key can,
+    /// however, be registered by multiple applications." Registering ⌘Space succeeds
+    /// with `noErr` even though Spotlight owns it, and `kEventHotKeyExclusive` does not
+    /// change that. So there is no such thing as a runtime conflict check here, and the
+    /// UI must never claim one combination is taken and another is free.
     @discardableResult
     func register(_ combo: HotkeyCombo, onFire: @escaping () -> Void) -> Bool {
         unregister()

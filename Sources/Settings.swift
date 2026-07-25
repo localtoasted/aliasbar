@@ -126,11 +126,22 @@ struct HotkeyCombo: Equatable {
 
     /// Default launch key: ⌥⌘A.
     ///
-    /// Chosen because ⌥⌘ + letter is a sparsely used corner of the modifier space for
-    /// third-party apps, and A is mnemonic for alias. See `review/HOTKEY-RESEARCH.md`
-    /// for the conflict audit behind this.
+    /// Picked from an audit of the tools a developer is most likely to have running.
+    /// ⌥⌘A is unbound in Spotlight, Raycast, Alfred, VS Code, Xcode, iTerm2, Ghostty,
+    /// JetBrains, Docker, tmux, Chrome and DevTools, Slack, Notion, 1Password,
+    /// CleanShot, Rectangle, and Magnet. Its one collision is Finder's Edit > Deselect
+    /// All, which is a menu key equivalent and so only applies while Finder is
+    /// frontmost. It is also the rare case where the ergonomic pick and the mnemonic
+    /// pick agree: ⌥ and ⌘ are an adjacent thumb roll, and A is for alias.
     static let fallbackDefault = HotkeyCombo(keyCode: UInt32(kVK_ANSI_A),
                                              modifiers: UInt32(optionKey | cmdKey))
+
+    /// macOS 15.0 requires every hotkey registration to include at least one modifier
+    /// that is not Shift or Option. Combinations built only from ⌥ and ⇧ fail with
+    /// -9868 (eventInternalErr), so they are rejected before they are ever stored.
+    var isRegisterable: Bool {
+        modifiers & UInt32(cmdKey | controlKey) != 0
+    }
 
     var displayString: String {
         var s = ""
@@ -274,7 +285,11 @@ final class AppSettings: ObservableObject {
             return value
         }
 
-        enterAction = decode(Key.enterAction, EnterAction.copyName)
+        // Pasting straight into whatever regains focus is the default: the whole point
+        // is that you are standing in a terminal about to type the alias yourself, so
+        // landing the text there beats landing it on the clipboard. Falls back to
+        // copying, with a prompt, when Accessibility permission is not granted.
+        enterAction = decode(Key.enterAction, EnterAction.pasteName)
         afterAction = decode(Key.afterAction, AfterAction.close)
         defaultView = decode(Key.defaultView, ViewMode.find)
         searchScope = decode(Key.searchScope, SearchScope.everything)

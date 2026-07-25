@@ -64,6 +64,10 @@ final class AppState: ObservableObject {
     @Published var editor: EditTarget?
     @Published var toast: String?
     @Published var errorMessage: String?
+    /// Bumped on every open. The popover reuses one hosting view for the life of the
+    /// app, so `onAppear` fires exactly once and cannot be used to restore focus to the
+    /// search field on the second and every subsequent open.
+    @Published var showCount = 0
 
     let store: EntryStore
     let settings: AppSettings
@@ -146,6 +150,7 @@ final class AppState: ObservableObject {
         query = ""
         selection = 0
         editor = nil
+        showCount += 1
     }
 
     func clampSelection() {
@@ -299,15 +304,22 @@ final class AppState: ObservableObject {
 
         case .pasteName, .pasteCommand:
             guard Typist.isTrusted else {
-                show(toast: "Needs Accessibility permission")
+                // Never fail silently and never lose the user's action: put it on the
+                // clipboard anyway, so the worst case is one extra ⌘V.
+                let pasteboard = NSPasteboard.general
+                pasteboard.clearContents()
+                pasteboard.setString(payload, forType: .string)
+                show(toast: "Copied. Allow Accessibility to paste automatically.")
                 Typist.requestTrust()
+                finish()
                 return
             }
             // The target app has to be frontmost before the keystroke is sent, so the
-            // popover closes first and the paste happens on the next run loop turn.
+            // popover closes and focus is handed back first, and the paste goes out a
+            // beat later once that has actually taken effect.
             onDismiss?()
             PreviousApp.restore()
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
                 _ = Typist.paste(payload)
             }
         }

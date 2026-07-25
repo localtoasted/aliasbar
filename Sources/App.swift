@@ -1,24 +1,6 @@
 import SwiftUI
 import AppKit
 
-// MARK: - Diagnostics
-
-enum Diag {
-    static let path = NSHomeDirectory() + "/Library/Logs/AliasBar-diag.log"
-
-    static func log(_ message: String) {
-        let stamp = ISO8601DateFormatter().string(from: Date())
-        let line = "[\(stamp)] \(message)\n"
-        if let handle = FileHandle(forWritingAtPath: path) {
-            handle.seekToEndOfFile()
-            handle.write(Data(line.utf8))
-            try? handle.close()
-        } else {
-            try? line.write(toFile: path, atomically: true, encoding: .utf8)
-        }
-    }
-}
-
 // MARK: - App delegate
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {

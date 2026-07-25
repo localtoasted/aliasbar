@@ -35,6 +35,12 @@ struct RootView: View {
         }
         .onAppear { searchFocused = true }
         .onChange(of: state.mode) { _ in searchFocused = true }
+        // Re-focus on every open, not just the first. Without this the second summon
+        // renders the popover with the field looking focused but swallowing nothing,
+        // which is indistinguishable from a broken hotkey.
+        .onChange(of: state.showCount) { _ in
+            DispatchQueue.main.async { searchFocused = true }
+        }
     }
 
     @ViewBuilder
@@ -68,6 +74,11 @@ struct RootView: View {
                     .foregroundStyle(theme.faint)
                     .lineLimit(1)
                     .truncationMode(.head)
+                    // Without both of these a long path (anything not under ~) pushes
+                    // the tabs off the left edge instead of truncating itself.
+                    .frame(maxWidth: 150, alignment: .trailing)
+                    .layoutPriority(-1)
+                    .help(ZshrcParser.path)
             }
 
             HStack(spacing: 7) {
@@ -294,8 +305,20 @@ struct FindView: View {
             } else {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 5) {
+                        // At rest there is no answer yet, so nothing gets the primary
+                        // treatment. Promoting an arbitrary entry into a big card would
+                        // be the interface asserting something it does not know.
+                        if state.query.isEmpty {
+                            Text(restLabel)
+                                .font(.system(size: 9, weight: .bold))
+                                .kerning(0.7)
+                                .foregroundStyle(theme.faint)
+                                .padding(.horizontal, 10)
+                                .padding(.bottom, 2)
+                        }
+
                         ForEach(Array(results.enumerated()), id: \.element.id) { index, entry in
-                            if index == 0 {
+                            if index == 0 && !state.query.isEmpty {
                                 PrimaryResult(entry: entry,
                                               selected: state.selection == 0,
                                               conflicts: state.store.conflicts(for: entry.name))
@@ -312,6 +335,12 @@ struct FindView: View {
                 .frame(maxHeight: 380)
             }
         }
+    }
+
+    /// Names the rest state honestly. With no shell history to rank by, calling the list
+    /// "most used" would be a lie.
+    private var restLabel: String {
+        state.store.mostUsed.isEmpty ? "YOUR ALIASES" : "MOST USED"
     }
 
     private func activate(_ entry: RankedEntry) {

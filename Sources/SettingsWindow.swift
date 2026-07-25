@@ -73,13 +73,19 @@ struct SettingsView: View {
                         recordingHotkey.toggle()
                         HotkeyRecorder.shared.isRecording = recordingHotkey
                         HotkeyRecorder.shared.onCapture = { combo in
-                            settings.hotkey = combo
                             recordingHotkey = false
                             HotkeyRecorder.shared.isRecording = false
+                            // Since macOS 15.0 a registration must carry a modifier that
+                            // is not Shift or Option, or it fails with -9868.
+                            guard combo.isRegisterable else {
+                                hotkeyError = "Include ⌘ or ⌃. macOS no longer accepts shortcuts built only from ⌥ and ⇧."
+                                return
+                            }
+                            settings.hotkey = combo
                             hotkeyError = HotkeyManager.shared.register(combo) {
                                 NotificationCenter.default.post(name: .aliasBarHotkeyFired,
                                                                 object: nil)
-                            } ? nil : "Another app already owns that combination."
+                            } ? nil : "macOS refused that combination. Try another."
                         }
                     } label: {
                         Text(recordingHotkey ? "Press keys…" : settings.hotkey.displayString)
