@@ -634,6 +634,101 @@ for (label, path) in [("busy rc", p1), ("hand-edited block", handEdited),
 }
 
 // ---------------------------------------------------------------------------
+print("\n20. The quote scanner cannot over-consume the block")
+
+// The bug this pins down: a naive scanner treats any backslash-apostrophe pair as
+// non-structural. Inside single quotes a backslash is literal, so the apostrophe still
+// closes the string. Getting that wrong leaves the scanner stuck open and it eats every
+// following line in the block.
+let backslashValue = scratch("""
+# before
+\(ManagedBlock.begin)
+\(ManagedBlock.notice)
+alias winpath='echo C:\\'
+alias survivor='echo still here'
+# a comment that must survive
+alias second='2'
+\(ManagedBlock.end)
+# after
+""")
+_ = try! AliasWriter.apply(.upsert(name: "winpath", command: "echo updated", comment: nil),
+                           path: backslashValue, allEntries: [])
+let bv = read(backslashValue)
+check("the alias after a backslash-ending value survives",
+      bv.contains("alias survivor='echo still here'"), bv)
+check("the comment after it survives", bv.contains("# a comment that must survive"))
+check("the second alias survives", bv.contains("alias second='2'"))
+check("the end marker survives", bv.contains(ManagedBlock.end))
+check("content after the block survives", bv.contains("# after"))
+check("the target was updated", bv.contains("alias winpath='echo updated'"))
+
+// The writer's own escaping idiom must round-trip through the scanner.
+let idiom = scratch("# x\n")
+_ = try! AliasWriter.apply(.upsert(name: "quoted", command: "echo it's fine", comment: nil),
+                           path: idiom, allEntries: [])
+_ = try! AliasWriter.apply(.upsert(name: "after", command: "echo after", comment: nil),
+                           path: idiom, allEntries: [])
+_ = try! AliasWriter.apply(.upsert(name: "quoted", command: "echo it's changed", comment: nil),
+                           path: idiom, allEntries: [])
+let idm = read(idiom)
+check("updating an alias containing an apostrophe leaves its neighbour",
+      idm.contains("alias after='echo after'"), idm)
+check("...and updates only itself", idm.contains("echo it'\\''s changed"))
+check("zsh parses the apostrophe fixture", zshAccepts(idiom))
+
+// An unterminated quote inside the block is malformed; refuse rather than consume.
+let unterminated = scratch("""
+\(ManagedBlock.begin)
+alias broken='never closed
+alias innocent='1'
+\(ManagedBlock.end)
+""")
+let beforeUnterminated = read(unterminated)
+expectThrow("an unterminated quote is refused, not consumed") {
+    _ = try AliasWriter.apply(.delete(name: "broken"), path: unterminated, allEntries: [])
+}
+check("the malformed file was left untouched", read(unterminated) == beforeUnterminated)
+
+// ---------------------------------------------------------------------------
+print("\n21. Rename requires its source in every branch")
+
+// Source deleted, destination present: the stale rename must not overwrite it.
+let staleOverwrite = scratch("# x\n")
+_ = try! AliasWriter.apply(.upsert(name: "dest", command: "echo destination", comment: nil),
+                           path: staleOverwrite, allEntries: [])
+expectThrow("rename with a missing source but existing destination is refused") {
+    _ = try AliasWriter.apply(.rename(from: "vanished", to: "dest", command: "echo stale"),
+                              path: staleOverwrite, allEntries: [])
+}
+check("the destination kept its own command",
+      read(staleOverwrite).contains("alias dest='echo destination'"), read(staleOverwrite))
+
+// No managed block at all: a rename cannot silently succeed.
+let noBlock = scratch("# just a plain rc file\n")
+expectThrow("rename with no managed block at all is refused") {
+    _ = try AliasWriter.apply(.rename(from: "anything", to: "something", command: "echo x"),
+                              path: noBlock, allEntries: [])
+}
+check("the block-less file was not given a block",
+      !read(noBlock).contains(ManagedBlock.begin))
+
+// A delete with no block remains a no-op, since the desired end state already holds.
+let deleteNoBlock = scratch("# plain\n")
+_ = try! AliasWriter.apply(.delete(name: "whatever"), path: deleteNoBlock, allEntries: [])
+check("delete with no block is a silent no-op", read(deleteNoBlock).contains("# plain"))
+
+// ---------------------------------------------------------------------------
+print("\n22. Content-level concurrent edit detection")
+
+// Same size, same tick, different content: metadata alone would wave this through.
+let sameSize = scratch("alias aaa='111'\n")
+check("baseline", read(sameSize).contains("alias aaa='111'"))
+// A normal write still succeeds.
+_ = try! AliasWriter.apply(.upsert(name: "new1", command: "echo n", comment: nil),
+                           path: sameSize, allEntries: [])
+check("an uncontended write still commits", read(sameSize).contains("alias new1='echo n'"))
+
+// ---------------------------------------------------------------------------
 print("\n" + String(repeating: "-", count: 60))
 print("\(passes) passed, \(failures) failed")
 exit(failures == 0 ? 0 : 1)

@@ -316,7 +316,7 @@ enum AliasWriter {
         if endedWithNewline || !text.isEmpty { text += "\n" }
 
         let backup = try writeBackup(of: original, for: target)
-        try atomicWrite(text, to: target, expecting: snapshotAtRead)
+        try atomicWrite(text, to: target, expecting: snapshotAtRead, matching: original)
         return backup
     }
 
@@ -339,7 +339,7 @@ enum AliasWriter {
         /// starts. New multi-line commands are now rejected outright, but blocks written
         /// by earlier builds can still contain them, so removal has to span the whole
         /// statement.
-        func rangeOfAlias(named name: String, begin: Int, end: Int) -> ClosedRange<Int>? {
+        func rangeOfAlias(named name: String, begin: Int, end: Int) throws -> ClosedRange<Int>? {
             guard end > begin + 1 else { return nil }
             for i in (begin + 1)..<end {
                 let line = lines[i].trimmingCharacters(in: .whitespaces)
@@ -348,34 +348,65 @@ enum AliasWriter {
                 guard let (existing, _) = ZshrcParser.splitAliasAssignment(rest),
                       existing == name else { continue }
 
-                // Walk forward while the single quotes remain unbalanced.
+                // Walk forward while the statement is still inside an open quote.
                 var last = i
-                var open = unbalancedQuotes(in: lines[i])
+                var open = quoteStateAfter(lines[i], startingOpen: false)
                 while open && last + 1 < end {
                     last += 1
-                    if unbalancedQuotes(in: lines[last]) { open = false }
+                    open = quoteStateAfter(lines[last], startingOpen: true)
+                }
+                // Reaching the end marker still quoted means the block is already
+                // malformed. Consuming to the end would delete everything after it, so
+                // refuse and let the user look at their own file.
+                if open {
+                    throw WriteError.malformedMarkers(
+                        "the definition of \"\(name)\" has an unterminated quote")
                 }
                 return i...last
             }
             return nil
         }
 
-        /// Whether a line leaves a single quote open, accounting for the `'\''` idiom.
-        func unbalancedQuotes(in line: String) -> Bool {
-            var count = 0
-            var previous: Character?
-            for ch in line {
-                if ch == "'" && previous != "\\" { count += 1 }
-                previous = ch
+        /// Tracks single-quote state across a line, following zsh's actual rules.
+        ///
+        /// The subtlety that makes counting quotes wrong: **inside** single quotes a
+        /// backslash is a literal character and escapes nothing, so the very next
+        /// apostrophe still closes the string. Outside quotes, `\'` *is* an escaped
+        /// literal apostrophe. Treating any backslash-apostrophe pair as non-structural
+        /// misreads a command containing a literal backslash and can leave the scanner
+        /// stuck open, consuming every following comment, function, and alias in the
+        /// block.
+        func quoteStateAfter(_ line: String, startingOpen wasOpen: Bool) -> Bool {
+            var open = wasOpen
+            var iterator = line.startIndex
+            while iterator < line.endIndex {
+                let ch = line[iterator]
+                if open {
+                    // Literal until the closing quote. Backslash has no power here.
+                    if ch == "'" { open = false }
+                } else if ch == "\\" {
+                    // Escapes the next character, whatever it is.
+                    iterator = line.index(after: iterator)
+                    if iterator == line.endIndex { break }
+                } else if ch == "'" {
+                    open = true
+                }
+                iterator = line.index(after: iterator)
             }
-            return count % 2 == 1
+            return open
         }
 
         guard let begin = bounds.begin, let end = bounds.end else {
-            // No block yet. A delete or rename has nothing to act on.
+            // No block yet.
             switch operation {
-            case .delete, .rename:
+            case .delete:
+                // Nothing to remove, and nothing to report: the desired end state
+                // already holds.
                 return lines
+            case .rename(let from, _, _):
+                // A rename with no block at all means the source is definitively gone,
+                // which is a stale edit rather than a no-op.
+                throw WriteError.renameSourceMissing(from)
             case .upsert(let name, let command, _):
                 var output = lines
                 if let last = output.last, !last.trimmingCharacters(in: .whitespaces).isEmpty {
@@ -396,26 +427,27 @@ enum AliasWriter {
         case .upsert(let name, let command, _):
             let line = aliasLine(name: name,
                                  command: command.trimmingCharacters(in: .whitespacesAndNewlines))
-            if let range = rangeOfAlias(named: name, begin: begin, end: end) {
+            if let range = try rangeOfAlias(named: name, begin: begin, end: end) {
                 output.replaceSubrange(range, with: [line])
             } else {
                 output.insert(line, at: end)
             }
 
         case .delete(let name):
-            if let range = rangeOfAlias(named: name, begin: begin, end: end) {
+            if let range = try rangeOfAlias(named: name, begin: begin, end: end) {
                 output.removeSubrange(range)
             }
 
         case .rename(let from, let to, let command):
             let line = aliasLine(name: to,
                                  command: command.trimmingCharacters(in: .whitespacesAndNewlines))
-            let oldRange = rangeOfAlias(named: from, begin: begin, end: end)
-            let newRange = rangeOfAlias(named: to, begin: begin, end: end)
+            let newRange = try rangeOfAlias(named: to, begin: begin, end: end)
 
-            // A rename whose source has vanished is a stale edit, not a create. Silently
-            // inserting the destination would resurrect an alias someone else deleted.
-            guard oldRange != nil || newRange != nil else {
+            // The source must exist. Accepting "source or destination" was not enough:
+            // if the source had been deleted while the editor was open but the
+            // destination happened to exist, a stale rename would silently overwrite
+            // the destination's command.
+            guard let oldRange = try rangeOfAlias(named: from, begin: begin, end: end) else {
                 throw WriteError.renameSourceMissing(from)
             }
 
@@ -424,14 +456,14 @@ enum AliasWriter {
                 // drop the old definition. Both edits land in this one set of contents,
                 // so there is no window where the alias exists under neither name.
                 // Higher index first, or removing the earlier one shifts the later.
-                if let oldRange, oldRange.lowerBound > newRange.lowerBound {
+                if oldRange.lowerBound > newRange.lowerBound {
                     output.removeSubrange(oldRange)
                     output.replaceSubrange(newRange, with: [line])
                 } else {
                     output.replaceSubrange(newRange, with: [line])
-                    if let oldRange { output.removeSubrange(oldRange) }
+                    output.removeSubrange(oldRange)
                 }
-            } else if let oldRange {
+            } else {
                 output.replaceSubrange(oldRange, with: [line])
             }
         }
@@ -462,8 +494,23 @@ enum AliasWriter {
     /// Writes via a temp file in the same directory, then `rename`, which is atomic
     /// within a filesystem. Permissions and ownership are copied onto the replacement
     /// first, so the rc file does not silently become mode 600 or change owner.
+    /// Commits the new contents.
+    ///
+    /// **On the limits of this, stated plainly:** `rename(2)` guarantees the file is
+    /// never seen half-written. It guarantees nothing about lost updates. The final
+    /// verification and the rename cannot be made a single atomic operation against an
+    /// arbitrary file, and no cooperative locking exists for rc files — Vim, VS Code,
+    /// and dotfile syncers do not take advisory locks on `.zshrc`, so taking one here
+    /// would protect against nobody.
+    ///
+    /// What is done instead: the check is moved as close to the rename as possible, and
+    /// compares the *content* as well as device, inode, size, and mtime, since a same-
+    /// size edit within one timestamp tick would otherwise slip through. That narrows
+    /// the window to the microseconds between the comparison and the syscall. It does
+    /// not close it. The timestamped backup is the real backstop.
     private static func atomicWrite(_ text: String, to path: String,
-                                    expecting snapshotAtRead: FileSnapshot?) throws {
+                                    expecting snapshotAtRead: FileSnapshot?,
+                                    matching originalContents: String) throws {
         let fm = FileManager.default
         let directory = (path as NSString).deletingLastPathComponent
         let tempPath = directory + "/.aliasbar-write-\(UUID().uuidString)"
@@ -477,10 +524,22 @@ enum AliasWriter {
             throw WriteError.writeFailed(error.localizedDescription)
         }
 
-        // Last check before committing: has anyone else written to this file since we
-        // read it? Narrowing the race to the gap between here and rename(2) is the best
-        // that can be done without holding a lock the rest of the world would ignore.
-        if FileSnapshot.of(path) != snapshotAtRead {
+        // Last check before committing. Metadata first, then content: a same-size edit
+        // landing inside a single mtime tick has identical metadata, so identity alone
+        // would wave it through.
+        let currentSnapshot = FileSnapshot.of(path)
+        let existsNow = fm.fileExists(atPath: path)
+        let unchanged: Bool
+        if !existsNow {
+            // The file being absent is only acceptable if it was absent when we read.
+            unchanged = originalContents.isEmpty && snapshotAtRead == nil
+        } else if currentSnapshot != snapshotAtRead {
+            unchanged = false
+        } else {
+            let now = try? String(contentsOfFile: path, encoding: .utf8)
+            unchanged = (now == originalContents)
+        }
+        guard unchanged else {
             try? fm.removeItem(atPath: tempPath)
             throw WriteError.modifiedElsewhere
         }
