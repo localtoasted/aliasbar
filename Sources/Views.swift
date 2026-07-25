@@ -215,9 +215,13 @@ struct RootView: View {
             } else {
                 KeyHint(keys: "⏎", label: settings.enterAction.short)
                 KeyHint(keys: "⌘⏎", label: settings.enterAction.secondary.short)
+                // The new movement keys earn their place here over ⌘N: a shortcut nobody
+                // can discover is one nobody uses, and ⌘N is already on the sidebar
+                // button in MANAGE.
+                KeyHint(keys: "⌥←→", label: "views")
+                KeyHint(keys: "⌘↑↓", label: "buckets")
                 KeyHint(keys: "⌘N", label: "new")
                 KeyHint(keys: "⌘H", label: "history")
-                if state.mode != .manage { KeyHint(keys: "?", label: "graveyard") }
             }
 
             Spacer()

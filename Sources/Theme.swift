@@ -113,6 +113,17 @@ enum WindowLayout {
     /// Sized so the whole window still clears the Dock at the 20%-from-top position on a
     /// 1280 × 800 display, the smallest ground worth designing for.
     static let bodyHeight: CGFloat = 420
+    /// How many keys BOARD fits across at a given key width.
+    ///
+    /// Computable rather than measured because the window is a fixed width now: the grid
+    /// is adaptive, but it is adapting to a width nothing can change. This is what makes
+    /// ↑ ↓ move by a row in BOARD instead of by one key.
+    static func boardColumns(keyWidth: CGFloat, spacing: CGFloat = 6,
+                             padding: CGFloat = 10) -> Int {
+        let available = windowWidth - padding * 2
+        return max(1, Int((available + spacing) / (keyWidth + spacing)))
+    }
+
     /// How many rows the body holds at rest. Roughly what fits in `bodyHeight`; the list
     /// scrolls past it rather than being clipped, so being a row out is harmless.
     static let restRows = 10

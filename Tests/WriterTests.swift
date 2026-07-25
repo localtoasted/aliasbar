@@ -1822,6 +1822,21 @@ check("a copy keeps the values it was made from", mine.accent == Appearance.grap
 check("a copy is not equal to its source", mine != Appearance.graphite)
 
 // ---------------------------------------------------------------------------
+// Board grid geometry — what makes ↑ ↓ move by a row rather than by one key
+// ---------------------------------------------------------------------------
+
+check("comfortable keys fit six across",
+      WindowLayout.boardColumns(keyWidth: BoardDensity.comfortable.keyWidth) == 6,
+      "got \(WindowLayout.boardColumns(keyWidth: BoardDensity.comfortable.keyWidth))")
+check("dense keys fit more across",
+      WindowLayout.boardColumns(keyWidth: BoardDensity.dense.keyWidth) > 6)
+check("a key wider than the window still leaves one column",
+      WindowLayout.boardColumns(keyWidth: 5000) == 1)
+check("a wider key never means more columns",
+      WindowLayout.boardColumns(keyWidth: 120) <= WindowLayout.boardColumns(keyWidth: 80))
+
+
+// ---------------------------------------------------------------------------
 print("\n" + String(repeating: "-", count: 60))
 print("\(passes) passed, \(failures) failed")
 exit(failures == 0 ? 0 : 1)

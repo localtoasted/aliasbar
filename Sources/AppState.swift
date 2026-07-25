@@ -326,6 +326,7 @@ final class AppState: ObservableObject {
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         let command = flags.contains(.command)
         let control = flags.contains(.control)
+        let option = flags.contains(.option)
 
         switch Int(event.keyCode) {
         case kVK_Escape:
@@ -347,12 +348,36 @@ final class AppState: ObservableObject {
             if command { promoteToAlias(entry) } else { run(entry) }
             return true
 
-        case kVK_DownArrow:
-            move(by: 1)
+        // Buckets are the folders, and ⌘↑ ⌘↓ walk them the way ⌘↑ walks Finder's. They
+        // only mean anything in MANAGE, so they take you there rather than doing nothing.
+        case kVK_UpArrow where command:
+            cycleBucket(by: -1)
             return true
 
-        case kVK_UpArrow:
-            move(by: -1)
+        case kVK_DownArrow where command:
+            cycleBucket(by: 1)
+            return true
+
+        // ⌥← ⌥→ change view, everywhere, always. Plain ← → are left alone in FIND and
+        // MANAGE because the search field is permanently focused and a caret you cannot
+        // move is worse than a shortcut you have to reach for.
+        case kVK_LeftArrow where option:
+            cycleView(backwards: true)
+            return true
+
+        case kVK_RightArrow where option:
+            cycleView(backwards: false)
+            return true
+
+        // BOARD is a grid, so its arrows move in two dimensions: a row at a time
+        // vertically, a key at a time horizontally. Nothing collides with ⌥ — that is
+        // still the view switch here as everywhere else.
+        case kVK_DownArrow where mode == .board:
+            move(by: boardColumns)
+            return true
+
+        case kVK_UpArrow where mode == .board:
+            move(by: -boardColumns)
             return true
 
         case kVK_LeftArrow where mode == .board:
@@ -361,6 +386,14 @@ final class AppState: ObservableObject {
 
         case kVK_RightArrow where mode == .board:
             move(by: 1)
+            return true
+
+        case kVK_DownArrow:
+            move(by: 1)
+            return true
+
+        case kVK_UpArrow:
+            move(by: -1)
             return true
 
         case kVK_Return:
@@ -438,6 +471,20 @@ final class AppState: ObservableObject {
         mode = newMode
         // History is a state of FIND, so leaving FIND leaves it.
         historyMode = false
+        selection = 0
+    }
+
+    var boardColumns: Int {
+        WindowLayout.boardColumns(keyWidth: settings.boardDensity.keyWidth)
+    }
+
+    /// Walks the MANAGE buckets, taking you to MANAGE if you were not there. A shortcut
+    /// that silently did nothing in two of three views would read as broken.
+    private func cycleBucket(by delta: Int) {
+        if mode != .manage { switchTo(.manage) }
+        let all = Bucket.allCases
+        guard let idx = all.firstIndex(of: bucket) else { return }
+        bucket = all[(idx + delta + all.count) % all.count]
         selection = 0
     }
 
