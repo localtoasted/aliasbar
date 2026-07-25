@@ -16,7 +16,19 @@ struct ShellEntry: Identifiable, Hashable {
 // MARK: - Parser
 
 enum ZshrcParser {
-    static var path: String { NSHomeDirectory() + "/.zshrc" }
+    /// Defaults to ~/.zshrc. ALIASBAR_ZSHRC overrides it, for people who keep their
+    /// zsh config elsewhere (e.g. ~/.config/zsh/.zshrc).
+    static var path: String {
+        if let override = ProcessInfo.processInfo.environment["ALIASBAR_ZSHRC"], !override.isEmpty {
+            return (override as NSString).expandingTildeInPath
+        }
+        return NSHomeDirectory() + "/.zshrc"
+    }
+
+    /// The path as shown in the header, abbreviated back to ~ where possible.
+    static var displayPath: String {
+        (path as NSString).abbreviatingWithTildeInPath
+    }
 
     static func parse() -> [ShellEntry] {
         guard let text = try? String(contentsOfFile: path, encoding: .utf8) else { return [] }
@@ -322,7 +334,7 @@ struct ContentView: View {
                 Text("AliasBar")
                     .font(.system(size: 13, weight: .bold))
                 Spacer()
-                Text("~/.zshrc")
+                Text(ZshrcParser.displayPath)
                     .font(.system(size: 10.5, design: .monospaced))
                     .foregroundStyle(.tertiary)
             }
@@ -480,19 +492,176 @@ struct ContentView: View {
     }
 }
 
+// MARK: - Diagnostics
+
+enum Diag {
+    static let path = NSHomeDirectory() + "/Library/Logs/AliasBar-diag.log"
+
+    static func log(_ message: String) {
+        let stamp = ISO8601DateFormatter().string(from: Date())
+        let line = "[\(stamp)] \(message)\n"
+        if let handle = FileHandle(forWritingAtPath: path) {
+            handle.seekToEndOfFile()
+            handle.write(Data(line.utf8))
+            try? handle.close()
+        } else {
+            try? line.write(toFile: path, atomically: true, encoding: .utf8)
+        }
+    }
+}
+
 // MARK: - App
 
-@main
-struct AliasBarApp: App {
-    @StateObject private var store = EntryStore()
+final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
+    private var statusItem: NSStatusItem!
+    private let popover = NSPopover()
+    private let store = EntryStore()
 
-    var body: some Scene {
-        MenuBarExtra {
-            ContentView(store: store)
-        } label: {
-            Text(">_ \(store.entries.count)")
-                .font(.system(size: 12, weight: .semibold, design: .monospaced))
+    private func makeStatusItem() {
+        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        statusItem.autosaveName = "AliasBarStatusItem"
+        statusItem.behavior = []
+
+        if let button = statusItem.button {
+            let symbol = NSImage(systemSymbolName: "terminal", accessibilityDescription: "AliasBar")
+            symbol?.isTemplate = true
+            button.image = symbol
+            // Fallback: if the SF Symbol is unavailable the button would be blank and
+            // indistinguishable from "never got placed". A title guarantees something visible.
+            if symbol == nil { button.title = "\u{003E}_" }
+            button.imagePosition = .imageOnly
+            button.target = self
+            button.action = #selector(togglePopover(_:))
+            button.sendAction(on: [.leftMouseUp, .rightMouseUp])
         }
-        .menuBarExtraStyle(.window)
+        statusItem.isVisible = true
+    }
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        makeStatusItem()
+
+        let hosting = NSHostingController(rootView: ContentView(store: store))
+        hosting.sizingOptions = [.preferredContentSize]
+        popover.contentViewController = hosting
+        popover.behavior = .transient
+        popover.animates = false
+        popover.delegate = self
+
+        // Placement can silently fail on crowded / notched menu bars. Report it rather
+        // than leaving the app running invisibly.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+            self?.reportPlacement()
+        }
+    }
+
+    /// The horizontal band occupied by the camera housing, if this screen has one.
+    /// macOS exposes the usable areas either side of it; the notch is the gap between them.
+    private func notchBand(on screen: NSScreen?) -> ClosedRange<CGFloat>? {
+        guard let screen,
+              let left = screen.auxiliaryTopLeftArea,
+              let right = screen.auxiliaryTopRightArea,
+              left.maxX < right.minX
+        else { return nil }
+        return left.maxX...right.minX
+    }
+
+    private func placementIsBad() -> (bad: Bool, offscreen: Bool, underNotch: Bool) {
+        guard let window = statusItem.button?.window else { return (true, false, false) }
+        let frame = window.frame
+        let screen = window.screen ?? NSScreen.main
+        let screenFrame = screen?.frame ?? .zero
+        let band = notchBand(on: screen)
+
+        let offscreen = !screenFrame.isEmpty && !screenFrame.intersects(frame)
+        // Any overlap with the notch band means part of the icon is undrawable.
+        let underNotch = band.map { frame.maxX > $0.lowerBound && frame.minX < $0.upperBound } ?? false
+
+        Diag.log("item frame=\(NSStringFromRect(frame)) visible=\(statusItem.isVisible) "
+                 + "screen=\(NSStringFromRect(screenFrame)) "
+                 + "notchBand=\(band.map { "\($0.lowerBound)...\($0.upperBound)" } ?? "none") "
+                 + "offscreen=\(offscreen) underNotch=\(underNotch)")
+
+        return (offscreen || underNotch || frame.width < 1, offscreen, underNotch)
+    }
+
+    private static let positionKey = "NSStatusItem Preferred Position AliasBarStatusItem"
+
+    /// A newly created status item is not positioned until AppKit gets a run loop turn,
+    /// so every measurement has to wait before it means anything.
+    private func settle() async {
+        try? await Task.sleep(nanoseconds: 600_000_000)
+    }
+
+    private func reportPlacement() {
+        Task { @MainActor in
+            await settle()
+            guard placementIsBad().bad else {
+                Diag.log("OK placement looks good")
+                return
+            }
+
+            // Rescue: macOS honours a persisted preferred position per autosave name.
+            // Nudging it can pull the item out of the notch band.
+            for position in [CGFloat(0), 200, 400, 800, 1600] {
+                UserDefaults.standard.set(position, forKey: Self.positionKey)
+                rebuildStatusItem()
+                await settle()
+                if !placementIsBad().bad {
+                    Diag.log("OK rescue succeeded at preferred position \(position)")
+                    return
+                }
+            }
+
+            UserDefaults.standard.removeObject(forKey: Self.positionKey)
+            rebuildStatusItem()
+            await settle()
+
+            let result = placementIsBad()
+            Diag.log("FAIL placement unrecoverable offscreen=\(result.offscreen) underNotch=\(result.underNotch)")
+            warnNotPlaced(reason: result.offscreen
+                ? "AliasBar's icon was pushed off the edge of the menu bar."
+                : "AliasBar's icon landed underneath the camera notch, where macOS cannot draw it.")
+        }
+    }
+
+    private func rebuildStatusItem() {
+        NSStatusBar.system.removeStatusItem(statusItem)
+        makeStatusItem()
+    }
+
+    private func warnNotPlaced(reason: String) {
+        let alert = NSAlert()
+        alert.messageText = "AliasBar is running, but you can't see it"
+        alert.informativeText = reason
+            + "\n\nYour menu bar is full. Quit or hide another menu bar item (or use a manager like Ice/Bartender) and AliasBar will appear.\n\nDetails: ~/Library/Logs/AliasBar-diag.log"
+        alert.addButton(withTitle: "OK")
+        alert.addButton(withTitle: "Quit AliasBar")
+        NSApp.activate(ignoringOtherApps: true)
+        if alert.runModal() == .alertSecondButtonReturn { NSApp.terminate(nil) }
+    }
+
+    @objc private func togglePopover(_ sender: Any?) {
+        guard let button = statusItem.button else { return }
+        if popover.isShown {
+            popover.performClose(sender)
+            return
+        }
+        store.reload()
+        NSApp.activate(ignoringOtherApps: true)
+        popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+        popover.contentViewController?.view.window?.makeKey()
+    }
+}
+
+@main
+enum AliasBarMain {
+    // NSApplication.delegate is weak, so the delegate has to be owned somewhere durable.
+    static let delegate = AppDelegate()
+
+    static func main() {
+        let app = NSApplication.shared
+        app.delegate = delegate
+        app.setActivationPolicy(.accessory)
+        app.run()
     }
 }
