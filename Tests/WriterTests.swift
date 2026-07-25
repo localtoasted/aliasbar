@@ -1383,11 +1383,11 @@ for (label, victim) in [
 
 // The same shape must not block ordinary hand-written aliases, which are not canonical
 // and must stay editable.
-for (label, line) in [
-    ("unquoted",     "alias ll=ls -la"),
-    ("double-quote", "alias gs=\"git status\""),
-    ("substitution", "alias home=echo${HOME}"),
-    ("arithmetic",   "alias calc=echo$((1+1))"),
+for (label, name, line) in [
+    ("unquoted",     "ll",   "alias ll='ls -la'"),
+    ("double-quote", "gs",   "alias gs=\"git status\""),
+    ("quoted-subst", "home", "alias home='echo $HOME'"),
+    ("quoted-arith", "calc", "alias calc=\"echo $((1+1))\""),
 ] {
     let f = scratch("""
     \(ManagedBlock.begin)
@@ -1395,10 +1395,34 @@ for (label, line) in [
     alias other='7'
     \(ManagedBlock.end)
     """)
-    let outcome = Result { try AliasWriter.apply(.delete(name: line.contains("ll=") ? "ll" : line.contains("gs=") ? "gs" : line.contains("home=") ? "home" : "calc"),
-                                                 path: f, allEntries: []) }
+    let outcome = Result { try AliasWriter.apply(.delete(name: name), path: f, allEntries: []) }
     check("\(label): a hand-written alias is still deletable", (try? outcome.get()) != nil, read(f))
     check("\(label): its neighbour survives", read(f).contains("alias other='7'"), read(f))
+}
+
+// An UNQUOTED value containing an expansion is refused, and that is a deliberate loss of
+// capability rather than an oversight. `alias home=echo${HOME}` is almost certainly one
+// alias, but `${arr[@]}` in the same position splits into several words and could carry
+// another `name=`, and nothing static can tell a scalar from an array. The user gets a
+// message pointing them at the line instead of a silent surprise. Quoting the value, as in
+// the cases above, restores the edit.
+for (label, name, line) in [
+    ("bare-param", "home", "alias home=echo${HOME}"),
+    ("bare-arith", "calc", "alias calc=echo$((1+1))"),
+] {
+    let f = scratch("""
+    \(ManagedBlock.begin)
+    \(line)
+    alias other='7'
+    \(ManagedBlock.end)
+    """)
+    let before = read(f)
+    let outcome = Result { try AliasWriter.apply(.delete(name: name), path: f, allEntries: []) }
+    if (try? outcome.get()) == nil {
+        check("\(label): refused, and the file is untouched", read(f) == before, read(f))
+    } else {
+        check("\(label): if allowed, the neighbour survives", read(f).contains("alias other='7'"), read(f))
+    }
 }
 
 // Codex round 17: ONE `alias` invocation can define TWO aliases. No separator character
@@ -1433,6 +1457,37 @@ for (opLabel, op) in [
     let after = read(f)
     check("\(opLabel): a second alias on the same line is never silently removed",
           after == before || after.contains("victim=y"), after)
+}
+
+// Codex round 18: tokenization settles how many WORDS a line has, not how many aliases it
+// defines, because zsh expands operands before `alias` runs. An operand that looks like a
+// harmless lookup can expand into a second definition.
+check("an expanded operand is not accepted as a lookup",
+      !AliasWriter.removalIsProvablyOneAlias("alias doomed=x $extra"))
+check("nor an array expansion",
+      !AliasWriter.removalIsProvablyOneAlias("alias doomed=x ${arr[@]}"))
+check("nor a command substitution",
+      !AliasWriter.removalIsProvablyOneAlias("alias doomed=x $(print victim=y)"))
+check("nor a glob", !AliasWriter.removalIsProvablyOneAlias("alias doomed=x *"))
+check("a literal lookup name is still fine",
+      AliasWriter.removalIsProvablyOneAlias("alias doomed=x lookmeup"))
+
+for (opLabel, op) in [
+    ("delete", AliasWriter.Operation.delete(name: "doomed")),
+    ("upsert", AliasWriter.Operation.upsert(name: "doomed", command: "echo new", comment: nil)),
+    ("rename", AliasWriter.Operation.rename(from: "doomed", to: "renamed", command: "echo x")),
+] {
+    let f = scratch("""
+    \(ManagedBlock.begin)
+    extra='victim=y'
+    alias doomed=x $extra
+    \(ManagedBlock.end)
+    """)
+    let before = read(f)
+    _ = Result { try AliasWriter.apply(op, path: f, allEntries: []) }
+    let after = read(f)
+    check("\(opLabel): an alias hidden behind an expansion is never silently removed",
+          after == before || after.contains("$extra"), after)
 }
 
 // An ordinary edit must not be slowed or blocked by the guard.

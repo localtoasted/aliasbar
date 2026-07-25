@@ -495,7 +495,7 @@ enum AliasWriter {
         words=(${(z)line})
         [[ ${words[1]} == alias ]] || exit 1
         shift words
-        assignments=()
+        operands=()
         for w in $words; do
           # A `#` opening a word starts a comment: the statement is over, harmlessly.
           [[ $w == '#'* ]] && break
@@ -505,12 +505,9 @@ enum AliasWriter {
           case $w in
             ';'|'|'|'||'|'&'|'&&'|'('|')'|'{'|'}'|'&|'|';;'|'|&') exit 1 ;;
           esac
-          # An operand without `=` is an alias LOOKUP, not a definition. `alias a=1 b`
-          # defines `a` and prints `b`; removing the line takes no definition but `a`.
-          [[ $w == *=* ]] && assignments+=($w)
+          operands+=($w)
         done
-        (( ${#assignments} == 1 )) || exit 1
-        print -r -- ${assignments[1]}
+        print -rN -- $operands
         """
         let task = Process()
         task.executableURL = URL(fileURLWithPath: "/bin/zsh")
@@ -523,9 +520,42 @@ enum AliasWriter {
         task.waitUntilExit()
         guard task.terminationStatus == 0 else { return nil }
 
-        let word = String(data: data, encoding: .utf8)?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        return word.contains("=") ? word : nil
+        guard let joined = String(data: data, encoding: .utf8) else { return nil }
+        let operands = joined.split(separator: "\0", omittingEmptySubsequences: true).map(String.init)
+
+        // Tokenization settles how many *words* there are. It cannot settle how many
+        // aliases the command defines, because zsh expands operands before `alias` runs.
+        // Codex round 18: with `extra='victim=y'`, the line `alias doomed=x $extra` has a
+        // single `=` word at token level and defines two aliases at runtime.
+        //
+        // So an operand is only accepted as a lookup when it is a literal alias name, by
+        // the same allowlist a write uses. That is an allowlist rather than a blacklist of
+        // expansion syntax, which matters: `$`, backticks, `~`, globs and `${arr[@]}` are
+        // all excluded because they are not in the set, not because they were enumerated.
+        var assignment: String?
+        for operand in operands {
+            guard let eq = operand.firstIndex(of: "=") else {
+                guard isLiteralAliasName(operand) else { return nil }
+                continue
+            }
+            guard assignment == nil else { return nil }
+            // The value may contain anything as long as it cannot split into a second word.
+            // A quoted value never word-splits. An unquoted one is only safe with no
+            // expansion at all, since `${arr[@]}` splits and could carry another `name=`.
+            let value = String(operand[operand.index(after: eq)...])
+            let quoted = (value.first == "'" && value.last == "'" && value.count >= 2)
+                || (value.first == "\"" && value.last == "\"" && value.count >= 2)
+            guard quoted || !(value.contains("$") || value.contains("`")) else { return nil }
+            assignment = operand
+        }
+        return assignment
+    }
+
+    /// Whether `word` is a bare alias name, using the same allowlist a write validates against.
+    private static func isLiteralAliasName(_ word: String) -> Bool {
+        let allowed = CharacterSet(charactersIn:
+            "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.:@+-")
+        return !word.isEmpty && word.unicodeScalars.allSatisfy { allowed.contains($0) }
     }
 
     /// The inverse of `quote(_:)` for canonically quoted values, or nil for anything else.
