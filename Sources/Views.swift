@@ -191,7 +191,7 @@ struct RootView: View {
                 Text(error)
                     .font(.system(size: 10))
                     .foregroundStyle(theme.dim)
-                    .lineLimit(1)
+                    .lineLimit(2)
             } else if state.historyMode {
                 KeyHint(keys: "⏎", label: "run it")
                 KeyHint(keys: "⌘⏎", label: "make an alias")

@@ -57,8 +57,29 @@ cat > "${APP_BUNDLE}/Contents/Info.plist" <<'PLIST'
 </plist>
 PLIST
 
-echo "==> Ad-hoc codesigning"
-codesign --force --deep -s - "${APP_BUNDLE}"
+# Signing identity.
+#
+# This matters far more than it looks. macOS pins an Accessibility grant to the
+# identity of the thing it was granted to. Ad-hoc signing ("-") has no stable
+# identity, so the grant is pinned to that exact binary's hash — and every rebuild
+# produces a new hash, silently voiding it. The entry stays visible and switched on
+# in System Settings while AXIsProcessTrusted() returns false, so the app appears to
+# have permission and behaves as though it does not.
+#
+# Signing with a self-signed certificate instead pins the grant to the certificate,
+# which does not change when the code does. Run tools/create-signing-identity.sh once
+# and every rebuild after that keeps the permission.
+SIGN_IDENTITY="${ALIASBAR_SIGN_IDENTITY:-AliasBar Local Signing}"
+if security find-identity -v -p codesigning 2>/dev/null | grep -q "${SIGN_IDENTITY}"; then
+    echo "==> Codesigning as ${SIGN_IDENTITY}"
+    codesign --force --deep -s "${SIGN_IDENTITY}" "${APP_BUNDLE}"
+else
+    echo "==> Ad-hoc codesigning"
+    echo "    NOTE: no stable signing identity, so this build voids any Accessibility"
+    echo "    permission you granted a previous one. Run tools/create-signing-identity.sh"
+    echo "    once to stop that happening."
+    codesign --force --deep -s - "${APP_BUNDLE}"
+fi
 
 echo "==> Installing to ${INSTALL_PATH}"
 mkdir -p "${INSTALL_DIR}"

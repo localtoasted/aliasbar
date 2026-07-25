@@ -484,9 +484,13 @@ final class AppState: ObservableObject {
                 let pasteboard = NSPasteboard.general
                 pasteboard.clearContents()
                 pasteboard.setString(payload, forType: .string)
-                show(toast: "Copied. Allow Accessibility to paste automatically.")
+                // Deliberately no `finish()`. Closing here is what made this look like
+                // the app doing nothing at all: the window carrying the only explanation
+                // went away in the same frame the explanation was written to it, and the
+                // system prompt that appeared instead had no visible cause. When we could
+                // not do what was asked, the window stays up and says so.
+                errorMessage = "Needs Accessibility to paste — copied instead, ⌘V to use it."
                 Typist.requestTrust()
-                finish()
                 return
             }
             // The target app has to be frontmost before the keystroke is sent, so the
