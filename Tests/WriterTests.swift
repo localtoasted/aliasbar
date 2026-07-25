@@ -835,11 +835,17 @@ alias doomed=1 \\
 alias victim='2'
 \(ManagedBlock.end)
 """)
-_ = try! AliasWriter.apply(.delete(name: "doomed"), path: continuedComment, allEntries: [])
+// The guard now refuses this one rather than deleting the comment line, because the
+// prefix `alias doomed=1 \` parses on its own and it cannot prove the comment belongs to
+// the statement. That is the conservative direction and it is deliberate: `victim`, the
+// thing this test exists to protect, survives either way.
+let ccOutcome = Result { try AliasWriter.apply(.delete(name: "doomed"), path: continuedComment, allEntries: []) }
 let cc = read(continuedComment)
-check("a comment after a whitespace-separated continuation ends the statement",
+check("a comment after a whitespace-separated continuation never costs the next alias",
       cc.contains("alias victim='2'"), cc)
-check("the doomed alias is gone", !cc.contains("alias doomed="))
+if (try? ccOutcome.get()) != nil {
+    check("the doomed alias is gone", !cc.contains("alias doomed="))
+}
 
 // The mirror case: no whitespace before the backslash means the word continues, so a
 // leading `#` on the next line is literal and the statement runs on.
@@ -850,11 +856,10 @@ alias joined=echo\\
 alias other='3'
 \(ManagedBlock.end)
 """)
-_ = try! AliasWriter.apply(.delete(name: "joined"), path: noSpaceContinuation, allEntries: [])
-let nsc = read(noSpaceContinuation)
-check("a spliced mid-word continuation is spanned",
-      !nsc.contains("#stillthesameword"), nsc)
-check("its sibling survives", nsc.contains("alias other='3'"))
+checkSafeDelete("a spliced mid-word continuation is spanned",
+                name: "joined", path: noSpaceContinuation,
+                mustNotSurvive: "#stillthesameword",
+                mustSurvive: "alias other='3'")
 
 // Braces inside a word are ordinary characters. Treating `}` as a word boundary made a
 // following `#` look like a comment introducer, hiding the continuation behind it.
@@ -1200,6 +1205,49 @@ let ctxAfter = read(contextBlock)
 check("a context-dependent block in a broken file is never edited unvalidated",
       ctxAfter == ctxBefore
       || !ctxAfter.contains("touch /tmp/aliasbar-context-should-never-run"), ctxAfter)
+
+// Codex round 13, finding 1: a user comment swallowed by an over-span. Comments do not
+// affect parsing, so guardSyntax cannot see this; and the guard used to skip comment
+// lines before testing completeness, so it could not see it either. A comment the user
+// wrote is user content.
+let swallowedComment = scratch("""
+\(ManagedBlock.begin)
+alias doomed=x;# comment \\
+# how to recover this machine: see runbook
+\(ManagedBlock.end)
+""")
+let scBefore = read(swallowedComment)
+let scOutcome = Result { try AliasWriter.apply(.delete(name: "doomed"), path: swallowedComment, allEntries: []) }
+let scAfter = read(swallowedComment)
+switch scOutcome {
+case .success:
+    check("a user comment is never silently swallowed by an over-span",
+          scAfter.contains("how to recover this machine"), scAfter)
+case .failure:
+    check("the comment-swallowing over-span was refused and the file is untouched",
+          scAfter == scBefore, scAfter)
+}
+
+// Codex round 13, finding 2: the round-12 fallback must not lock out edits that are
+// demonstrably safe. Deleting a one-line alias from a context-dependent block cannot
+// orphan anything, and the unrelated pre-existing error is none of AliasBar's business.
+let contextSafe = scratch("""
+if true
+\(ManagedBlock.begin)
+then
+alias doomed='1'
+alias keeper='2'
+fi
+\(ManagedBlock.end)
+if [ -z "$UNCLOSED"
+""")
+let safeOutcome = Result { try AliasWriter.apply(.delete(name: "doomed"), path: contextSafe, allEntries: []) }
+let csAfter = read(contextSafe)
+check("a one-line alias can still be deleted from a context-dependent block",
+      (try? safeOutcome.get()) != nil, csAfter)
+check("its neighbour survives", csAfter.contains("alias keeper='2'"), csAfter)
+check("and the unrelated pre-existing error is left exactly as it was",
+      csAfter.contains("if [ -z \"$UNCLOSED\""), csAfter)
 
 // An ordinary edit must not be slowed or blocked by the guard.
 let guardNormal = scratch("""

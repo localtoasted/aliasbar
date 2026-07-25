@@ -326,7 +326,7 @@ enum AliasWriter {
         case .upsert: destructive = false
         case .delete, .rename: destructive = true
         }
-        try guardSyntax(original: original, rewritten: text, destructive: destructive)
+        try guardSyntax(original: original, rewritten: text, destructive: destructive, removed: removedSpans)
         try guardCollateral(removed: removedSpans)
 
         let backup = try writeBackup(of: original, for: target)
@@ -367,13 +367,19 @@ enum AliasWriter {
         // same diff mangled a rename onto an existing name, which performs two *disjoint*
         // edits and so reported everything between them as collateral. Knowing the exact
         // ranges removes both problems rather than patching them.
+        // Completeness is tested BEFORE looking at what the line contains. An earlier
+        // version skipped blank and comment lines first, which Codex round 13 caught: when
+        // the span wrongly runs past `alias doomed=x;# comment \`, a following line like
+        // `# how to recover this machine` was dropped without a word, and since comments
+        // do not affect parsing, guardSyntax saw nothing wrong either. A comment the user
+        // wrote is user content. If the statement was already finished above this line,
+        // the line is not part of it, whatever it happens to say.
         for span in removed where span.count > 1 {
             for index in 1..<span.count {
-                let bare = span[index].trimmingCharacters(in: .whitespaces)
-                if bare.isEmpty || bare.hasPrefix("#") { continue }
                 let above = span[0..<index].joined(separator: "\n") + "\n"
                 guard let (completeAbove, _) = parses(above), completeAbove else { continue }
-                throw WriteError.collateralDamage("`\(bare)`")
+                let bare = span[index].trimmingCharacters(in: .whitespaces)
+                throw WriteError.collateralDamage(bare.isEmpty ? "a blank line" : "`\(bare)`")
             }
         }
     }
@@ -413,7 +419,8 @@ enum AliasWriter {
     /// the app over a pre-existing problem AliasBar did not cause and cannot fix.
     private static func guardSyntax(original: String,
                                     rewritten: String,
-                                    destructive: Bool) throws {
+                                    destructive: Bool,
+                                    removed: [[String]]) throws {
         // Nothing to compare against if zsh is not where it should be. Not a reason to
         // block an edit; the rest of the writer's guards still apply.
         guard FileManager.default.isExecutableFile(atPath: "/bin/zsh") else { return }
@@ -439,16 +446,25 @@ enum AliasWriter {
         guard let (newOK, complaint) = parses(rewritten) else { return }
         if newOK { return }
 
-        // The result does not parse. If the block cannot be validated on its own either,
-        // there is nothing left that can vouch for a destructive edit, so refuse it.
+        // The result does not parse, and the file did not parse before either. If the block
+        // cannot be validated on its own, neither baseline can vouch for a destructive
+        // edit, so the edit has to vouch for itself.
         //
         // Codex round 12: a managed block can sit inside a compound construct (an `if true`
         // above the begin marker, `fi` below the end marker), which makes its body
         // context-dependent and unparseable in isolation through no fault of the user.
         // Combined with an unrelated syntax error elsewhere in the file, both checks used
-        // to opt out and a truncating edit committed. An upsert is still allowed through,
-        // since adding or replacing a definition in place cannot orphan a fragment.
-        if destructive, !bodyWasOK {
+        // to opt out and a truncating edit committed.
+        //
+        // Round 13 then caught the overcorrection: refusing outright locked out edits that
+        // are demonstrably safe, such as deleting a one-line `alias doomed='1'`, which
+        // cannot orphan anything and leaves the pre-existing error exactly as it was. So
+        // the test is whether every span being removed is a complete statement on its own.
+        // If each one is, removing it cannot leave a fragment behind, and the edit is
+        // allowed even though neither baseline could confirm it. An upsert never reaches
+        // here, since replacing a definition in place cannot orphan a fragment.
+        if destructive, !bodyWasOK,
+           !removed.allSatisfy({ parses($0.joined(separator: "\n") + "\n")?.0 ?? false }) {
             throw WriteError.wouldBreakSyntax(complaint)
         }
 
