@@ -350,82 +350,63 @@ enum AliasWriter {
     private static func guardCollateral(before: [String],
                                         after: [String],
                                         operation: Operation) throws {
-        guard let defsBefore = try? blockDefinitions(in: before),
-              let defsAfter = try? blockDefinitions(in: after) else { return }
-
-        // What the caller actually asked to disappear. Everything else must survive.
-        let intended: String?
+        // Only a removal can lose content. An upsert appends or replaces in place.
         switch operation {
-        case .delete(let name):    intended = "alias \(name)"
-        case .rename(let from, _, _): intended = "alias \(from)"
-        case .upsert:              intended = nil
+        case .upsert: return
+        case .delete, .rename: break
+        }
+        guard let beforeBody = try? blockBody(of: before),
+              let afterBody = try? blockBody(of: after) else { return }
+
+        // rewrite() removes a contiguous run, so the lines that disappeared are whatever
+        // sits between the common prefix and the common suffix.
+        var head = 0
+        while head < beforeBody.count, head < afterBody.count,
+              beforeBody[head] == afterBody[head] { head += 1 }
+        var tail = 0
+        while tail < beforeBody.count - head, tail < afterBody.count - head,
+              beforeBody[beforeBody.count - 1 - tail] == afterBody[afterBody.count - 1 - tail] {
+            tail += 1
+        }
+        let removed = Array(beforeBody[head..<(beforeBody.count - tail)])
+        guard removed.count > 1 else { return }
+
+        // The first removed line is the definition that was targeted. Every line after it
+        // is only legitimately gone if it was a *continuation* of that definition.
+        //
+        // The test is not "does this line stand alone" — inside a legacy multiline alias,
+        // `echo two` stands alone perfectly well and is still a continuation. The test is
+        // whether the statement was **already complete before this line**. If zsh can
+        // parse everything above it as a finished statement, then this line starts a new
+        // one and the edit was about to take it out along with the target.
+        // Names this operation is allowed to remove. A rename onto a name that already
+        // exists inside the block legitimately collapses two definitions into one, so the
+        // destination counts as intended too.
+        var permitted: Set<String> = []
+        switch operation {
+        case .delete(let name):        permitted = [name]
+        case .rename(let from, let to, _): permitted = [from, to]
+        case .upsert:                  break
         }
 
-        // A multiset, not a set. Two definitions can share a name, and losing one of a
-        // duplicated pair has to register as a loss rather than cancel out.
-        var lost: [String] = []
-        var remaining = defsAfter
-        for def in defsBefore {
-            if let idx = remaining.firstIndex(of: def) {
-                remaining.remove(at: idx)
-            } else {
-                lost.append(def)
-            }
-        }
-        if let intended, let idx = lost.firstIndex(of: intended) { lost.remove(at: idx) }
+        for index in 1..<removed.count {
+            let bare = removed[index].trimmingCharacters(in: .whitespaces)
+            if bare.isEmpty || bare.hasPrefix("#") { continue }
+            if bare.hasPrefix("alias "),
+               let (name, _) = ZshrcParser.splitAliasAssignment(String(bare.dropFirst("alias ".count))),
+               permitted.contains(name) { continue }
 
-        guard lost.isEmpty else {
-            throw WriteError.collateralDamage(lost.map { "`\($0)`" }.joined(separator: ", "))
+            let above = removed[0..<index].joined(separator: "\n") + "\n"
+            guard let (completeAbove, _) = parses(above), completeAbove else { continue }
+            throw WriteError.collateralDamage("`\(bare)`")
         }
     }
 
-    /// Every line inside the managed block that independently defines something.
-    ///
-    /// Deliberately not limited to aliases. An earlier version compared alias names only,
-    /// and Codex round 10 found the hole immediately: a wrong span that swallowed
-    /// `export IMPORTANT=value` along with its target produced a file that still parsed
-    /// and still had every alias name, so both guards waved it through. `rewrite` promises
-    /// to preserve comments, functions, and hand-repairs inside the block, and this is
-    /// what actually holds it to that promise.
-    ///
-    /// Comments are excluded on purpose: a comment is the one thing that genuinely
-    /// belongs to the definition above it and is expected to leave with it.
-    ///
-    /// This is a conservative recogniser, not a parser. It can refuse an edit that was in
-    /// fact fine, when a continuation line happens to look like an assignment. That
-    /// direction is the safe one: the user is told to edit the line by hand, and nothing
-    /// is lost.
-    private static func blockDefinitions(in lines: [String]) throws -> [String] {
+    /// The lines inside the managed block, verbatim.
+    private static func blockBody(of lines: [String]) throws -> [String] {
         let bounds = try locateBlock(in: lines)
-        var found: [String] = []
-        guard let begin = bounds.begin, let end = bounds.end, end > begin + 1 else {
-            return found
-        }
-        for i in (begin + 1)..<end {
-            let line = lines[i].trimmingCharacters(in: .whitespaces)
-            if line.isEmpty || line.hasPrefix("#") { continue }
-
-            if line.hasPrefix("alias ") {
-                let rest = String(line.dropFirst("alias ".count))
-                if let (name, _) = ZshrcParser.splitAliasAssignment(rest) {
-                    found.append("alias \(name)")
-                    continue
-                }
-            }
-            for keyword in ["export ", "function ", "unalias ", "source ", "eval ", "setopt "]
-            where line.hasPrefix(keyword) {
-                found.append(line)
-            }
-            // `NAME=value` and `name() {`, neither of which starts with a keyword.
-            if let eq = line.firstIndex(of: "="),
-               eq > line.startIndex,
-               line[line.startIndex..<eq].allSatisfy({ $0.isLetter || $0.isNumber || $0 == "_" }) {
-                found.append(line)
-            } else if line.contains("()") {
-                found.append(line)
-            }
-        }
-        return found
+        guard let begin = bounds.begin, let end = bounds.end, end > begin + 1 else { return [] }
+        return Array(lines[(begin + 1)..<end])
     }
 
     // MARK: - Syntax guard
@@ -459,11 +440,29 @@ enum AliasWriter {
         // block an edit; the rest of the writer's guards still apply.
         guard FileManager.default.isExecutableFile(atPath: "/bin/zsh") else { return }
 
+        // The managed block is AliasBar's own territory, and it is checked separately from
+        // the file around it. Codex round 11: skipping the whole check whenever the file
+        // was already broken left the truncation direction unguarded on exactly the path
+        // this method claims to support. A file with an unrelated syntax error elsewhere
+        // plus `alias doomed=$(print one` / `touch /tmp/side-effect` / `)` would truncate
+        // to one line, orphan the `touch` as a standalone command, and commit, because
+        // both before and after already failed at file level. Checking the block in
+        // isolation catches that: the leftover `)` does not parse.
+        if let beforeBody = try? blockBody(of: original.components(separatedBy: "\n")),
+           let afterBody = try? blockBody(of: rewritten.components(separatedBy: "\n")),
+           let (bodyWasOK, _) = parses(beforeBody.joined(separator: "\n") + "\n"),
+           bodyWasOK,
+           let (bodyNowOK, bodyWhy) = parses(afterBody.joined(separator: "\n") + "\n"),
+           !bodyNowOK {
+            throw WriteError.wouldBreakSyntax(bodyWhy)
+        }
+
         guard let (newOK, complaint) = parses(rewritten) else { return }
         if newOK { return }
 
-        // The result does not parse. Only refuse if the input did, so that a file which
-        // was already broken does not become permanently uneditable.
+        // At file level, only refuse if the input parsed, so that a file which was already
+        // broken by something AliasBar did not cause does not become permanently
+        // uneditable. The block-level check above is what keeps that path honest.
         guard let (oldOK, _) = parses(original), oldOK else { return }
 
         throw WriteError.wouldBreakSyntax(complaint)

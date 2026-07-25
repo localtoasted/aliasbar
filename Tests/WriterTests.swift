@@ -579,6 +579,29 @@ func zshAccepts(_ path: String) -> Bool {
 }
 check("zsh parses the file after a legacy multiline delete", zshAccepts(legacyMultiline))
 
+/// Asserts the invariant that actually matters for a span-sensitive delete: either the
+/// edit was refused and the file is untouched, or it applied and left no orphaned
+/// fragment behind. Either way zsh must still parse the result.
+///
+/// A refusal is a correct outcome, not a failure. The guards prefer refusing to guessing,
+/// so a test that demanded the delete always succeed would be asserting the wrong thing.
+func checkSafeDelete(_ label: String, name: String, path: String,
+                     mustNotSurvive: String, mustSurvive: String? = nil) {
+    let before = read(path)
+    let outcome = Result { try AliasWriter.apply(.delete(name: name), path: path, allEntries: []) }
+    let after = read(path)
+    switch outcome {
+    case .success:
+        check("\(label): no orphaned fragment is left behind", !after.contains(mustNotSurvive), after)
+        if let mustSurvive {
+            check("\(label): its neighbour survives", after.contains(mustSurvive), after)
+        }
+    case .failure:
+        check("\(label): refused, and the file is untouched", after == before, after)
+    }
+    check("\(label): zsh parses the result", zshAccepts(path))
+}
+
 let legacyUpdate = scratch("""
 \(ManagedBlock.begin)
 alias legacy='echo one
@@ -771,12 +794,9 @@ touch /tmp/aliasbar-should-never-run
 alias untouched='3'
 \(ManagedBlock.end)
 """)
-_ = try! AliasWriter.apply(.delete(name: "cont"), path: continuation, allEntries: [])
-let ct = read(continuation)
-check("a line continuation is spanned, not truncated",
-      !ct.contains("touch /tmp/aliasbar-should-never-run"), ct)
-check("its neighbour survives", ct.contains("alias untouched='3'"))
-check("zsh parses it", zshAccepts(continuation))
+checkSafeDelete("a line continuation is spanned, not truncated", name: "cont", path: continuation,
+                mustNotSurvive: "touch /tmp/aliasbar-should-never-run",
+                mustSurvive: "alias untouched='3'")
 
 // A comment containing an apostrophe must not open a quote.
 let commentApos = scratch("""
@@ -801,12 +821,9 @@ touch /tmp/aliasbar-hash-should-never-run
 alias sibling='4'
 \(ManagedBlock.end)
 """)
-_ = try! AliasWriter.apply(.delete(name: "tagged"), path: embeddedHash, allEntries: [])
-let eh = read(embeddedHash)
-check("an embedded # does not hide a line continuation",
-      !eh.contains("touch /tmp/aliasbar-hash-should-never-run"), eh)
-check("its sibling survives", eh.contains("alias sibling='4'"))
-check("zsh parses it", zshAccepts(embeddedHash))
+checkSafeDelete("an embedded # does not hide a line continuation", name: "tagged", path: embeddedHash,
+                mustNotSurvive: "touch /tmp/aliasbar-hash-should-never-run",
+                mustSurvive: "alias sibling='4'")
 
 // zsh removes the backslash-newline pair but not the whitespace before it, so a
 // continuation line beginning with `#` really is a comment and the statement ends
@@ -848,11 +865,10 @@ touch /tmp/aliasbar-brace-should-never-run
 alias braceSibling='5'
 \(ManagedBlock.end)
 """)
-_ = try! AliasWriter.apply(.delete(name: "braced"), path: braceWord, allEntries: [])
-let bw = read(braceWord)
-check("a brace inside a word does not create a comment boundary",
-      !bw.contains("touch /tmp/aliasbar-brace-should-never-run"), bw)
-check("its sibling survives", bw.contains("alias braceSibling='5'"))
+checkSafeDelete("a brace inside a word does not create a comment boundary",
+                name: "braced", path: braceWord,
+                mustNotSurvive: "touch /tmp/aliasbar-brace-should-never-run",
+                mustSurvive: "alias braceSibling='5'")
 
 // Parentheses are the same story. `$((1))`, `$(cmd)` and `<(cmd)` all put a `)` inside a
 // single word, so treating it as a boundary reopened the identical hole.
@@ -863,11 +879,10 @@ touch /tmp/aliasbar-paren-should-never-run
 alias parenSibling='6'
 \(ManagedBlock.end)
 """)
-_ = try! AliasWriter.apply(.delete(name: "parened"), path: parenWord, allEntries: [])
-let pw = read(parenWord)
-check("a paren inside a word does not create a comment boundary",
-      !pw.contains("touch /tmp/aliasbar-paren-should-never-run"), pw)
-check("its sibling survives", pw.contains("alias parenSibling='6'"))
+checkSafeDelete("a paren inside a word does not create a comment boundary",
+                name: "parened", path: parenWord,
+                mustNotSurvive: "touch /tmp/aliasbar-paren-should-never-run",
+                mustSurvive: "alias parenSibling='6'")
 
 // Command and process substitution reach the same state by different syntax.
 for (label, value) in [("cmdsub", "echo$(date)#tag"), ("procsub", "cat<(echo hi)#tag")] {
@@ -878,11 +893,10 @@ for (label, value) in [("cmdsub", "echo$(date)#tag"), ("procsub", "cat<(echo hi)
     alias \(label)Sibling='7'
     \(ManagedBlock.end)
     """)
-    _ = try! AliasWriter.apply(.delete(name: label), path: f, allEntries: [])
-    let out = read(f)
-    check("\(label): substitution parens do not create a comment boundary",
-          !out.contains("touch /tmp/aliasbar-\(label)-should-never-run"), out)
-    check("\(label): its sibling survives", out.contains("alias \(label)Sibling='7'"))
+    checkSafeDelete("\(label): substitution parens do not create a comment boundary",
+                    name: label, path: f,
+                    mustNotSurvive: "touch /tmp/aliasbar-\(label)-should-never-run",
+                    mustSurvive: "alias \(label)Sibling='7'")
 }
 
 // A standalone brace is still a boundary, because whitespace around it sets one.
@@ -1024,6 +1038,73 @@ for (label, victim) in [
         check("\(label): the edit was refused and the file is untouched", after == before, after)
     }
 }
+
+// Codex round 11: spellings that dodge any keyword allow-list. This is why the guard is
+// loss-based (does the removed line stand alone as a statement?) rather than a recogniser
+// for known definition forms.
+for (label, victim) in [
+    ("tab-export", "export\tIMPORTANT=value"),
+    ("append",     "PATH+=:/opt/bin"),
+    ("dot-source", ". ~/.zshenv"),
+    ("subshell",   "(cd /tmp && ls) >/dev/null"),
+] {
+    let f = scratch("""
+    \(ManagedBlock.begin)
+    alias doomed=x;# comment \\
+    \(victim)
+    \(ManagedBlock.end)
+    """)
+    let before = read(f)
+    let outcome = Result { try AliasWriter.apply(.delete(name: "doomed"), path: f, allEntries: []) }
+    let after = read(f)
+    switch outcome {
+    case .success:
+        check("\(label): survived a delete it was not part of", after.contains(victim), after)
+    case .failure:
+        check("\(label): the edit was refused and the file is untouched", after == before, after)
+    }
+}
+
+// Codex round 11, finding 2: an already-broken file must not disable the truncation
+// guard. The block is checked in isolation, so damage AliasBar would introduce is caught
+// even when the file around it was already failing to parse.
+let brokenWithOrphan = scratch("""
+\(ManagedBlock.begin)
+alias doomed=$(print one
+touch /tmp/aliasbar-orphan-should-never-run
+)
+\(ManagedBlock.end)
+if [ -z "$UNCLOSED"
+""")
+let orphanBefore = read(brokenWithOrphan)
+let orphanOutcome = Result { try AliasWriter.apply(.delete(name: "doomed"), path: brokenWithOrphan, allEntries: []) }
+let orphanAfter = read(brokenWithOrphan)
+switch orphanOutcome {
+case .success:
+    check("an orphaned command is never left behind in an already-broken file",
+          !orphanAfter.contains("touch /tmp/aliasbar-orphan-should-never-run")
+          || orphanAfter.contains("alias doomed="), orphanAfter)
+case .failure:
+    check("the already-broken file with a multiline alias was left untouched",
+          orphanAfter == orphanBefore, orphanAfter)
+}
+
+// Codex round 11, finding 3: a legacy multiline alias whose continuation line looks like
+// an assignment must still be deletable. The continuation cannot stand alone (the quote
+// is unterminated), so the guard correctly lets it go with its parent.
+let legacyAssign = scratch("""
+\(ManagedBlock.begin)
+alias legacy='echo
+EDITOR=nvim'
+alias legacySibling='4'
+\(ManagedBlock.end)
+""")
+let legacyOutcome = Result { try AliasWriter.apply(.delete(name: "legacy"), path: legacyAssign, allEntries: []) }
+let legacyAfter = read(legacyAssign)
+check("a legacy multiline alias is still deletable", (try? legacyOutcome.get()) != nil, legacyAfter)
+check("both of its lines went together", !legacyAfter.contains("EDITOR=nvim"), legacyAfter)
+check("and its sibling survives", legacyAfter.contains("alias legacySibling='4'"), legacyAfter)
+check("and the file parses", zshAccepts(legacyAssign), legacyAfter)
 
 // Codex round 10, second half: two definitions sharing a name. Losing one of a duplicated
 // pair must register as a loss rather than cancel out in a set.
