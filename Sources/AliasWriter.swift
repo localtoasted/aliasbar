@@ -451,9 +451,14 @@ enum AliasWriter {
             // an unescaped backslash. In single quotes a trailing backslash is literal,
             // but the open quote already means continuation.
             state.continues = state.quote != .unquoted || trailingEscape
-            // A backslash-newline splices the lines together, so the next line resumes
-            // mid-word rather than at a word boundary.
-            if trailingEscape { state.atWordStart = false }
+            // Deliberately does NOT force atWordStart false on a trailing backslash.
+            // zsh removes the backslash-newline pair but not the whitespace before it,
+            // so `alias x=1 \` resumes at a word boundary and a following `# comment`
+            // really is a comment, while `echo#tag\` resumes mid-word. The state left
+            // by the character before the backslash already encodes exactly that
+            // distinction, because the trailing-backslash branch returns before
+            // touching it. Overriding it here merged a comment line into the statement
+            // and let a deletion swallow the next alias.
             return state
         }
 

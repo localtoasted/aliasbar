@@ -808,6 +808,37 @@ check("an embedded # does not hide a line continuation",
 check("its sibling survives", eh.contains("alias sibling='4'"))
 check("zsh parses it", zshAccepts(embeddedHash))
 
+// zsh removes the backslash-newline pair but not the whitespace before it, so a
+// continuation line beginning with `#` really is a comment and the statement ends
+// there. Getting this wrong let a deletion swallow the next alias.
+let continuedComment = scratch("""
+\(ManagedBlock.begin)
+alias doomed=1 \\
+# a comment line that ends with a backslash \\
+alias victim='2'
+\(ManagedBlock.end)
+""")
+_ = try! AliasWriter.apply(.delete(name: "doomed"), path: continuedComment, allEntries: [])
+let cc = read(continuedComment)
+check("a comment after a whitespace-separated continuation ends the statement",
+      cc.contains("alias victim='2'"), cc)
+check("the doomed alias is gone", !cc.contains("alias doomed="))
+
+// The mirror case: no whitespace before the backslash means the word continues, so a
+// leading `#` on the next line is literal and the statement runs on.
+let noSpaceContinuation = scratch("""
+\(ManagedBlock.begin)
+alias joined=echo\\
+#stillthesameword
+alias other='3'
+\(ManagedBlock.end)
+""")
+_ = try! AliasWriter.apply(.delete(name: "joined"), path: noSpaceContinuation, allEntries: [])
+let nsc = read(noSpaceContinuation)
+check("a spliced mid-word continuation is spanned",
+      !nsc.contains("#stillthesameword"), nsc)
+check("its sibling survives", nsc.contains("alias other='3'"))
+
 // A genuine comment at a word boundary still terminates the scan.
 let realComment = scratch("""
 \(ManagedBlock.begin)
