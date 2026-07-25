@@ -1000,6 +1000,59 @@ check("the guard still allows edits to an already-broken file",
 check("and the edit it was asked for actually happened",
       !read(alreadyBroken).contains("alias fine='1'"), read(alreadyBroken))
 
+// Codex round 10: a wrong span that swallows NON-alias content. The result parses fine
+// and every alias name survives, so an alias-name-only guard waves it through.
+for (label, victim) in [
+    ("export",   "export IMPORTANT=value"),
+    ("assign",   "EDITOR=nvim"),
+    ("function", "reload() { source ~/.zshrc; }"),
+    ("setopt",   "setopt AUTO_CD"),
+] {
+    let f = scratch("""
+    \(ManagedBlock.begin)
+    alias doomed=x;# comment \\
+    \(victim)
+    \(ManagedBlock.end)
+    """)
+    let before = read(f)
+    let outcome = Result { try AliasWriter.apply(.delete(name: "doomed"), path: f, allEntries: []) }
+    let after = read(f)
+    switch outcome {
+    case .success:
+        check("\(label): survived a delete it was not part of", after.contains(victim), after)
+    case .failure:
+        check("\(label): the edit was refused and the file is untouched", after == before, after)
+    }
+}
+
+// Codex round 10, second half: two definitions sharing a name. Losing one of a duplicated
+// pair must register as a loss rather than cancel out in a set.
+let duplicated = scratch("""
+\(ManagedBlock.begin)
+alias dup='1'
+alias dup='2'
+alias other='3'
+\(ManagedBlock.end)
+""")
+_ = Result { try AliasWriter.apply(.delete(name: "dup"), path: duplicated, allEntries: []) }
+let dupAfter = read(duplicated)
+check("deleting a duplicated name never takes the unrelated alias with it",
+      dupAfter.contains("alias other='3'"), dupAfter)
+check("and the file still parses", zshAccepts(duplicated), dupAfter)
+
+// Comments are expected to leave with the definition above them, so the guard must not
+// treat that as collateral damage and refuse an ordinary delete.
+let commented = scratch("""
+\(ManagedBlock.begin)
+# what this one does
+alias documented='1'
+alias sibling='2'
+\(ManagedBlock.end)
+""")
+_ = try! AliasWriter.apply(.delete(name: "documented"), path: commented, allEntries: [])
+check("a documented alias can still be deleted", !read(commented).contains("alias documented="))
+check("and its sibling survives", read(commented).contains("alias sibling='2'"))
+
 // An ordinary edit must not be slowed or blocked by the guard.
 let guardNormal = scratch("""
 \(ManagedBlock.begin)

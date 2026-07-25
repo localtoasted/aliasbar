@@ -350,41 +350,82 @@ enum AliasWriter {
     private static func guardCollateral(before: [String],
                                         after: [String],
                                         operation: Operation) throws {
-        guard let namesBefore = try? blockAliasNames(in: before),
-              let namesAfter = try? blockAliasNames(in: after) else { return }
+        guard let defsBefore = try? blockDefinitions(in: before),
+              let defsAfter = try? blockDefinitions(in: after) else { return }
 
         // What the caller actually asked to disappear. Everything else must survive.
-        let intentionallyRemoved: Set<String>
+        let intended: String?
         switch operation {
-        case .delete(let name):
-            intentionallyRemoved = [name]
-        case .rename(let from, _, _):
-            intentionallyRemoved = [from]
-        case .upsert:
-            intentionallyRemoved = []
+        case .delete(let name):    intended = "alias \(name)"
+        case .rename(let from, _, _): intended = "alias \(from)"
+        case .upsert:              intended = nil
         }
 
-        let lost = namesBefore.subtracting(namesAfter).subtracting(intentionallyRemoved)
+        // A multiset, not a set. Two definitions can share a name, and losing one of a
+        // duplicated pair has to register as a loss rather than cancel out.
+        var lost: [String] = []
+        var remaining = defsAfter
+        for def in defsBefore {
+            if let idx = remaining.firstIndex(of: def) {
+                remaining.remove(at: idx)
+            } else {
+                lost.append(def)
+            }
+        }
+        if let intended, let idx = lost.firstIndex(of: intended) { lost.remove(at: idx) }
+
         guard lost.isEmpty else {
-            let names = lost.sorted().map { "\"\($0)\"" }.joined(separator: ", ")
-            throw WriteError.collateralDamage(names)
+            throw WriteError.collateralDamage(lost.map { "`\($0)`" }.joined(separator: ", "))
         }
     }
 
-    /// The alias names defined inside the managed block, one entry per definition line.
-    private static func blockAliasNames(in lines: [String]) throws -> Set<String> {
+    /// Every line inside the managed block that independently defines something.
+    ///
+    /// Deliberately not limited to aliases. An earlier version compared alias names only,
+    /// and Codex round 10 found the hole immediately: a wrong span that swallowed
+    /// `export IMPORTANT=value` along with its target produced a file that still parsed
+    /// and still had every alias name, so both guards waved it through. `rewrite` promises
+    /// to preserve comments, functions, and hand-repairs inside the block, and this is
+    /// what actually holds it to that promise.
+    ///
+    /// Comments are excluded on purpose: a comment is the one thing that genuinely
+    /// belongs to the definition above it and is expected to leave with it.
+    ///
+    /// This is a conservative recogniser, not a parser. It can refuse an edit that was in
+    /// fact fine, when a continuation line happens to look like an assignment. That
+    /// direction is the safe one: the user is told to edit the line by hand, and nothing
+    /// is lost.
+    private static func blockDefinitions(in lines: [String]) throws -> [String] {
         let bounds = try locateBlock(in: lines)
-        var names: Set<String> = []
+        var found: [String] = []
         guard let begin = bounds.begin, let end = bounds.end, end > begin + 1 else {
-            return names
+            return found
         }
         for i in (begin + 1)..<end {
             let line = lines[i].trimmingCharacters(in: .whitespaces)
-            guard line.hasPrefix("alias ") else { continue }
-            let rest = String(line.dropFirst("alias ".count))
-            if let (name, _) = ZshrcParser.splitAliasAssignment(rest) { names.insert(name) }
+            if line.isEmpty || line.hasPrefix("#") { continue }
+
+            if line.hasPrefix("alias ") {
+                let rest = String(line.dropFirst("alias ".count))
+                if let (name, _) = ZshrcParser.splitAliasAssignment(rest) {
+                    found.append("alias \(name)")
+                    continue
+                }
+            }
+            for keyword in ["export ", "function ", "unalias ", "source ", "eval ", "setopt "]
+            where line.hasPrefix(keyword) {
+                found.append(line)
+            }
+            // `NAME=value` and `name() {`, neither of which starts with a keyword.
+            if let eq = line.firstIndex(of: "="),
+               eq > line.startIndex,
+               line[line.startIndex..<eq].allSatisfy({ $0.isLetter || $0.isNumber || $0 == "_" }) {
+                found.append(line)
+            } else if line.contains("()") {
+                found.append(line)
+            }
         }
-        return names
+        return found
     }
 
     // MARK: - Syntax guard
