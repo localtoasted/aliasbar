@@ -316,13 +316,18 @@ enum AliasWriter {
         var lines = original.components(separatedBy: "\n")
         if endedWithNewline && lines.last == "" { lines.removeLast() }
 
-        let output = try rewrite(lines: lines, applying: operation)
+        let (output, removedSpans) = try rewrite(lines: lines, applying: operation)
 
         var text = output.joined(separator: "\n")
         if endedWithNewline || !text.isEmpty { text += "\n" }
 
-        try guardSyntax(original: original, rewritten: text)
-        try guardCollateral(before: lines, after: output, operation: operation)
+        let destructive: Bool
+        switch operation {
+        case .upsert: destructive = false
+        case .delete, .rename: destructive = true
+        }
+        try guardSyntax(original: original, rewritten: text, destructive: destructive)
+        try guardCollateral(removed: removedSpans)
 
         let backup = try writeBackup(of: original, for: target)
         try atomicWrite(text, to: target, expecting: snapshotAtRead, matching: original)
@@ -343,62 +348,33 @@ enum AliasWriter {
     /// `alias victim='2'` deletes both, because zsh ends the statement at the `;` while
     /// the lexer reads the backslash as a continuation.
     ///
-    /// So this compares the alias names inside the block before and after, and refuses
-    /// unless the difference is exactly what the operation asked for. Like the syntax
-    /// guard, it does not need the lexer to be correct. It only needs to notice when the
-    /// lexer was wrong, which is the property that actually protects the user.
-    private static func guardCollateral(before: [String],
-                                        after: [String],
-                                        operation: Operation) throws {
-        // Only a removal can lose content. An upsert appends or replaces in place.
-        switch operation {
-        case .upsert: return
-        case .delete, .rename: break
-        }
-        guard let beforeBody = try? blockBody(of: before),
-              let afterBody = try? blockBody(of: after) else { return }
-
-        // rewrite() removes a contiguous run, so the lines that disappeared are whatever
-        // sits between the common prefix and the common suffix.
-        var head = 0
-        while head < beforeBody.count, head < afterBody.count,
-              beforeBody[head] == afterBody[head] { head += 1 }
-        var tail = 0
-        while tail < beforeBody.count - head, tail < afterBody.count - head,
-              beforeBody[beforeBody.count - 1 - tail] == afterBody[afterBody.count - 1 - tail] {
-            tail += 1
-        }
-        let removed = Array(beforeBody[head..<(beforeBody.count - tail)])
-        guard removed.count > 1 else { return }
-
-        // The first removed line is the definition that was targeted. Every line after it
-        // is only legitimately gone if it was a *continuation* of that definition.
+    /// Each span reported by `rewrite` is one definition it meant to remove or replace.
+    /// The first line of a span is that definition; every line after it is legitimate only
+    /// if it was a *continuation* of the same statement. Like the syntax guard, this does
+    /// not need the lexer to be correct. It only needs to notice when the lexer was wrong.
+    private static func guardCollateral(removed: [[String]]) throws {
+        // The test is deliberately not "does this line stand alone". Inside a legacy
+        // multiline alias, `echo two` stands alone perfectly well and is still a
+        // continuation. The test is whether the statement was **already complete before
+        // this line**: if zsh can parse everything above it as a finished statement, then
+        // this line starts a new one and the edit was about to take it out too.
         //
-        // The test is not "does this line stand alone" — inside a legacy multiline alias,
-        // `echo two` stands alone perfectly well and is still a continuation. The test is
-        // whether the statement was **already complete before this line**. If zsh can
-        // parse everything above it as a finished statement, then this line starts a new
-        // one and the edit was about to take it out along with the target.
-        // Names this operation is allowed to remove. A rename onto a name that already
-        // exists inside the block legitimately collapses two definitions into one, so the
-        // destination counts as intended too.
-        var permitted: Set<String> = []
-        switch operation {
-        case .delete(let name):        permitted = [name]
-        case .rename(let from, let to, _): permitted = [from, to]
-        case .upsert:                  break
-        }
-
-        for index in 1..<removed.count {
-            let bare = removed[index].trimmingCharacters(in: .whitespaces)
-            if bare.isEmpty || bare.hasPrefix("#") { continue }
-            if bare.hasPrefix("alias "),
-               let (name, _) = ZshrcParser.splitAliasAssignment(String(bare.dropFirst("alias ".count))),
-               permitted.contains(name) { continue }
-
-            let above = removed[0..<index].joined(separator: "\n") + "\n"
-            guard let (completeAbove, _) = parses(above), completeAbove else { continue }
-            throw WriteError.collateralDamage("`\(bare)`")
+        // Because the spans come from the rewrite itself rather than from a diff of the
+        // block, no name exemption is needed. An earlier version reconstructed the removed
+        // lines by diffing and therefore had to permit the operation's own names, which
+        // meant that with two definitions sharing a name a wrong span could swallow the
+        // second one and be waved through. Codex round 12 found that, and found that the
+        // same diff mangled a rename onto an existing name, which performs two *disjoint*
+        // edits and so reported everything between them as collateral. Knowing the exact
+        // ranges removes both problems rather than patching them.
+        for span in removed where span.count > 1 {
+            for index in 1..<span.count {
+                let bare = span[index].trimmingCharacters(in: .whitespaces)
+                if bare.isEmpty || bare.hasPrefix("#") { continue }
+                let above = span[0..<index].joined(separator: "\n") + "\n"
+                guard let (completeAbove, _) = parses(above), completeAbove else { continue }
+                throw WriteError.collateralDamage("`\(bare)`")
+            }
         }
     }
 
@@ -435,7 +411,9 @@ enum AliasWriter {
     /// The comparison is deliberately relative: an rc file that already fails `zsh -n`
     /// before the edit stays editable, because refusing there would lock the user out of
     /// the app over a pre-existing problem AliasBar did not cause and cannot fix.
-    private static func guardSyntax(original: String, rewritten: String) throws {
+    private static func guardSyntax(original: String,
+                                    rewritten: String,
+                                    destructive: Bool) throws {
         // Nothing to compare against if zsh is not where it should be. Not a reason to
         // block an edit; the rest of the writer's guards still apply.
         guard FileManager.default.isExecutableFile(atPath: "/bin/zsh") else { return }
@@ -448,10 +426,11 @@ enum AliasWriter {
         // to one line, orphan the `touch` as a standalone command, and commit, because
         // both before and after already failed at file level. Checking the block in
         // isolation catches that: the leftover `)` does not parse.
-        if let beforeBody = try? blockBody(of: original.components(separatedBy: "\n")),
-           let afterBody = try? blockBody(of: rewritten.components(separatedBy: "\n")),
-           let (bodyWasOK, _) = parses(beforeBody.joined(separator: "\n") + "\n"),
-           bodyWasOK,
+        let beforeBody = (try? blockBody(of: original.components(separatedBy: "\n"))) ?? []
+        let afterBody = (try? blockBody(of: rewritten.components(separatedBy: "\n"))) ?? []
+        let bodyWasOK = parses(beforeBody.joined(separator: "\n") + "\n")?.0 ?? false
+
+        if bodyWasOK,
            let (bodyNowOK, bodyWhy) = parses(afterBody.joined(separator: "\n") + "\n"),
            !bodyNowOK {
             throw WriteError.wouldBreakSyntax(bodyWhy)
@@ -459,6 +438,19 @@ enum AliasWriter {
 
         guard let (newOK, complaint) = parses(rewritten) else { return }
         if newOK { return }
+
+        // The result does not parse. If the block cannot be validated on its own either,
+        // there is nothing left that can vouch for a destructive edit, so refuse it.
+        //
+        // Codex round 12: a managed block can sit inside a compound construct (an `if true`
+        // above the begin marker, `fi` below the end marker), which makes its body
+        // context-dependent and unparseable in isolation through no fault of the user.
+        // Combined with an unrelated syntax error elsewhere in the file, both checks used
+        // to opt out and a truncating edit committed. An upsert is still allowed through,
+        // since adding or replacing a definition in place cannot orphan a fragment.
+        if destructive, !bodyWasOK {
+            throw WriteError.wouldBreakSyntax(complaint)
+        }
 
         // At file level, only refuse if the input parsed, so that a file which was already
         // broken by something AliasBar did not cause does not become permanently
@@ -506,7 +498,18 @@ enum AliasWriter {
     /// markers that is not a plain `alias` line, including comments the user added, a
     /// function, or a hand-repair after a bad merge, would vanish on the next save with
     /// no warning. Only the specific line being changed is touched.
-    private static func rewrite(lines: [String], applying operation: Operation) throws -> [String] {
+    /// Returns the new contents, plus the verbatim lines of each span it removed.
+    ///
+    /// The removed spans are reported rather than reconstructed. An earlier version had
+    /// `guardCollateral` recover them by diffing the block for a common prefix and suffix,
+    /// and Codex round 12 found two separate bugs that were both really one bug: the diff
+    /// assumed a single contiguous removal. A rename onto an existing name performs two
+    /// *disjoint* edits, so the diff swallowed everything between them and reported
+    /// untouched content as collateral damage. And with two definitions sharing a name,
+    /// the diff could not tell which occurrence was the intended one. Reporting the exact
+    /// ranges makes both questions unnecessary.
+    private static func rewrite(lines: [String],
+                                applying operation: Operation) throws -> (lines: [String], removed: [[String]]) {
         let bounds = try locateBlock(in: lines)
 
         /// The full line range a definition occupies, which is not always one line.
@@ -661,7 +664,7 @@ enum AliasWriter {
             case .delete:
                 // Nothing to remove, and nothing to report: the desired end state
                 // already holds.
-                return lines
+                return (lines, [])
             case .rename(let from, _, _):
                 // A rename with no block at all means the source is definitively gone,
                 // which is a stale edit rather than a no-op.
@@ -676,17 +679,19 @@ enum AliasWriter {
                            aliasLine(name: name,
                                      command: command.trimmingCharacters(in: .whitespacesAndNewlines)),
                            ManagedBlock.end]
-                return output
+                return (output, [])
             }
         }
 
         var output = lines
+        var removed: [[String]] = []
 
         switch operation {
         case .upsert(let name, let command, _):
             let line = aliasLine(name: name,
                                  command: command.trimmingCharacters(in: .whitespacesAndNewlines))
             if let range = try rangeOfAlias(named: name, begin: begin, end: end) {
+                removed.append(Array(lines[range]))
                 output.replaceSubrange(range, with: [line])
             } else {
                 output.insert(line, at: end)
@@ -694,6 +699,7 @@ enum AliasWriter {
 
         case .delete(let name):
             if let range = try rangeOfAlias(named: name, begin: begin, end: end) {
+                removed.append(Array(lines[range]))
                 output.removeSubrange(range)
             }
 
@@ -709,6 +715,9 @@ enum AliasWriter {
             guard let oldRange = try rangeOfAlias(named: from, begin: begin, end: end) else {
                 throw WriteError.renameSourceMissing(from)
             }
+
+            removed.append(Array(lines[oldRange]))
+            if let newRange, newRange != oldRange { removed.append(Array(lines[newRange])) }
 
             if let newRange, newRange != oldRange {
                 // The destination name already exists in the block: overwrite it and
@@ -727,7 +736,7 @@ enum AliasWriter {
             }
         }
 
-        return output
+        return (output, removed)
     }
 
     // MARK: - Backup

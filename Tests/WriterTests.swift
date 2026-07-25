@@ -1134,6 +1134,73 @@ _ = try! AliasWriter.apply(.delete(name: "documented"), path: commented, allEntr
 check("a documented alias can still be deleted", !read(commented).contains("alias documented="))
 check("and its sibling survives", read(commented).contains("alias sibling='2'"))
 
+// Codex round 12, finding 1: two definitions sharing a name, where the span wrongly
+// covers both. The old guard exempted every removed alias matching the delete target, so
+// the second definition vanished silently. Spans now come from the rewrite itself, so the
+// exact occurrence is known and no name exemption exists.
+let dupOverspan = scratch("""
+\(ManagedBlock.begin)
+alias dup=x;# comment \\
+alias dup='important'
+\(ManagedBlock.end)
+""")
+let dupBefore = read(dupOverspan)
+let dupOutcome = Result { try AliasWriter.apply(.delete(name: "dup"), path: dupOverspan, allEntries: []) }
+let dupOverAfter = read(dupOverspan)
+switch dupOutcome {
+case .success:
+    check("a duplicate definition is never taken by an over-span",
+          dupOverAfter.contains("alias dup='important'"), dupOverAfter)
+case .failure:
+    check("the duplicate over-span was refused and the file is untouched",
+          dupOverAfter == dupBefore, dupOverAfter)
+}
+
+// Codex round 12, finding 3: a rename onto an existing name is TWO disjoint edits. The
+// old diff-based guard treated the block as one contiguous removal, so unchanged content
+// between the source and destination was reported as collateral and a valid rename failed.
+let renameCollision = scratch("""
+\(ManagedBlock.begin)
+alias from='1'
+export KEEP=1
+alias to='2'
+\(ManagedBlock.end)
+""")
+let collisionOutcome = Result {
+    try AliasWriter.apply(.rename(from: "from", to: "to", command: "echo merged"),
+                          path: renameCollision, allEntries: [])
+}
+let rc = read(renameCollision)
+check("a rename onto an existing name with content between them is allowed",
+      (try? collisionOutcome.get()) != nil, rc)
+check("the untouched export is still there", rc.contains("export KEEP=1"), rc)
+check("the source name is gone", !rc.contains("alias from="), rc)
+check("the destination holds the new command", rc.contains("alias to='echo merged'"), rc)
+check("and only one destination definition remains",
+      rc.components(separatedBy: "alias to=").count - 1 == 1, rc)
+
+// Codex round 12, finding 2: markers inside a compound construct make the block body
+// context-dependent, so it cannot be parsed standalone through no fault of the user.
+// Combined with an unrelated syntax error elsewhere, both syntax checks used to opt out.
+// A destructive edit must now refuse rather than commit unvalidated.
+let contextBlock = scratch("""
+if true
+\(ManagedBlock.begin)
+then
+alias doomed=$(print one
+touch /tmp/aliasbar-context-should-never-run
+)
+fi
+\(ManagedBlock.end)
+if [ -z "$UNCLOSED"
+""")
+let ctxBefore = read(contextBlock)
+_ = Result { try AliasWriter.apply(.delete(name: "doomed"), path: contextBlock, allEntries: []) }
+let ctxAfter = read(contextBlock)
+check("a context-dependent block in a broken file is never edited unvalidated",
+      ctxAfter == ctxBefore
+      || !ctxAfter.contains("touch /tmp/aliasbar-context-should-never-run"), ctxAfter)
+
 // An ordinary edit must not be slowed or blocked by the guard.
 let guardNormal = scratch("""
 \(ManagedBlock.begin)
