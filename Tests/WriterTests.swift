@@ -478,12 +478,15 @@ check("rename to the same name updates the command", sn.contains("alias same='ec
 check("rename to the same name leaves exactly one definition",
       sn.components(separatedBy: "alias same=").count - 1 == 1, sn)
 
-// Renaming something that is not in the block should not fabricate a deletion.
+// Renaming something that is not in the block is a stale edit and must be refused,
+// not quietly turned into a create. See section 17 for the full case.
 let absent = scratch("# x\n")
 _ = try! AliasWriter.apply(.upsert(name: "present", command: "echo here", comment: nil),
                            path: absent, allEntries: [])
-_ = try! AliasWriter.apply(.rename(from: "ghost", to: "newghost", command: "echo boo"),
-                           path: absent, allEntries: [])
+expectThrow("renaming an absent alias is refused") {
+    _ = try AliasWriter.apply(.rename(from: "ghost", to: "newghost", command: "echo boo"),
+                              path: absent, allEntries: [])
+}
 check("renaming an absent alias leaves the existing one alone",
       read(absent).contains("alias present='echo here'"))
 
@@ -526,6 +529,109 @@ check("a relative symlink resolves to its target",
       read("\(relDir)/real-zshrc").contains("alias viaRel='echo rel'"))
 check("the relative target kept its original content",
       read("\(relDir)/real-zshrc").contains("alias rel='1'"))
+
+// ---------------------------------------------------------------------------
+print("\n16. Multiline commands cannot orphan executable fragments")
+
+expectThrow("a command containing a newline is refused") {
+    try AliasWriter.validate(name: "multi", command: "echo one\necho two")
+}
+let multiReject = scratch("# x\n")
+expectThrow("apply refuses a multiline command") {
+    _ = try AliasWriter.apply(.upsert(name: "multi", command: "echo one\necho two",
+                                      comment: nil),
+                              path: multiReject, allEntries: [])
+}
+check("nothing was written for a refused multiline", !read(multiReject).contains("alias multi"))
+
+// A block written by an earlier build can still hold a physically multiline alias.
+// Editing it must remove the whole statement, not just the first line, or the tail
+// becomes a bare command that runs at shell startup.
+let legacyMultiline = scratch("""
+# before
+\(ManagedBlock.begin)
+\(ManagedBlock.notice)
+alias legacy='echo one
+echo two
+echo three'
+alias after='1'
+\(ManagedBlock.end)
+# after
+""")
+_ = try! AliasWriter.apply(.delete(name: "legacy"), path: legacyMultiline, allEntries: [])
+let lm = read(legacyMultiline)
+check("deleting a legacy multiline alias removes its first line", !lm.contains("alias legacy="))
+check("...and its orphaned tail lines", !lm.contains("echo two") && !lm.contains("echo three"))
+check("...while leaving its neighbour", lm.contains("alias after='1'"))
+check("...and content outside", lm.contains("# before") && lm.contains("# after"))
+
+// zsh must accept the rewritten file. This is the check that would have caught the
+// orphaned-fragment bug: unbalanced quotes make the whole rc file a syntax error.
+func zshAccepts(_ path: String) -> Bool {
+    let p = Process()
+    p.executableURL = URL(fileURLWithPath: "/bin/zsh")
+    p.arguments = ["-n", path]
+    p.standardError = Pipe()
+    p.standardOutput = Pipe()
+    try? p.run()
+    p.waitUntilExit()
+    return p.terminationStatus == 0
+}
+check("zsh parses the file after a legacy multiline delete", zshAccepts(legacyMultiline))
+
+let legacyUpdate = scratch("""
+\(ManagedBlock.begin)
+alias legacy='echo one
+echo two'
+\(ManagedBlock.end)
+""")
+_ = try! AliasWriter.apply(.upsert(name: "legacy", command: "echo replaced", comment: nil),
+                           path: legacyUpdate, allEntries: [])
+let lu = read(legacyUpdate)
+check("updating a legacy multiline alias collapses it to one line",
+      lu.contains("alias legacy='echo replaced'"))
+check("...with no orphaned tail", !lu.contains("echo two"), lu)
+check("zsh parses the file after a legacy multiline update", zshAccepts(legacyUpdate))
+
+// ---------------------------------------------------------------------------
+print("\n17. Rename with a missing source is refused, not fabricated")
+
+let ghostSource = scratch("# x\n")
+_ = try! AliasWriter.apply(.upsert(name: "real", command: "echo real", comment: nil),
+                           path: ghostSource, allEntries: [])
+expectThrow("renaming a source that is not in the block throws") {
+    _ = try AliasWriter.apply(.rename(from: "ghost", to: "newghost", command: "echo boo"),
+                              path: ghostSource, allEntries: [])
+}
+check("the fabricated destination was NOT created",
+      !read(ghostSource).contains("alias newghost"), read(ghostSource))
+check("the untouched alias survives", read(ghostSource).contains("alias real='echo real'"))
+
+// ---------------------------------------------------------------------------
+print("\n18. Symlink resolution failures block the write")
+
+// A symlink pointing at a path inside a directory that does not exist: the link is
+// readable, so this must resolve and create the target rather than replace the link.
+let danglingDir = "\(sandbox)/dangling"
+try! FileManager.default.createDirectory(atPath: danglingDir, withIntermediateDirectories: true)
+let danglingLink = "\(danglingDir)/.zshrc"
+try! FileManager.default.createSymbolicLink(atPath: danglingLink,
+                                            withDestinationPath: "\(danglingDir)/missing-target")
+_ = try? AliasWriter.apply(.upsert(name: "dang", command: "echo d", comment: nil),
+                           path: danglingLink, allEntries: [])
+var dangInfo = stat()
+lstat(danglingLink, &dangInfo)
+check("a dangling symlink is not replaced by a regular file",
+      (dangInfo.st_mode & S_IFMT) == S_IFLNK)
+
+// ---------------------------------------------------------------------------
+print("\n19. Every fixture is valid zsh")
+
+for (label, path) in [("busy rc", p1), ("hand-edited block", handEdited),
+                      ("renamed", renamed), ("lookalike", lookalike),
+                      ("hostile value", hostile)] {
+    check("zsh parses \(label)", zshAccepts(path))
+}
 
 // ---------------------------------------------------------------------------
 print("\n" + String(repeating: "-", count: 60))

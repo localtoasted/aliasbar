@@ -144,11 +144,21 @@ struct SettingsView: View {
                                     hotkeyError = "Include ⌘ or ⌃. macOS no longer accepts shortcuts built only from ⌥ and ⇧."
                                     return
                                 }
-                                settings.hotkey = combo
-                                hotkeyError = HotkeyManager.shared.register(combo) {
+                                // Register first, persist only on success. Storing the
+                                // combination up front would leave the preference
+                                // claiming a shortcut that never took effect, and the
+                                // app would retry that dead combination on every future
+                                // launch while the working one stayed unregistered.
+                                let ok = HotkeyManager.shared.register(combo) {
                                     NotificationCenter.default.post(name: .aliasBarHotkeyFired,
                                                                     object: nil)
-                                } ? nil : "macOS refused that combination. Try another."
+                                }
+                                if ok {
+                                    settings.hotkey = combo
+                                    hotkeyError = nil
+                                } else {
+                                    hotkeyError = "macOS refused that combination. Still using \(settings.hotkey.displayString)."
+                                }
                             }
                         } label: {
                             Text(recordingHotkey ? "Press keys…" : settings.hotkey.displayString)

@@ -27,6 +27,8 @@ enum AliasWriter {
         case backupFailed(String)
         case writeFailed(String)
         case modifiedElsewhere
+        case renameSourceMissing(String)
+        case multilineCommand
 
         var errorDescription: String? {
             switch self {
@@ -48,6 +50,10 @@ enum AliasWriter {
                 return "Couldn't save your shell config: \(why)"
             case .modifiedElsewhere:
                 return "Something else changed your shell config while AliasBar had it open, so nothing was written. Reopen and try again."
+            case .renameSourceMissing(let name):
+                return "\"\(name)\" is no longer in AliasBar's block, so it can't be renamed. Something else edited your shell config. Reopen and try again."
+            case .multilineCommand:
+                return "An alias has to be a single line. For anything multi-line, write a shell function instead."
             }
         }
     }
@@ -68,6 +74,12 @@ enum AliasWriter {
 
         guard !trimmedName.isEmpty else { throw WriteError.invalidName(name) }
         guard trimmedCommand.isEmpty == false else { throw WriteError.emptyCommand }
+        // A newline would be emitted as a physically multi-line alias statement held
+        // together only by its quotes. Any later edit that touched one of those lines
+        // would orphan the rest, and orphaned lines in an rc file are not inert: they
+        // run at shell startup. zsh aliases are one-liners; functions exist for the
+        // rest.
+        guard !trimmedCommand.contains("\n") else { throw WriteError.multilineCommand }
         guard reserved.contains(trimmedName) == false else {
             throw WriteError.reservedName(trimmedName)
         }
@@ -215,8 +227,14 @@ enum AliasWriter {
             guard hops <= 16 else {
                 throw WriteError.malformedMarkers("symlink chain at \(path) is too deep")
             }
+            // Failing open here would be the exact disaster this function exists to
+            // prevent: we know it is a link, so returning the link path means the
+            // rename replaces the link itself. Refuse instead.
             guard let destination = try? FileManager.default
-                .destinationOfSymbolicLink(atPath: current) else { return current }
+                .destinationOfSymbolicLink(atPath: current) else {
+                throw WriteError.unreadable(
+                    "\(current) is a symlink whose target could not be resolved")
+            }
             current = destination.hasPrefix("/")
                 ? destination
                 : (current as NSString).deletingLastPathComponent + "/" + destination
@@ -263,6 +281,11 @@ enum AliasWriter {
         // on a symlink pointing at it.
         let target = try resolveTarget(path)
 
+        // The snapshot has to bracket the read, not follow it. Taken only afterwards, a
+        // writer that finishes replacing the file *during* our read would be captured as
+        // the "original" state: the final check would pass and we would commit contents
+        // we read from the previous version, silently discarding theirs.
+        let snapshotBeforeRead = FileSnapshot.of(target)
         let original: String
         do {
             original = try String(contentsOfFile: target, encoding: .utf8)
@@ -274,11 +297,13 @@ enum AliasWriter {
                 throw WriteError.unreadable(error.localizedDescription)
             }
         }
-        // Captured now, re-checked immediately before the replacement. Atomic rename
-        // prevents a half-written file; it does nothing about a lost update, where an
-        // editor or a dotfile syncer writes between our read and our commit and we
-        // silently stomp their version.
-        let snapshotAtRead = FileSnapshot.of(target)
+        let snapshotAfterRead = FileSnapshot.of(target)
+        guard snapshotBeforeRead == snapshotAfterRead else {
+            throw WriteError.modifiedElsewhere
+        }
+        // Re-checked immediately before the replacement. Atomic rename prevents a
+        // half-written file; it does nothing about a lost update.
+        let snapshotAtRead = snapshotAfterRead
 
         // Whether the file ends in a newline is a property worth preserving exactly.
         let endedWithNewline = original.hasSuffix("\n") || original.isEmpty
@@ -305,18 +330,45 @@ enum AliasWriter {
     private static func rewrite(lines: [String], applying operation: Operation) throws -> [String] {
         let bounds = try locateBlock(in: lines)
 
-        /// Index of the line inside the block defining `name`, if any.
-        func indexOfAlias(named name: String, begin: Int, end: Int) -> Int? {
+        /// The full line range a definition occupies, which is not always one line.
+        ///
+        /// A command containing a newline is emitted as a physically multi-line `alias`
+        /// statement held together by the quotes around it. Editing only the first line
+        /// would leave the remaining lines orphaned in the file, where they are no
+        /// longer part of any assignment and simply *run* the next time the shell
+        /// starts. New multi-line commands are now rejected outright, but blocks written
+        /// by earlier builds can still contain them, so removal has to span the whole
+        /// statement.
+        func rangeOfAlias(named name: String, begin: Int, end: Int) -> ClosedRange<Int>? {
             guard end > begin + 1 else { return nil }
             for i in (begin + 1)..<end {
                 let line = lines[i].trimmingCharacters(in: .whitespaces)
                 guard line.hasPrefix("alias ") else { continue }
                 let rest = String(line.dropFirst("alias ".count))
-                if let (existing, _) = ZshrcParser.splitAliasAssignment(rest), existing == name {
-                    return i
+                guard let (existing, _) = ZshrcParser.splitAliasAssignment(rest),
+                      existing == name else { continue }
+
+                // Walk forward while the single quotes remain unbalanced.
+                var last = i
+                var open = unbalancedQuotes(in: lines[i])
+                while open && last + 1 < end {
+                    last += 1
+                    if unbalancedQuotes(in: lines[last]) { open = false }
                 }
+                return i...last
             }
             return nil
+        }
+
+        /// Whether a line leaves a single quote open, accounting for the `'\''` idiom.
+        func unbalancedQuotes(in line: String) -> Bool {
+            var count = 0
+            var previous: Character?
+            for ch in line {
+                if ch == "'" && previous != "\\" { count += 1 }
+                previous = ch
+            }
+            return count % 2 == 1
         }
 
         guard let begin = bounds.begin, let end = bounds.end else {
@@ -344,33 +396,43 @@ enum AliasWriter {
         case .upsert(let name, let command, _):
             let line = aliasLine(name: name,
                                  command: command.trimmingCharacters(in: .whitespacesAndNewlines))
-            if let idx = indexOfAlias(named: name, begin: begin, end: end) {
-                output[idx] = line
+            if let range = rangeOfAlias(named: name, begin: begin, end: end) {
+                output.replaceSubrange(range, with: [line])
             } else {
                 output.insert(line, at: end)
             }
 
         case .delete(let name):
-            if let idx = indexOfAlias(named: name, begin: begin, end: end) {
-                output.remove(at: idx)
+            if let range = rangeOfAlias(named: name, begin: begin, end: end) {
+                output.removeSubrange(range)
             }
 
         case .rename(let from, let to, let command):
             let line = aliasLine(name: to,
                                  command: command.trimmingCharacters(in: .whitespacesAndNewlines))
-            let oldIndex = indexOfAlias(named: from, begin: begin, end: end)
-            let newIndex = indexOfAlias(named: to, begin: begin, end: end)
+            let oldRange = rangeOfAlias(named: from, begin: begin, end: end)
+            let newRange = rangeOfAlias(named: to, begin: begin, end: end)
 
-            if let newIndex {
+            // A rename whose source has vanished is a stale edit, not a create. Silently
+            // inserting the destination would resurrect an alias someone else deleted.
+            guard oldRange != nil || newRange != nil else {
+                throw WriteError.renameSourceMissing(from)
+            }
+
+            if let newRange, newRange != oldRange {
                 // The destination name already exists in the block: overwrite it and
-                // drop the old line. Both edits land in this one set of contents, so
-                // there is no window where the alias exists under neither name.
-                output[newIndex] = line
-                if let oldIndex, oldIndex != newIndex { output.remove(at: oldIndex) }
-            } else if let oldIndex {
-                output[oldIndex] = line
-            } else {
-                output.insert(line, at: end)
+                // drop the old definition. Both edits land in this one set of contents,
+                // so there is no window where the alias exists under neither name.
+                // Higher index first, or removing the earlier one shifts the later.
+                if let oldRange, oldRange.lowerBound > newRange.lowerBound {
+                    output.removeSubrange(oldRange)
+                    output.replaceSubrange(newRange, with: [line])
+                } else {
+                    output.replaceSubrange(newRange, with: [line])
+                    if let oldRange { output.removeSubrange(oldRange) }
+                }
+            } else if let oldRange {
+                output.replaceSubrange(oldRange, with: [line])
             }
         }
 

@@ -192,7 +192,23 @@ struct HotkeyCombo: Equatable {
 final class AppSettings: ObservableObject {
     static let shared = AppSettings()
 
-    private let defaults = UserDefaults.standard
+    /// Where settings are stored.
+    ///
+    /// `ALIASBAR_DEFAULTS_SUITE` redirects them into a named suite instead of the
+    /// standard domain. The screenshot and video harnesses drive a real `AppSettings`
+    /// to pose the UI, and every property has a `didSet` that persists — so without
+    /// this they would silently rewrite the actual user's theme, result cap, and rc
+    /// path. That is not hypothetical: it happened while building v0.2.
+    static let store: UserDefaults = {
+        if let suite = ProcessInfo.processInfo.environment["ALIASBAR_DEFAULTS_SUITE"],
+           !suite.isEmpty,
+           let scratch = UserDefaults(suiteName: suite) {
+            return scratch
+        }
+        return UserDefaults.standard
+    }()
+
+    private let defaults = AppSettings.store
 
     private enum Key {
         static let enterAction = "enterAction"
@@ -277,7 +293,7 @@ final class AppSettings: ObservableObject {
         // Reads a stored raw value, falling back when the key is absent or holds a
         // value from an older build. Free-standing rather than a method because `self`
         // is not usable until every stored property is initialized.
-        let store = UserDefaults.standard
+        let store = AppSettings.store
         func decode<T: RawRepresentable>(_ key: String, _ fallback: T) -> T where T.RawValue == String {
             guard let raw = store.string(forKey: key), let value = T(rawValue: raw) else {
                 return fallback
