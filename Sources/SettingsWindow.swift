@@ -183,6 +183,11 @@ struct SettingsView: View {
                 if let hotkeyError {
                     NoticeText(hotkeyError, tone: .warning)
                 }
+                SettingsRow("Appears", hint: settings.presentationStyle.detail) {
+                    ThemedPicker(selection: $settings.presentationStyle,
+                                 options: PresentationStyle.allCases,
+                                 label: { $0.label })
+                }
             }
 
             SettingsGroup("Startup") {

@@ -5,7 +5,11 @@ import AppKit
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private var statusItem: NSStatusItem!
-    private let popover = NSPopover()
+    /// Both surfaces are built lazily and independently. A view controller belongs to
+    /// one window at a time, so they cannot share a host — and in practice a user picks
+    /// one style and stays there, so the other is never constructed.
+    private var popover: NSPopover?
+    private var palette: PaletteController?
     private let settings = AppSettings.shared
     private let store = EntryStore()
     private var state: AppState!
@@ -21,11 +25,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         settings.adoptEnvironmentPathIfUnset()
 
         state = AppState(store: store, settings: settings)
-        state.onDismiss = { [weak self] in self?.closePopover() }
+        state.onDismiss = { [weak self] in self?.closeUI() }
         state.onOpenSettings = { [weak self] in self?.openSettings() }
 
         makeStatusItem()
-        makePopover()
         installKeyMonitor()
         HotkeyRecorder.shared.start()
         registerHotkey()
@@ -37,15 +40,66 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
             self?.reportPlacement()
         }
+
+        // Opens itself so a screenshot harness does not have to synthesise a keystroke,
+        // which needs Accessibility permission and cannot run over SSH.
+        if ProcessInfo.processInfo.environment["ALIASBAR_OPEN_ON_LAUNCH"] == "1" {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
+                self?.summon()
+            }
+        }
     }
 
-    private func makePopover() {
+    // MARK: Presentation
+
+    private func makePopover() -> NSPopover {
         let hosting = NSHostingController(rootView: RootView(state: state, settings: settings))
         hosting.sizingOptions = [.preferredContentSize]
+        let popover = NSPopover()
         popover.contentViewController = hosting
         popover.behavior = .transient
         popover.animates = false
         popover.delegate = self
+        return popover
+    }
+
+    private func makePalette() -> PaletteController {
+        // The panel has no frame of its own, so the corner has to come from the content.
+        let root = RootView(state: state, settings: settings)
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        let hosting = NSHostingController(rootView: root)
+        hosting.sizingOptions = [.preferredContentSize]
+        let controller = PaletteController(content: hosting)
+        controller.onClose = { [weak self] in self?.state.editor = nil }
+        return controller
+    }
+
+    private var isShown: Bool {
+        (popover?.isShown ?? false) || (palette?.isShown ?? false)
+    }
+
+    private func showUI() {
+        state.prepareForShow()
+        NSApp.activate(ignoringOtherApps: true)
+        switch settings.presentationStyle {
+        case .palette:
+            let palette = palette ?? makePalette()
+            self.palette = palette
+            palette.show()
+        case .menuBar:
+            guard let button = statusItem.button else { return }
+            let popover = popover ?? makePopover()
+            self.popover = popover
+            popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+            popover.contentViewController?.view.window?.makeKey()
+        }
+    }
+
+    /// Closes both, deliberately. If the style changed while something was open, only
+    /// asking the current style to close would strand the other one on screen.
+    private func closeUI() {
+        popover?.performClose(nil)
+        palette?.close()
     }
 
     // MARK: Status item
@@ -176,6 +230,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     }
 
     private func warnNotPlaced(reason: String) {
+        // The alert exists because an unplaceable icon used to mean an unreachable app.
+        // It no longer does: with a centred palette on a working hotkey, everything is
+        // still reachable, and interrupting launch with a modal would be noise.
+        if settings.presentationStyle == .palette && settings.hotkeyEnabled {
+            Diag.log("icon unplaced, but palette + hotkey are available — not warning")
+            return
+        }
         let alert = NSAlert()
         alert.messageText = "AliasBar is running, but you can't see it"
         alert.informativeText = reason
@@ -208,36 +269,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     /// Opens from the hotkey. Distinct from a click because the app that was in front
     /// has to be remembered before we steal focus, or escape has nowhere to go back to.
     private func summon() {
-        if popover.isShown {
-            closePopover()
+        if isShown {
+            closeUI()
             PreviousApp.restore()
             return
         }
         PreviousApp.remember()
-        showPopover()
+        showUI()
     }
 
-    // MARK: Popover
+    // MARK: Click
 
     @objc private func togglePopover(_ sender: Any?) {
-        if popover.isShown {
-            closePopover()
+        if isShown {
+            closeUI()
             return
         }
         PreviousApp.remember()
-        showPopover()
-    }
-
-    private func showPopover() {
-        guard let button = statusItem.button else { return }
-        state.prepareForShow()
-        NSApp.activate(ignoringOtherApps: true)
-        popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
-        popover.contentViewController?.view.window?.makeKey()
-    }
-
-    private func closePopover() {
-        popover.performClose(nil)
+        showUI()
     }
 
     func popoverDidClose(_ notification: Notification) {
@@ -252,7 +301,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     /// swallowed by the search box.
     private func installKeyMonitor() {
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            guard let self, self.popover.isShown else { return event }
+            guard let self, self.isShown else { return event }
             // The settings window has its own text fields and must keep its keys.
             if event.window === self.settingsWindow { return event }
             return self.state.handleKey(event) ? nil : event
@@ -262,7 +311,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     // MARK: Settings window
 
     private func openSettings() {
-        closePopover()
+        closeUI()
         if let window = settingsWindow {
             NSApp.activate(ignoringOtherApps: true)
             window.makeKeyAndOrderFront(nil)

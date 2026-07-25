@@ -104,6 +104,29 @@ enum SortOrder: String, CaseIterable, Identifiable {
     }
 }
 
+/// Where the window appears when you summon it.
+enum PresentationStyle: String, CaseIterable, Identifiable {
+    /// Centred on the screen you are working on, like Spotlight.
+    case palette
+    /// Hanging off the menu bar icon.
+    case menuBar
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .palette: return "Centred on screen"
+        case .menuBar: return "Attached to the menu bar icon"
+        }
+    }
+    var detail: String {
+        switch self {
+        case .palette:
+            return "Opens in the middle of whichever screen your pointer is on. Unaffected by a full menu bar."
+        case .menuBar:
+            return "Opens as a popover under the AliasBar icon. Needs room in the menu bar to be reachable by mouse."
+        }
+    }
+}
+
 enum BoardDensity: String, CaseIterable, Identifiable {
     case comfortable, dense
     var id: String { rawValue }
@@ -218,6 +241,7 @@ final class AppSettings: ObservableObject {
         static let sortOrder = "sortOrder"
         static let theme = "theme"
         static let boardDensity = "boardDensity"
+        static let presentationStyle = "presentationStyle"
         static let rcPath = "rcPathOverride"
         static let showFunctions = "showFunctions"
         static let showAliases = "showAliases"
@@ -252,6 +276,9 @@ final class AppSettings: ObservableObject {
     }
     @Published var boardDensity: BoardDensity {
         didSet { defaults.set(boardDensity.rawValue, forKey: Key.boardDensity) }
+    }
+    @Published var presentationStyle: PresentationStyle {
+        didSet { defaults.set(presentationStyle.rawValue, forKey: Key.presentationStyle) }
     }
 
     // MARK: Content
@@ -312,6 +339,10 @@ final class AppSettings: ObservableObject {
         sortOrder = decode(Key.sortOrder, SortOrder.usage)
         themeName = decode(Key.theme, ThemeName.slate)
         boardDensity = decode(Key.boardDensity, BoardDensity.comfortable)
+        // Centred by default. The menu bar popover is the fallback, not the other way
+        // round: on a laptop with a full menu bar the icon is not reliably placed, and
+        // the hotkey is how this gets opened in practice anyway.
+        presentationStyle = decode(Key.presentationStyle, PresentationStyle.palette)
 
         rcPathOverride = store.string(forKey: Key.rcPath)
 
