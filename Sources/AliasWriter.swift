@@ -377,11 +377,37 @@ enum AliasWriter {
         for span in removed where span.count > 1 {
             for index in 1..<span.count {
                 let above = span[0..<index].joined(separator: "\n") + "\n"
-                guard let (completeAbove, _) = parses(above), completeAbove else { continue }
+                guard isCompleteStatement(above) else { continue }
                 let bare = span[index].trimmingCharacters(in: .whitespaces)
                 throw WriteError.collateralDamage(bare.isEmpty ? "a blank line" : "`\(bare)`")
             }
         }
+    }
+
+    /// Whether `text` is a finished statement, as opposed to one that continues onto the
+    /// line after it.
+    ///
+    /// Parsing alone cannot answer this. `zsh -n` tolerates a trailing backslash at end of
+    /// file, so `alias doomed=1 \` parses happily even though in a real file that backslash
+    /// consumes the newline and the statement runs on. That tolerance is what made an
+    /// earlier version refuse a perfectly valid delete of a legacy alias written across two
+    /// lines (Codex round 14), and it is why probing for a minimal complete prefix does not
+    /// work as a way to compute spans either.
+    ///
+    /// A sentinel settles it. `fi` is a syntax error standing on its own line, but an
+    /// ordinary word when spliced onto the end of a previous line. So if appending it makes
+    /// the text parse, it was absorbed, which means the text was still open:
+    ///
+    ///     alias doomed=1 \        + fi  ->  `alias doomed=1 fi`   parses    -> continues
+    ///     alias doomed=x;# c \    + fi  ->  `fi` on its own line  no parse  -> complete
+    ///
+    /// The second case is right because the backslash sits inside a comment, where it is
+    /// inert. That distinction is invisible to a plain parse and is exactly the one the
+    /// hand-written lexer kept getting wrong.
+    private static func isCompleteStatement(_ text: String) -> Bool {
+        guard let (ok, _) = parses(text), ok else { return false }
+        guard let (absorbed, _) = parses(text + "fi\n") else { return true }
+        return !absorbed
     }
 
     /// The lines inside the managed block, verbatim.
@@ -458,13 +484,29 @@ enum AliasWriter {
         //
         // Round 13 then caught the overcorrection: refusing outright locked out edits that
         // are demonstrably safe, such as deleting a one-line `alias doomed='1'`, which
-        // cannot orphan anything and leaves the pre-existing error exactly as it was. So
-        // the test is whether every span being removed is a complete statement on its own.
-        // If each one is, removing it cannot leave a fragment behind, and the edit is
-        // allowed even though neither baseline could confirm it. An upsert never reaches
-        // here, since replacing a definition in place cannot orphan a fragment.
+        // cannot orphan anything and leaves the pre-existing error exactly as it was.
+        //
+        // Round 14 then caught the first attempt at that relaxation. Accepting any span
+        // that *parses* is not enough, because a script can hold more than one statement:
+        // `alias doomed=1; print -r -- keep-this` is one line, parses fine, and is read as
+        // defining `doomed`, so deleting it would take the user's `print` with it in
+        // silence. Parseability proves the span is well formed, not that it is only the
+        // alias.
+        //
+        // The test that does hold is whether the span is a line AliasBar itself wrote.
+        // Round-tripping through `aliasLine` proves it is exactly one alias definition by
+        // construction, with no room for a second statement. Anything hand-edited in a
+        // block that cannot be validated is left alone, which is the right answer for a
+        // situation where nothing else can vouch for the edit.
         if destructive, !bodyWasOK,
-           !removed.allSatisfy({ parses($0.joined(separator: "\n") + "\n")?.0 ?? false }) {
+           !removed.allSatisfy({ span in
+               guard span.count == 1 else { return false }
+               let line = span[0].trimmingCharacters(in: .whitespaces)
+               guard line.hasPrefix("alias "),
+                     let (name, value) = ZshrcParser.splitAliasAssignment(
+                         String(line.dropFirst("alias ".count))) else { return false }
+               return line == aliasLine(name: name, command: value)
+           }) {
             throw WriteError.wouldBreakSyntax(complaint)
         }
 

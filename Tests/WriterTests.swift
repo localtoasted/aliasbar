@@ -1249,6 +1249,55 @@ check("its neighbour survives", csAfter.contains("alias keeper='2'"), csAfter)
 check("and the unrelated pre-existing error is left exactly as it was",
       csAfter.contains("if [ -z \"$UNCLOSED\""), csAfter)
 
+// Codex round 14, finding 1: a span that parses is not necessarily ONE statement.
+// `alias doomed=1; print -r -- keep-this` is a single line, parses fine, and is read as
+// defining `doomed`, so an unvalidatable-block fallback that only checked parseability
+// would delete the user's `print` in silence.
+for (label, op) in [
+    ("delete", AliasWriter.Operation.delete(name: "doomed")),
+    ("rename", AliasWriter.Operation.rename(from: "doomed", to: "renamed", command: "echo x")),
+] {
+    let f = scratch("""
+    if true
+    \(ManagedBlock.begin)
+    then
+    alias doomed=1; print -r -- keep-this
+    fi
+    \(ManagedBlock.end)
+    if [ -z "$UNCLOSED"
+    """)
+    let before = read(f)
+    let outcome = Result { try AliasWriter.apply(op, path: f, allEntries: []) }
+    let after = read(f)
+    switch outcome {
+    case .success:
+        check("\(label): a same-line user command is never silently removed",
+              after.contains("print -r -- keep-this"), after)
+    case .failure:
+        check("\(label): the unprovable span was refused and the file is untouched",
+              after == before, after)
+    }
+}
+
+// Codex round 14, finding 2: this one must SUCCEED, not merely refuse safely. A legacy
+// alias written across two lines with a real backslash continuation is valid, and the
+// sentinel check is what lets the guard tell it apart from an inert backslash inside a
+// comment. Refusing here would strand the user with an alias the app cannot remove.
+let liveContinuation = scratch("""
+\(ManagedBlock.begin)
+alias twoline=1 \\
+echo tail
+alias neighbour='8'
+\(ManagedBlock.end)
+""")
+let lcOutcome = Result { try AliasWriter.apply(.delete(name: "twoline"), path: liveContinuation, allEntries: []) }
+let lc = read(liveContinuation)
+check("a genuine backslash continuation can still be deleted",
+      (try? lcOutcome.get()) != nil, lc)
+check("its continuation line went with it", !lc.contains("echo tail"), lc)
+check("its neighbour survives", lc.contains("alias neighbour='8'"), lc)
+check("and the file parses", zshAccepts(liveContinuation), lc)
+
 // An ordinary edit must not be slowed or blocked by the guard.
 let guardNormal = scratch("""
 \(ManagedBlock.begin)
