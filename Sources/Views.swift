@@ -88,6 +88,28 @@ struct RootView: View {
                     tab(mode)
                 }
 
+                // Not a fourth tab. History is a state FIND can be in, and showing it
+                // as a peer of the three views would say otherwise.
+                if state.historyMode {
+                    // Styled as a badge, not a tab: FIND is still the active view, and
+                    // two things wearing the active-tab treatment at once would say the
+                    // user is in two places.
+                    HStack(spacing: 4) {
+                        Image(systemName: "clock.arrow.circlepath")
+                            .font(.system(size: 9.5, weight: .semibold))
+                        Text("History")
+                            .font(.system(size: 11, weight: .semibold, design: theme.bodyDesign))
+                    }
+                    .foregroundStyle(theme.accent)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 2.5)
+                    .background(theme.surface,
+                                in: RoundedRectangle(cornerRadius: theme.cornerRadius))
+                    .overlay(RoundedRectangle(cornerRadius: theme.cornerRadius)
+                        .strokeBorder(theme.accent.opacity(0.28), lineWidth: 1))
+                    .help("Searching your shell history — ⌘H to go back")
+                }
+
                 Spacer(minLength: 6)
 
                 Text(ZshrcParser.displayPath)
@@ -113,7 +135,7 @@ struct RootView: View {
                     .focused($searchFocused)
                     .onChange(of: state.query) { _ in state.selection = 0 }
                 if !state.query.isEmpty {
-                    Text("\(state.activeList.count)")
+                    Text("\(state.historyMode ? state.historyResults.count : state.activeList.count)")
                         .font(.system(size: 10, weight: .semibold, design: .monospaced))
                         .foregroundStyle(theme.faint)
                 }
@@ -132,6 +154,7 @@ struct RootView: View {
     }
 
     private var searchPrompt: String {
+        if state.historyMode { return "Search everything you have run" }
         switch state.mode {
         case .find: return "Search aliases and functions"
         case .board: return "Type to highlight"
@@ -169,10 +192,15 @@ struct RootView: View {
                     .font(.system(size: 10))
                     .foregroundStyle(theme.dim)
                     .lineLimit(1)
+            } else if state.historyMode {
+                KeyHint(keys: "⏎", label: "run it")
+                KeyHint(keys: "⌘⏎", label: "make an alias")
+                KeyHint(keys: "⌘H", label: "back")
             } else {
                 KeyHint(keys: "⏎", label: settings.enterAction.short)
                 KeyHint(keys: "⌘⏎", label: settings.enterAction.secondary.short)
                 KeyHint(keys: "⌘N", label: "new")
+                KeyHint(keys: "⌘H", label: "history")
                 if state.mode != .manage { KeyHint(keys: "?", label: "graveyard") }
             }
 
@@ -315,8 +343,53 @@ struct FindView: View {
     @Namespace private var highlight
 
     var body: some View {
+        if state.historyMode { history } else { aliases }
+    }
+
+    // MARK: History
+
+    private var history: some View {
+        let commands = state.historyResults
+        return Group {
+            if commands.isEmpty {
+                EmptyStateView(symbol: "clock.arrow.circlepath",
+                               title: state.query.isEmpty
+                                   ? "Nothing readable in \(HistoryScanner.path.hasSuffix(".zsh_history") ? "~/.zsh_history" : "your history file")"
+                                   : "Nothing you have run matches \"\(state.query)\"",
+                               hint: "⌘H goes back to your aliases.")
+            } else {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("WHAT YOU HAVE RUN")
+                            .font(.system(size: 9, weight: .bold))
+                            .kerning(0.7)
+                            .foregroundStyle(theme.faint)
+                            .padding(.horizontal, 10)
+                            .padding(.bottom, 2)
+
+                        ForEach(Array(commands.enumerated()), id: \.element.id) { index, command in
+                            HistoryRow(command: command,
+                                       selected: state.selection == index,
+                                       suggestion: state.suggestedName(for: command.text),
+                                       highlight: highlight)
+                                .onTapGesture { state.selection = index; state.run(command) }
+                                .arriving(index)
+                        }
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 9)
+                    .animation(Motion.standard, value: state.selection)
+                }
+                .frame(maxHeight: 440)
+            }
+        }
+    }
+
+    // MARK: Aliases
+
+    private var aliases: some View {
         let results = state.results
-        Group {
+        return Group {
             if results.isEmpty {
                 if state.query.isEmpty {
                     EmptyStateView(symbol: "doc.text.magnifyingglass",
@@ -436,6 +509,63 @@ private struct PrimaryResult: View {
         .background {
             if selected {
                 SelectionCapsule(radius: theme.cornerRadius + 3, namespace: highlight)
+            }
+        }
+        .contentShape(Rectangle())
+    }
+}
+
+/// One command out of your shell history.
+///
+/// Reads as a terminal line rather than as a list row, because that is what it is — the
+/// command is shown in full, monospaced, with the count carried quietly at the end.
+private struct HistoryRow: View {
+    @Environment(\.theme) private var theme
+    let command: HistoryScanner.Command
+    let selected: Bool
+    /// The alias name ⌘↩ would propose. Shown only on the selected row: on every row it
+    /// would be noise, and on none of them the shortcut is invisible.
+    let suggestion: String
+    let highlight: Namespace.ID
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Text("$")
+                .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                .foregroundStyle(theme.accent.opacity(0.7))
+            Text(command.text.replacingOccurrences(of: "\n", with: " ⏎ "))
+                .font(.system(size: 12.5, design: .monospaced))
+                .foregroundStyle(theme.text)
+                .lineLimit(1)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .mask(
+                    HStack(spacing: 0) {
+                        Rectangle()
+                        LinearGradient(colors: [.black, .clear],
+                                       startPoint: .leading, endPoint: .trailing)
+                            .frame(width: 24)
+                    }
+                )
+            if selected && !suggestion.isEmpty {
+                Text("⌘↩ \(suggestion)")
+                    .font(.system(size: 10, weight: .medium, design: .monospaced))
+                    .foregroundStyle(theme.accent)
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 2)
+                    .background(theme.accent.opacity(0.14),
+                                in: RoundedRectangle(cornerRadius: theme.cornerRadius))
+            }
+            Text("\(command.count)×")
+                .font(.system(size: 9.5, design: .monospaced))
+                .monospacedDigit()
+                .foregroundStyle(theme.faint)
+                .frame(width: 34, alignment: .trailing)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background {
+            if selected {
+                SelectionCapsule(radius: theme.cornerRadius + 1, namespace: highlight)
             }
         }
         .contentShape(Rectangle())

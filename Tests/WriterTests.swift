@@ -1573,6 +1573,97 @@ _ = try! AliasWriter.apply(.upsert(name: "added", command: "echo hi", comment: n
 check("the guard lets a normal upsert through", read(guardNormal).contains("alias added="))
 check("and the result parses", zshAccepts(guardNormal))
 
+
+// ===========================================================================
+// HISTORY
+// ===========================================================================
+//
+// The history palette hands shell history back to the user. Two things have to
+// hold: nothing that looks like a credential is ever offered, and the ranking
+// puts what you were reaching for at the top.
+
+// --- What is safe to show back ---------------------------------------------
+
+for secret in [
+    "export AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY",
+    "curl -H 'Authorization: Bearer abc.def.ghi' https://api.example.com",
+    "mysql -u root --password=hunter2",
+    "export GITHUB_TOKEN=ghp_16CharactersOfNonsenseHere",
+    "openssl rsa -in -----BEGIN PRIVATE KEY-----",
+    "stripe login --api-key sk-live-abcdef",
+    "echo AAAAB3NzaC1yc2EAAAADAQABAAABgQC7vbqajDhAdcMzJMTaOu2ZQuLc >> keys",
+] {
+    check("history hides a credential: \(secret.prefix(28))…",
+          !HistoryScanner.isWorthOffering(secret))
+}
+
+for ordinary in [
+    "git status -sb",
+    "docker compose up -d",
+    "kubectl get pods -n staging",
+    "rg --hidden TODO",
+    "cd ~/src/aliasbar && ./build.sh",
+] {
+    check("history keeps an ordinary command: \(ordinary)",
+          HistoryScanner.isWorthOffering(ordinary))
+}
+
+check("history drops an empty line", !HistoryScanner.isWorthOffering(""))
+check("history drops a bare short word", !HistoryScanner.isWorthOffering("ls"))
+check("history drops an absurdly long line",
+      !HistoryScanner.isWorthOffering(String(repeating: "a b ", count: 200)))
+
+// --- Parsing a history file ------------------------------------------------
+
+let histFile = scratch("""
+: 1700000000:0;git status -sb
+: 1700000001:0;git status -sb
+: 1700000002:0;docker compose up -d
+: 1700000003:0;export API_KEY=abc123def456
+: 1700000004:0;git status -sb
+""")
+setenv("ALIASBAR_HISTORY", histFile, 1)
+let histCommands = HistoryScanner.commands()
+check("history strips the extended-format prefix",
+      histCommands.contains { $0.text == "git status -sb" },
+      histCommands.map(\.text).joined(separator: " | "))
+check("history counts repeats",
+      histCommands.first { $0.text == "git status -sb" }?.count == 3)
+check("history records recency in file order",
+      (histCommands.first { $0.text == "git status -sb" }?.lastSeen ?? 0)
+          > (histCommands.first { $0.text == "docker compose up -d" }?.lastSeen ?? 0))
+check("history omits the secret from a real file",
+      !histCommands.contains { $0.text.contains("API_KEY") },
+      histCommands.map(\.text).joined(separator: " | "))
+
+let multiline = scratch("""
+: 1700000000:0;for f in *.txt; do \\
+  echo $f; \\
+done
+""")
+setenv("ALIASBAR_HISTORY", multiline, 1)
+check("history rejoins a backslash continuation",
+      HistoryScanner.commands().contains { $0.text.contains("for f in") && $0.text.contains("done") },
+      HistoryScanner.commands().map(\.text).joined(separator: " | "))
+unsetenv("ALIASBAR_HISTORY")
+
+// --- Ranking ---------------------------------------------------------------
+
+check("an empty query matches everything", HistoryScanner.score("", in: "anything") == 0)
+check("a non-match scores nil", HistoryScanner.score("zzz", in: "git status") == nil)
+
+let prefix = HistoryScanner.score("git", in: "git status")!
+let contains = HistoryScanner.score("git", in: "hub clone git")!
+let subseq = HistoryScanner.score("gst", in: "git status")!
+check("a prefix match beats a contains match", prefix > contains, "\(prefix) vs \(contains)")
+check("a contains match beats a subsequence match", contains > subseq, "\(contains) vs \(subseq)")
+
+let early = HistoryScanner.score("status", in: "git status now")!
+let late = HistoryScanner.score("status", in: "echo a b c d e f g status")!
+check("an earlier contains match outranks a later one", early > late, "\(early) vs \(late)")
+check("matching is case-insensitive", HistoryScanner.score("GIT", in: "git status") != nil)
+
+
 // ---------------------------------------------------------------------------
 print("\n" + String(repeating: "-", count: 60))
 print("\(passes) passed, \(failures) failed")

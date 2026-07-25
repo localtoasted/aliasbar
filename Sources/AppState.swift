@@ -41,8 +41,8 @@ struct EditTarget: Identifiable {
     let originalName: String
     var id: String { originalName.isEmpty ? "new" : originalName }
 
-    static func create() -> EditTarget {
-        EditTarget(mode: .create, name: "", command: "", originalName: "")
+    static func create(name: String = "", command: String = "") -> EditTarget {
+        EditTarget(mode: .create, name: name, command: command, originalName: "")
     }
     static func edit(_ entry: ShellEntry) -> EditTarget {
         EditTarget(mode: .edit, name: entry.name, command: entry.command,
@@ -108,6 +108,109 @@ final class AppState: ObservableObject {
     var results: [RankedEntry] {
         let ranked = Ranker.rank(pool, query: query, scope: settings.searchScope)
         return Array(ranked.prefix(settings.resultLimit))
+    }
+
+    // MARK: - History
+
+    /// FIND, but searching everything you have ever run instead of everything you have
+    /// defined. Not a fourth view: the same surface, a different pool.
+    @Published var historyMode = false {
+        didSet { selection = 0; historyMemoQuery = nil }
+    }
+
+    private var historyCache: [HistoryScanner.Command] = []
+    private var historyStamp: Date?
+    private var historyMemoQuery: String?
+    private var historyMemo: [HistoryScanner.Command] = []
+
+    /// Re-reads the history file only when it has actually changed.
+    ///
+    /// A long-lived shell history is megabytes, and this runs on the main thread on the
+    /// way to showing a window. Re-parsing it on every open would be felt.
+    private func loadHistoryIfNeeded() {
+        let modified = (try? FileManager.default
+            .attributesOfItem(atPath: HistoryScanner.path))?[.modificationDate] as? Date
+        guard historyCache.isEmpty || modified != historyStamp else { return }
+        historyCache = HistoryScanner.commands()
+        historyStamp = modified
+        historyMemoQuery = nil
+    }
+
+    var historyResults: [HistoryScanner.Command] {
+        if historyMemoQuery == query { return historyMemo }
+        let scored: [(HistoryScanner.Command, Int)] = historyCache.compactMap { command in
+            guard let score = HistoryScanner.score(query, in: command.text) else { return nil }
+            return (command, score)
+        }
+        let ordered = scored.sorted { left, right in
+            if left.1 != right.1 { return left.1 > right.1 }
+            if left.0.count != right.0.count { return left.0.count > right.0.count }
+            return left.0.lastSeen > right.0.lastSeen
+        }
+        // A longer list than FIND's, deliberately. You know your own aliases by name; you
+        // are scanning history to recognise something, and recognition needs candidates.
+        let results = Array(ordered.prefix(max(settings.resultLimit, 8)).map(\.0))
+        historyMemoQuery = query
+        historyMemo = results
+        return results
+    }
+
+    /// Switches into history and makes sure there is something to show.
+    func enterHistory() {
+        mode = .find
+        historyMode = true
+        loadHistoryIfNeeded()
+    }
+
+    var selectedHistory: HistoryScanner.Command? {
+        let list = historyResults
+        guard list.indices.contains(selection) else { return nil }
+        return list[selection]
+    }
+
+    /// Turns something you have run into something you can run by name.
+    ///
+    /// The whole point of the history view: you find the command you have typed forty
+    /// times, and one keystroke later it is an alias. Opens the editor rather than
+    /// writing directly, because the name is a guess and naming is the part a person
+    /// should own.
+    func promoteToAlias(_ command: HistoryScanner.Command) {
+        editor = .create(name: suggestedName(for: command.text), command: command.text)
+    }
+
+    /// Initials of the first few real words: `git status -sb` suggests `gs`.
+    ///
+    /// Flags and environment assignments are skipped — they are the part that varies, so
+    /// they are the part that makes a bad name.
+    func suggestedName(for command: String) -> String {
+        let words = command.split(separator: " ").map(String.init)
+            .filter { !$0.hasPrefix("-") && !$0.contains("=") && $0 != "sudo" }
+        guard !words.isEmpty else { return "" }
+
+        func clean(_ text: String) -> String {
+            text.lowercased().filter { $0.isLetter || $0.isNumber }
+        }
+
+        // Tried in order, longest-lived first. A collision should push toward a name
+        // that is still readable rather than straight to a numbered one — `gs` taken
+        // should suggest `gis`, not `gs2`.
+        var candidates: [String] = []
+        candidates.append(clean(words.prefix(3).compactMap { $0.first.map(String.init) }.joined()))
+        if words.count >= 2 {
+            candidates.append(clean(String(words[0].prefix(2)) + String(words[1].prefix(1))))
+            candidates.append(clean(String(words[0].prefix(2)) + String(words[1].prefix(2))))
+        }
+        candidates.append(clean(String(words[0].prefix(4))))
+
+        let taken = Set(store.ranked.map(\.name))
+        let usable = candidates.filter { $0.count >= 2 }
+        for candidate in usable where !taken.contains(candidate) { return candidate }
+
+        guard let base = usable.first else { return "" }
+        for suffix in 2...9 where !taken.contains(base + String(suffix)) {
+            return base + String(suffix)
+        }
+        return base
     }
 
     /// BOARD shows everything, always. Typing dims rather than removes, so the grid
@@ -179,6 +282,7 @@ final class AppState: ObservableObject {
         store.reload()
         errorMessage = store.loadError
         mode = settings.defaultView
+        historyMode = false
         query = ""
         selection = 0
         editor = nil
@@ -186,7 +290,7 @@ final class AppState: ObservableObject {
     }
 
     func clampSelection() {
-        let count = activeList.count
+        let count = historyMode ? historyResults.count : activeList.count
         if count == 0 { selection = 0 }
         else if selection >= count { selection = count - 1 }
         else if selection < 0 { selection = 0 }
@@ -218,7 +322,22 @@ final class AppState: ObservableObject {
 
         switch Int(event.keyCode) {
         case kVK_Escape:
+            // One step back before one step out. Escaping straight to the desktop from
+            // history would make the view feel like a trapdoor.
+            if historyMode {
+                historyMode = false
+                return true
+            }
             dismiss(restoringFocus: true)
+            return true
+
+        case kVK_ANSI_H where command:
+            if historyMode { historyMode = false } else { enterHistory() }
+            return true
+
+        case kVK_Return where historyMode:
+            guard let entry = selectedHistory else { return true }
+            if command { promoteToAlias(entry) } else { run(entry) }
             return true
 
         case kVK_DownArrow:
@@ -279,7 +398,8 @@ final class AppState: ObservableObject {
 
         // Prefix keys jump straight into a MANAGE bucket, but only as the first
         // character. Typing `?` mid-query should search for a question mark.
-        if query.isEmpty, !command, !control, let chars = event.charactersIgnoringModifiers {
+        if query.isEmpty, !historyMode, !command, !control,
+           let chars = event.charactersIgnoringModifiers {
             if let target = Self.prefixBucket(for: chars) {
                 mode = .manage
                 bucket = target
@@ -301,7 +421,7 @@ final class AppState: ObservableObject {
     }
 
     private func move(by delta: Int) {
-        let count = activeList.count
+        let count = historyMode ? historyResults.count : activeList.count
         guard count > 0 else { selection = 0; return }
         // Wraps, because in a capped list the fastest way to the last item is up.
         selection = ((selection + delta) % count + count) % count
@@ -309,6 +429,8 @@ final class AppState: ObservableObject {
 
     private func switchTo(_ newMode: ViewMode) {
         mode = newMode
+        // History is a state of FIND, so leaving FIND leaves it.
+        historyMode = false
         selection = 0
     }
 
@@ -325,16 +447,35 @@ final class AppState: ObservableObject {
         let payload = (action == .copyName || action == .pasteName)
             ? entry.entry.name
             : entry.entry.command
+        let pasting = action == .pasteName || action == .pasteCommand
+        deliver(payload,
+                pasting: pasting,
+                toast: action == .copyName ? "Copied \(entry.name)" : "Copied command")
+    }
 
-        switch action {
-        case .copyName, .copyCommand:
+    /// A history command goes out by the same route an alias command would.
+    ///
+    /// It has no name to paste, so the name/command half of the preference does not
+    /// apply — only the copy/paste half does.
+    func run(_ command: HistoryScanner.Command) {
+        deliver(command.text,
+                pasting: settings.enterAction == .pasteName
+                    || settings.enterAction == .pasteCommand,
+                toast: "Copied command")
+    }
+
+    /// Puts a string where the user asked for it: the clipboard, or straight into
+    /// whatever regains focus.
+    private func deliver(_ payload: String, pasting: Bool, toast: String) {
+        switch pasting {
+        case false:
             let pasteboard = NSPasteboard.general
             pasteboard.clearContents()
             pasteboard.setString(payload, forType: .string)
-            show(toast: action == .copyName ? "Copied \(entry.name)" : "Copied command")
+            show(toast: toast)
             finish()
 
-        case .pasteName, .pasteCommand:
+        case true:
             guard Typist.isTrusted else {
                 // Never fail silently and never lose the user's action: put it on the
                 // clipboard anyway, so the worst case is one extra ⌘V.

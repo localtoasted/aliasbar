@@ -42,10 +42,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         }
 
         // Opens itself so a screenshot harness does not have to synthesise a keystroke,
-        // which needs Accessibility permission and cannot run over SSH.
-        if ProcessInfo.processInfo.environment["ALIASBAR_OPEN_ON_LAUNCH"] == "1" {
+        // which needs Accessibility permission and cannot run over SSH. Set it to
+        // "history" to land in the history palette instead of the default view.
+        let openOnLaunch = ProcessInfo.processInfo.environment["ALIASBAR_OPEN_ON_LAUNCH"]
+        if openOnLaunch == "1" || openOnLaunch == "history" {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
                 self?.summon()
+                if openOnLaunch == "history" { self?.state.enterHistory() }
             }
         }
     }

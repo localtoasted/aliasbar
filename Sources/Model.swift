@@ -346,6 +346,120 @@ enum HistoryScanner {
         flush()
         return words
     }
+
+    // MARK: Whole commands
+
+    /// One distinct command line, with how often it was run and how recently.
+    struct Command: Identifiable, Hashable {
+        let text: String
+        let count: Int
+        /// Position in the file, counting from the top. Higher is more recent. Ordinal
+        /// rather than a timestamp because the plain (non-extended) history format has no
+        /// timestamps at all, and the file is already in chronological order either way.
+        let lastSeen: Int
+        var id: String { text }
+    }
+
+    /// Every distinct command in the history file, most recent occurrence wins.
+    ///
+    /// Unlike `commandWordCounts`, this keeps the whole line: the point is to hand you
+    /// back something you can run, not to attribute a count to an alias name.
+    static func commands() -> [Command] {
+        guard let data = FileManager.default.contents(atPath: path) else { return [] }
+        let text = String(data: data, encoding: .utf8)
+            ?? String(data: data, encoding: .isoLatin1)
+            ?? ""
+        guard !text.isEmpty else { return [] }
+
+        var counts: [String: Int] = [:]
+        var lastSeen: [String: Int] = [:]
+        var continuation = ""
+        var ordinal = 0
+
+        for rawLine in text.split(separator: "\n", omittingEmptySubsequences: false) {
+            var line = String(rawLine)
+
+            if line.hasPrefix(":"), let semi = line.firstIndex(of: ";") {
+                line = String(line[line.index(after: semi)...])
+            }
+            if line.hasSuffix("\\") {
+                continuation += String(line.dropLast()) + "\n"
+                continue
+            }
+            if !continuation.isEmpty {
+                line = continuation + line
+                continuation = ""
+            }
+
+            ordinal += 1
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard isWorthOffering(trimmed) else { continue }
+            counts[trimmed, default: 0] += 1
+            lastSeen[trimmed] = ordinal
+        }
+
+        return counts.map { Command(text: $0.key, count: $0.value,
+                                    lastSeen: lastSeen[$0.key] ?? 0) }
+    }
+
+    /// Whether a history line should be shown back to the user at all.
+    ///
+    /// Shell history is not a curated list — it is a transcript, and transcripts contain
+    /// things nobody meant to keep. Anything that looks like it carries a credential is
+    /// dropped outright rather than shown and marked, because a secret you can see is a
+    /// secret that can end up in a screenshot, a screen share, or a paste.
+    ///
+    /// This is a filter, not a guarantee. It cannot know that `deploy prod` takes a token
+    /// from the environment. It is here to catch the obvious cases, which are also the
+    /// common ones.
+    static func isWorthOffering(_ line: String) -> Bool {
+        guard !line.isEmpty, line.count <= 512 else { return false }
+        // A bare word is almost always something you would never need looked up.
+        guard line.contains(" ") || line.count > 3 else { return false }
+
+        let lowered = line.lowercased()
+        for marker in secretMarkers where lowered.contains(marker) {
+            return false
+        }
+        // A long unbroken run of base64-ish characters is a key, a token, or a hash.
+        var run = 0
+        for scalar in line.unicodeScalars {
+            let isTokenish = CharacterSet.alphanumerics.contains(scalar)
+                || scalar == "-" || scalar == "_" || scalar == "+" || scalar == "/"
+            run = isTokenish ? run + 1 : 0
+            if run >= 40 { return false }
+        }
+        return true
+    }
+
+    /// How well a query matches a command, or nil if it does not match at all.
+    ///
+    /// Ordered by how much the user had to remember: a command that starts with what they
+    /// typed beats one that merely contains it, which beats one where the letters only
+    /// appear in order.
+    static func score(_ query: String, in text: String) -> Int? {
+        guard !query.isEmpty else { return 0 }
+        let needle = query.lowercased()
+        let haystack = text.lowercased()
+
+        if haystack.hasPrefix(needle) { return 300 }
+        if let found = haystack.range(of: needle) {
+            let offset = haystack.distance(from: haystack.startIndex, to: found.lowerBound)
+            return 200 - min(99, offset)
+        }
+        var next = needle.startIndex
+        for character in haystack where character == needle[next] {
+            next = needle.index(after: next)
+            if next == needle.endIndex { return 50 }
+        }
+        return nil
+    }
+
+    private static let secretMarkers = [
+        "password", "passwd", "secret", "token", "api_key", "apikey", "api-key",
+        "access_key", "private_key", "credential", "bearer ", "authorization:",
+        "-----begin", "aws_secret", "client_secret", "ghp_", "sk-", "xoxb-",
+    ]
 }
 
 // MARK: - Conflicts
