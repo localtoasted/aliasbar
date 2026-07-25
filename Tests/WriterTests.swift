@@ -1298,6 +1298,62 @@ check("its continuation line went with it", !lc.contains("echo tail"), lc)
 check("its neighbour survives", lc.contains("alias neighbour='8'"), lc)
 check("and the file parses", zshAccepts(liveContinuation), lc)
 
+// Codex round 15, finding 1: `splitAliasAssignment` takes everything before the first `=`
+// as the name, so a line carrying a second statement can round-trip perfectly unless the
+// name itself is validated.
+check("a line whose name hides a second statement is not canonical",
+      !AliasWriter.isCanonicalAliasLine("alias doomed; print -r -- keep='x'"))
+check("nor one with a space in the name",
+      !AliasWriter.isCanonicalAliasLine("alias two words='x'"))
+check("nor a reserved word", !AliasWriter.isCanonicalAliasLine("alias if='x'"))
+
+for (label, op) in [
+    ("delete", AliasWriter.Operation.delete(name: "doomed; print -r -- keep")),
+    ("rename", AliasWriter.Operation.rename(from: "doomed; print -r -- keep",
+                                            to: "renamed", command: "echo x")),
+] {
+    let f = scratch("""
+    if true
+    \(ManagedBlock.begin)
+    then
+    alias doomed; print -r -- keep='x'
+    fi
+    \(ManagedBlock.end)
+    if [ -z "$UNCLOSED"
+    """)
+    let before = read(f)
+    _ = Result { try AliasWriter.apply(op, path: f, allEntries: []) }
+    let after = read(f)
+    check("\(label): a statement hidden in an alias name is never silently removed",
+          after == before || after.contains("print -r -- keep"), after)
+}
+
+// Codex round 15, finding 2: commands AliasBar itself wrote containing apostrophes must
+// pass their own round-trip. The canonical `'\''` splice was being double-escaped, so the
+// fallback refused exactly the lines it exists to permit.
+for command in ["echo 'hi'", "it's fine", "echo trailing'", "'leading", "plain", "a'b'c"] {
+    let line = AliasWriter.aliasLine(name: "quoted", command: command)
+    check("canonical round-trip survives \(command.debugDescription)",
+          AliasWriter.isCanonicalAliasLine(line), line)
+}
+
+// And end to end, on the fallback path itself.
+let apostropheFallback = scratch("""
+if true
+\(ManagedBlock.begin)
+then
+\(AliasWriter.aliasLine(name: "quoted", command: "echo 'hi'"))
+\(AliasWriter.aliasLine(name: "keeper", command: "echo two"))
+fi
+\(ManagedBlock.end)
+if [ -z "$UNCLOSED"
+""")
+let apOutcome = Result { try AliasWriter.apply(.delete(name: "quoted"), path: apostropheFallback, allEntries: []) }
+let apAfter = read(apostropheFallback)
+check("an AliasBar-written alias with an apostrophe is deletable on the fallback path",
+      (try? apOutcome.get()) != nil, apAfter)
+check("its neighbour survives", apAfter.contains("alias keeper="), apAfter)
+
 // An ordinary edit must not be slowed or blocked by the guard.
 let guardNormal = scratch("""
 \(ManagedBlock.begin)

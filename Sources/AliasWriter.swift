@@ -384,6 +384,79 @@ enum AliasWriter {
         }
     }
 
+    /// Whether `line` is exactly one alias statement in the canonical form this writer
+    /// emits, and therefore provably cannot contain a second statement.
+    ///
+    /// Used only by the fallback in `guardSyntax`, where neither the file nor the block
+    /// could be parsed and the edit has to vouch for itself.
+    ///
+    /// Two things have to hold, and Codex round 15 found that skipping either one is
+    /// exploitable:
+    ///
+    /// 1. **The name must be a legal alias name.** `splitAliasAssignment` takes everything
+    ///    before the first `=` as the name, so `alias doomed; print -r -- keep='x'`
+    ///    otherwise round-trips perfectly, with the name `doomed; print -r -- keep`.
+    ///    Deleting that entry would take the independent `print` with it.
+    /// 2. **The value must decode as canonical quoting.** Feeding the still-escaped value
+    ///    straight back into `aliasLine` double-escapes any `'\''` splice, so a command
+    ///    AliasBar itself wrote containing an apostrophe failed its own round-trip and a
+    ///    legitimate delete was refused.
+    ///
+    /// The final equality check is what makes this safe: whatever the decoder does, the
+    /// line is only accepted if re-emitting it reproduces the original byte for byte.
+    static func isCanonicalAliasLine(_ line: String) -> Bool {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        guard trimmed.hasPrefix("alias ") else { return false }
+        let rest = String(trimmed.dropFirst("alias ".count))
+        guard let eq = rest.firstIndex(of: "=") else { return false }
+
+        let name = String(rest[..<eq])
+        let value = String(rest[rest.index(after: eq)...])
+        guard let command = unquoteCanonical(value) else { return false }
+        // The same validation a write goes through. A name that could not have been
+        // written by AliasBar is not one this fallback should vouch for.
+        guard (try? validate(name: name, command: command)) != nil else { return false }
+        return trimmed == aliasLine(name: name, command: command)
+    }
+
+    /// The inverse of `quote(_:)` for canonically quoted values, or nil for anything else.
+    ///
+    /// Only has to be correct on values `quote(_:)` produced; the caller re-emits and
+    /// compares, so a wrong decode fails the equality check and the edit is refused.
+    private static func unquoteCanonical(_ value: String) -> String? {
+        guard value.hasPrefix("'") else { return nil }
+        var out = ""
+        var i = value.index(after: value.startIndex)
+        var closed = false
+
+        while i < value.endIndex {
+            guard value[i] == "'" else {
+                out.append(value[i])
+                i = value.index(after: i)
+                continue
+            }
+            // A quote is only legal as the closing delimiter or as part of the `'\''`
+            // splice that `quote(_:)` uses to embed a literal apostrophe.
+            let after = value.index(after: i)
+            if after == value.endIndex { closed = true; i = after; continue }
+            guard value[after] == "\\" else { return nil }
+            let backslashed = value.index(after: after)
+            guard backslashed < value.endIndex, value[backslashed] == "'" else { return nil }
+            out.append("'")
+            let reopen = value.index(after: backslashed)
+            if reopen == value.endIndex {
+                // `quote(_:)` trims the redundant trailing `''` when a command ends in an
+                // apostrophe, leaving the value ending at `'\'`.
+                closed = true
+                i = reopen
+                continue
+            }
+            guard value[reopen] == "'" else { return nil }
+            i = value.index(after: reopen)
+        }
+        return closed ? out : nil
+    }
+
     /// Whether `text` is a finished statement, as opposed to one that continues onto the
     /// line after it.
     ///
@@ -499,14 +572,7 @@ enum AliasWriter {
         // block that cannot be validated is left alone, which is the right answer for a
         // situation where nothing else can vouch for the edit.
         if destructive, !bodyWasOK,
-           !removed.allSatisfy({ span in
-               guard span.count == 1 else { return false }
-               let line = span[0].trimmingCharacters(in: .whitespaces)
-               guard line.hasPrefix("alias "),
-                     let (name, value) = ZshrcParser.splitAliasAssignment(
-                         String(line.dropFirst("alias ".count))) else { return false }
-               return line == aliasLine(name: name, command: value)
-           }) {
+           !removed.allSatisfy({ $0.count == 1 && isCanonicalAliasLine($0[0]) }) {
             throw WriteError.wouldBreakSyntax(complaint)
         }
 
