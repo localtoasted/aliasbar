@@ -14,12 +14,16 @@ set -euo pipefail
 # A self-signed certificate gives the bundle a fixed identity. The grant attaches to the
 # certificate, and the certificate does not change when the code does.
 #
-# Run this once. It will ask for your login keychain password when it adds the trust
-# setting — that is macOS asking, not this script, and nothing here reads it.
+# Run this once. No password, no prompt: codesign will use a self-signed certificate
+# sitting in the login keychain without needing an explicit trust setting, which is the
+# step most instructions for this include and which turns out not to be required.
 
 NAME="${1:-AliasBar Local Signing}"
 
-if security find-identity -v -p codesigning 2>/dev/null | grep -q "${NAME}"; then
+# `security find-identity -p codesigning` only lists certificates with explicit trust
+# settings, so it reports "0 valid identities" for one that codesign will happily use.
+# Asking the keychain whether the certificate exists is the question that matters.
+if security find-certificate -c "${NAME}" >/dev/null 2>&1; then
     echo "==> '${NAME}' already exists. Nothing to do."
     echo "    Rebuild with ./build.sh and it will be used automatically."
     exit 0
@@ -37,20 +41,21 @@ openssl req -x509 -newkey rsa:2048 -nodes \
     -addext "extendedKeyUsage=critical,codeSigning" \
     2>/dev/null
 
+# A passphrase is required, not optional: `security import` fails MAC verification on a
+# PKCS#12 built with an empty one. It is a throwaway for a file that exists for the next
+# two lines and is deleted on exit.
+PASS="$(openssl rand -hex 16)"
 openssl pkcs12 -export -out "${WORK}/identity.p12" \
-    -inkey "${WORK}/key.pem" -in "${WORK}/cert.pem" -passout pass: 2>/dev/null
+    -inkey "${WORK}/key.pem" -in "${WORK}/cert.pem" -passout "pass:${PASS}" 2>/dev/null
 
 KEYCHAIN="${HOME}/Library/Keychains/login.keychain-db"
 
 echo "==> Importing into your login keychain"
 # -T /usr/bin/codesign lets codesign use the key without prompting on every build.
-security import "${WORK}/identity.p12" -k "${KEYCHAIN}" -P "" -T /usr/bin/codesign >/dev/null
-
-echo "==> Marking it trusted for code signing (macOS will ask for your password)"
-security add-trusted-cert -p codeSign -k "${KEYCHAIN}" "${WORK}/cert.pem"
+security import "${WORK}/identity.p12" -k "${KEYCHAIN}" -P "${PASS}" -T /usr/bin/codesign >/dev/null
 
 echo
-if security find-identity -v -p codesigning | grep -q "${NAME}"; then
+if security find-certificate -c "${NAME}" >/dev/null 2>&1; then
     echo "==> Done. '${NAME}' is ready."
     echo
     echo "Next, and this part is necessary exactly once:"
@@ -60,7 +65,7 @@ if security find-identity -v -p codesigning | grep -q "${NAME}"; then
     echo
     echo "Every rebuild after that keeps the permission."
 else
-    echo "==> The certificate was created but is not yet valid for code signing."
-    echo "    Open Keychain Access, find '${NAME}' under login > My Certificates,"
-    echo "    Get Info > Trust, and set 'Code Signing' to 'Always Trust'."
+    echo "==> The import did not take. Open Keychain Access and check whether"
+    echo "    '${NAME}' landed under login > My Certificates."
+    exit 1
 fi

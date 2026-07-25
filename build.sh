@@ -70,7 +70,9 @@ PLIST
 # which does not change when the code does. Run tools/create-signing-identity.sh once
 # and every rebuild after that keeps the permission.
 SIGN_IDENTITY="${ALIASBAR_SIGN_IDENTITY:-AliasBar Local Signing}"
-if security find-identity -v -p codesigning 2>/dev/null | grep -q "${SIGN_IDENTITY}"; then
+# Not `find-identity -p codesigning`: that lists only certificates carrying an explicit
+# trust setting, and reports "0 valid identities" for one codesign will use happily.
+if security find-certificate -c "${SIGN_IDENTITY}" >/dev/null 2>&1; then
     echo "==> Codesigning as ${SIGN_IDENTITY}"
     codesign --force --deep -s "${SIGN_IDENTITY}" "${APP_BUNDLE}"
 else
