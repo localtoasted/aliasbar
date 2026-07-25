@@ -1534,6 +1534,34 @@ for (opLabel, op) in [
           after == before || after.contains("${arr[@]}"), after)
 }
 
+// Codex round 20: the guarantee was right, the implementation was not. Checking the first
+// and last character does not prove the value is quoted throughout. An interior delimiter
+// means the quoted run closed and reopened, leaving the middle exposed.
+check("a value that closes and reopens its quote is not one word",
+      !AliasWriter.removalIsProvablyOneAlias("alias doomed=''${arr[@]}''"))
+check("same for double quotes",
+      !AliasWriter.removalIsProvablyOneAlias("alias doomed=\"\"${arr[@]}\"\""))
+check("a genuinely single-quoted value is still fine",
+      AliasWriter.removalIsProvablyOneAlias("alias doomed='echo ${arr[@]}'"))
+
+for (opLabel, op) in [
+    ("delete", AliasWriter.Operation.delete(name: "doomed")),
+    ("upsert", AliasWriter.Operation.upsert(name: "doomed", command: "echo new", comment: nil)),
+    ("rename", AliasWriter.Operation.rename(from: "doomed", to: "renamed", command: "echo x")),
+] {
+    let f = scratch("""
+    \(ManagedBlock.begin)
+    arr=(one victim=y)
+    alias doomed=''${arr[@]}''
+    \(ManagedBlock.end)
+    """)
+    let before = read(f)
+    _ = Result { try AliasWriter.apply(op, path: f, allEntries: []) }
+    let after = read(f)
+    check("\(opLabel): quote-boundary spoofing never removes the hidden alias",
+          after == before || after.contains("${arr[@]}"), after)
+}
+
 // An ordinary edit must not be slowed or blocked by the guard.
 let guardNormal = scratch("""
 \(ManagedBlock.begin)

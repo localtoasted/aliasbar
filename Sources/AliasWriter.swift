@@ -475,9 +475,17 @@ enum AliasWriter {
     /// Whether an alias value provably expands to exactly one word. See the guarantees
     /// listed in `removalIsProvablyOneAlias`.
     private static func valueIsOneWord(_ value: String) -> Bool {
-        if value.count >= 2, value.first == "'", value.last == "'" { return true }
+        // The quote must run uninterrupted from end to end, which is not the same as the
+        // value starting and ending with one. Codex round 20: `''${arr[@]}''` begins and
+        // ends with a single quote while its middle is wide open, so with
+        // `arr=(one victim=y)` it expands to two definitions. An interior delimiter means
+        // the quoted run closed and reopened, so anything between was unquoted.
+        if value.count >= 2, value.first == "'", value.last == "'" {
+            return !value.dropFirst().dropLast().contains("'")
+        }
         if value.count >= 2, value.first == "\"", value.last == "\"" {
-            return !value.contains("$") && !value.contains("`")
+            let inner = value.dropFirst().dropLast()
+            return !inner.contains("\"") && !inner.contains("$") && !inner.contains("`")
         }
         // Unquoted. Anything beyond plain text can expand, split, or glob.
         let literal = CharacterSet(charactersIn:
