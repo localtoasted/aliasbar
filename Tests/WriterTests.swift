@@ -854,6 +854,37 @@ check("a brace inside a word does not create a comment boundary",
       !bw.contains("touch /tmp/aliasbar-brace-should-never-run"), bw)
 check("its sibling survives", bw.contains("alias braceSibling='5'"))
 
+// Parentheses are the same story. `$((1))`, `$(cmd)` and `<(cmd)` all put a `)` inside a
+// single word, so treating it as a boundary reopened the identical hole.
+let parenWord = scratch("""
+\(ManagedBlock.begin)
+alias parened=echo$((1))#tag \\
+touch /tmp/aliasbar-paren-should-never-run
+alias parenSibling='6'
+\(ManagedBlock.end)
+""")
+_ = try! AliasWriter.apply(.delete(name: "parened"), path: parenWord, allEntries: [])
+let pw = read(parenWord)
+check("a paren inside a word does not create a comment boundary",
+      !pw.contains("touch /tmp/aliasbar-paren-should-never-run"), pw)
+check("its sibling survives", pw.contains("alias parenSibling='6'"))
+
+// Command and process substitution reach the same state by different syntax.
+for (label, value) in [("cmdsub", "echo$(date)#tag"), ("procsub", "cat<(echo hi)#tag")] {
+    let f = scratch("""
+    \(ManagedBlock.begin)
+    alias \(label)=\(value) \\
+    touch /tmp/aliasbar-\(label)-should-never-run
+    alias \(label)Sibling='7'
+    \(ManagedBlock.end)
+    """)
+    _ = try! AliasWriter.apply(.delete(name: label), path: f, allEntries: [])
+    let out = read(f)
+    check("\(label): substitution parens do not create a comment boundary",
+          !out.contains("touch /tmp/aliasbar-\(label)-should-never-run"), out)
+    check("\(label): its sibling survives", out.contains("alias \(label)Sibling='7'"))
+}
+
 // A standalone brace is still a boundary, because whitespace around it sets one.
 let standaloneBrace = scratch("""
 \(ManagedBlock.begin)

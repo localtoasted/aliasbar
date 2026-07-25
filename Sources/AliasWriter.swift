@@ -381,8 +381,25 @@ enum AliasWriter {
         /// Everything the lexer needs to carry from one line to the next.
         struct LexState {
             var quote: QuoteState = .unquoted
-            /// Whether the next character begins a new word. `#` introduces a comment
-            /// only at a word boundary; inside a word it is an ordinary character.
+            /// Whether the previous character was unquoted whitespace (or this is the
+            /// start of a line). `#` introduces a comment only there; anywhere inside a
+            /// word it is an ordinary character.
+            ///
+            /// **Only whitespace sets this, deliberately.** Shell metacharacters look
+            /// like word separators, but `(`, `)`, `{`, and `}` all occur *inside*
+            /// single words through `${HOME}`, `$((1))`, `$(cmd)`, `<(cmd)`, and brace
+            /// expansion. Counting any of them as a boundary makes a following `#` look
+            /// like a comment introducer, which hides a trailing backslash and orphans
+            /// the continuation line as a command that runs at shell startup. That
+            /// exact bug arrived twice, via `}` and via `)`.
+            ///
+            /// Distinguishing a metacharacter from a substitution needs full nesting
+            /// state for arithmetic, command, process, and glob constructs. Whitespace
+            /// is the rule that is both simple and safe. The one case it gets wrong is
+            /// `;#comment` or `|#comment` ending in a backslash, where the span extends
+            /// one line too far; that costs an over-delete of a comment line rather than
+            /// leaving live code behind, and standalone metacharacters are surrounded by
+            /// whitespace in practice anyway.
             var atWordStart = true
             /// Whether the statement continues onto the following line.
             var continues = false
@@ -433,17 +450,6 @@ enum AliasWriter {
                         state.continues = false
                         return state
                     } else if ch == " " || ch == "\t" {
-                        state.atWordStart = true
-                    } else if ch == ";" || ch == "|" || ch == "&"
-                                || ch == "(" || ch == ")" {
-                        // Shell metacharacters genuinely break words. Braces do not:
-                        // `{` and `}` are reserved words only when they stand alone, and
-                        // inside a word they are ordinary characters — `${FOO}` and
-                        // `a{b,c}` are single words. Treating `}` as a boundary made a
-                        // following `#` look like a comment introducer, which is the
-                        // same truncation bug by yet another route. Standalone braces
-                        // are already handled, because they are surrounded by
-                        // whitespace, which does set a boundary.
                         state.atWordStart = true
                     } else {
                         // Includes `#` mid-word, which zsh treats as an ordinary
