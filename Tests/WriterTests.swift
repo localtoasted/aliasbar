@@ -1354,6 +1354,53 @@ check("an AliasBar-written alias with an apostrophe is deletable on the fallback
       (try? apOutcome.get()) != nil, apAfter)
 check("its neighbour survives", apAfter.contains("alias keeper="), apAfter)
 
+// Codex round 16, the one that mattered most: everything above was checked only on
+// already-broken files, and guardSyntax returns as soon as the rewritten file parses. So a
+// definition carrying a second statement on the same line went straight through on an
+// ORDINARY, perfectly valid .zshrc. Both routes, both operations.
+for (label, victim) in [
+    ("value-side", "alias doomed='x'; print -r -- keep-this"),
+    ("name-side",  "alias doomed; print -r -- keep-this='x'"),
+] {
+    for (opLabel, name) in [("delete", "doomed"), ("rename", "doomed")] {
+        let f = scratch("""
+        \(ManagedBlock.begin)
+        \(victim)
+        alias bystander='9'
+        \(ManagedBlock.end)
+        """)
+        check("\(label): the fixture is a valid zsh file to begin with", zshAccepts(f))
+        let op: AliasWriter.Operation = opLabel == "delete"
+            ? .delete(name: name)
+            : .rename(from: name, to: "renamed", command: "echo x")
+        let before = read(f)
+        _ = Result { try AliasWriter.apply(op, path: f, allEntries: []) }
+        let after = read(f)
+        check("\(label)/\(opLabel): the user's second statement is never silently removed",
+              after == before || after.contains("print -r -- keep-this"), after)
+    }
+}
+
+// The same shape must not block ordinary hand-written aliases, which are not canonical
+// and must stay editable.
+for (label, line) in [
+    ("unquoted",     "alias ll=ls -la"),
+    ("double-quote", "alias gs=\"git status\""),
+    ("substitution", "alias home=echo${HOME}"),
+    ("arithmetic",   "alias calc=echo$((1+1))"),
+] {
+    let f = scratch("""
+    \(ManagedBlock.begin)
+    \(line)
+    alias other='7'
+    \(ManagedBlock.end)
+    """)
+    let outcome = Result { try AliasWriter.apply(.delete(name: line.contains("ll=") ? "ll" : line.contains("gs=") ? "gs" : line.contains("home=") ? "home" : "calc"),
+                                                 path: f, allEntries: []) }
+    check("\(label): a hand-written alias is still deletable", (try? outcome.get()) != nil, read(f))
+    check("\(label): its neighbour survives", read(f).contains("alias other='7'"), read(f))
+}
+
 // An ordinary edit must not be slowed or blocked by the guard.
 let guardNormal = scratch("""
 \(ManagedBlock.begin)

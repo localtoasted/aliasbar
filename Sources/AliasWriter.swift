@@ -374,6 +374,22 @@ enum AliasWriter {
         // do not affect parsing, guardSyntax saw nothing wrong either. A comment the user
         // wrote is user content. If the statement was already finished above this line,
         // the line is not part of it, whatever it happens to say.
+        // The FIRST line of every span, checked before anything else.
+        //
+        // Codex round 16: the checks below only ever looked at lines *after* the first, and
+        // `guardSyntax` returns as soon as the rewritten file parses. So a definition that
+        // carries a second statement on the same line went straight through on an ordinary,
+        // perfectly valid `.zshrc`. `alias doomed='x'; print -r -- keep` is read as the
+        // alias `doomed`, and deleting it takes the user's `print` with it while leaving a
+        // file that still parses. Result syntax cannot prove that only the requested
+        // statement was removed; that has to be established about the span itself.
+        for span in removed where !span.isEmpty {
+            guard removalIsProvablyOneAlias(span[0]) else {
+                throw WriteError.collateralDamage(
+                    "`\(span[0].trimmingCharacters(in: .whitespaces))`, which is more than one statement")
+            }
+        }
+
         for span in removed where span.count > 1 {
             for index in 1..<span.count {
                 let above = span[0..<index].joined(separator: "\n") + "\n"
@@ -382,6 +398,56 @@ enum AliasWriter {
                 throw WriteError.collateralDamage(bare.isEmpty ? "a blank line" : "`\(bare)`")
             }
         }
+    }
+
+    /// Whether the opening line of a removal is provably a single alias definition and
+    /// nothing else.
+    ///
+    /// Canonical lines are settled by `isCanonicalAliasLine`. The rest of the work is for
+    /// definitions AliasBar did not write, which still have to stay editable: a hand-typed
+    /// `alias ll=ls -la`, or the first line of a legacy multi-line alias. So the rule is
+    /// conservative rather than clever.
+    ///
+    /// The value is safe if it is wholly enclosed in quotes, since then it is one word. If
+    /// it is not quoted, it is safe only when it contains nothing that could start a second
+    /// statement or a substitution. Note that a bare `|` or `;` in an unquoted value is not
+    /// a false alarm: `alias x=a|b` really is an alias definition piped into `b`, and
+    /// removing that line removes both halves.
+    static func removalIsProvablyOneAlias(_ line: String) -> Bool {
+        if isCanonicalAliasLine(line) { return true }
+
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        guard trimmed.hasPrefix("alias ") else { return false }
+        let rest = String(trimmed.dropFirst("alias ".count))
+        guard let eq = rest.firstIndex(of: "=") else { return false }
+
+        let name = String(rest[..<eq])
+        let value = String(rest[rest.index(after: eq)...])
+        // The name is validated on its own. `splitAliasAssignment` takes everything before
+        // the first `=`, so without this `alias doomed; print -r -- keep='x'` presents a
+        // name of `doomed; print -r -- keep` and deleting it removes the `print` too.
+        guard (try? validate(name: name, command: "placeholder")) != nil else { return false }
+
+        if let delimiter = value.first, delimiter == "'" || delimiter == "\"",
+           value.count >= 2, value.last == delimiter {
+            // One quoted word, provided the quote does not close early and reopen.
+            let inner = value.dropFirst().dropLast()
+            if delimiter == "'" { return !inner.contains("'") }
+            return !inner.contains("\"") && !inner.contains("$(") && !inner.contains("`")
+        }
+
+        // Unquoted, or the opening line of a multi-line legacy alias whose quote is still
+        // open. Either way it must hold nothing that could begin another statement.
+        //
+        // Only these four. Substitution syntax is deliberately allowed: `${HOME}`,
+        // `$((1))`, `$(date)` and `<(cmd)` all sit *inside* the alias value, so removing
+        // the line removes one statement and takes nothing independent with it. An earlier
+        // draft rejected `$`, parens and angle brackets too, which refused four legitimate
+        // deletes for no safety gain. An unquoted `;`, `|` or `&` is different: in
+        // `alias x=a|b` the alias definition really is piped into `b`, and dropping that
+        // line drops both halves.
+        let unsafe: Set<Character> = [";", "|", "&", "\n"]
+        return !value.contains(where: { unsafe.contains($0) })
     }
 
     /// Whether `line` is exactly one alias statement in the canonical form this writer
