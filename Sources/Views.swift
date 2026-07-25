@@ -33,6 +33,10 @@ struct RootView: View {
         .sheet(item: $state.editor) { _ in
             EditorSheet(state: state).environment(\.theme, theme)
         }
+        .sheet(item: $state.confirmRemoval) { confirmation in
+            RemovalConfirmSheet(state: state, confirmation: confirmation)
+                .environment(\.theme, theme)
+        }
         .onAppear { searchFocused = true }
         .onChange(of: state.mode) { _ in searchFocused = true }
         // Re-focus on every open, not just the first. Without this the second summon
@@ -873,5 +877,81 @@ struct EditorSheet: View {
                     .strokeBorder(theme.rule.opacity(0.5), lineWidth: 1))
                 .focused($nameFocused, equals: focused)
         }
+    }
+}
+
+// MARK: - Removal confirmation
+
+/// Shown when a delete would take more than the alias asked for.
+///
+/// The writer can prove a line is safe to remove, but it cannot know whether the extra
+/// thing sharing that line still matters to you. So instead of refusing and telling you to
+/// go edit the file by hand, it shows the exact lines. A person reads
+/// `alias gs='git status'; echo hi` and knows instantly whether that `echo` is load
+/// bearing, which is a judgement no amount of shell parsing can make for them.
+struct RemovalConfirmSheet: View {
+    @ObservedObject var state: AppState
+    let confirmation: AppState.RemovalConfirmation
+    @Environment(\.theme) private var theme
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("This removes more than one thing")
+                    .font(.system(size: 15, weight: .semibold, design: theme.bodyDesign))
+                    .foregroundStyle(theme.text)
+                Text(blurb)
+                    .font(.system(size: 12, design: theme.bodyDesign))
+                    .foregroundStyle(theme.dim)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 3) {
+                    ForEach(Array(confirmation.lines.enumerated()), id: \.offset) { _, line in
+                        Text(line.isEmpty ? " " : line)
+                            .font(.system(size: 11.5, design: .monospaced))
+                            .foregroundStyle(isSuspect(line) ? theme.text : theme.dim)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.horizontal, 9)
+                            .padding(.vertical, 4)
+                            .background(isSuspect(line) ? theme.accent.opacity(0.18) : Color.clear)
+                            .textSelection(.enabled)
+                    }
+                }
+                .padding(.vertical, 6)
+            }
+            .frame(maxHeight: 180)
+            .background(theme.surface, in: RoundedRectangle(cornerRadius: theme.cornerRadius))
+            .overlay(
+                RoundedRectangle(cornerRadius: theme.cornerRadius)
+                    .strokeBorder(theme.rule.opacity(0.5), lineWidth: 1)
+            )
+
+            Text("A timestamped backup is written either way, so this is reversible.")
+                .font(.system(size: 11, design: theme.bodyDesign))
+                .foregroundStyle(theme.faint)
+
+            HStack(spacing: 9) {
+                Spacer()
+                Button("Cancel") { state.confirmRemoval = nil }
+                    .keyboardShortcut(.cancelAction)
+                Button("Delete all \(confirmation.lines.count)") { confirmation.proceed() }
+                    .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(20)
+        .frame(width: 520)
+        .background(theme.background)
+    }
+
+    private var blurb: String {
+        let n = confirmation.lines.count
+        return "\(n) line\(n == 1 ? "" : "s") would be deleted from your shell config. "
+            + "AliasBar can't tell whether the highlighted part still matters to you."
+    }
+
+    private func isSuspect(_ line: String) -> Bool {
+        line.trimmingCharacters(in: .whitespaces) == confirmation.suspect
     }
 }

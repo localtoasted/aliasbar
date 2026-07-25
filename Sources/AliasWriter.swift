@@ -30,7 +30,13 @@ enum AliasWriter {
         case renameSourceMissing(String)
         case multilineCommand
         case wouldBreakSyntax(String)
-        case collateralDamage(String)
+        /// The edit would remove lines beyond the definition asked for.
+        ///
+        /// Carries the actual lines rather than a message, because the useful response is
+        /// to show them to the user and let them decide. A person reads
+        /// `alias gs='git status'; echo hi` and knows in a second whether that `echo`
+        /// matters; no amount of shell analysis can answer that for them.
+        case collateralDamage(removing: [String], suspect: String)
 
         var errorDescription: String? {
             switch self {
@@ -56,8 +62,8 @@ enum AliasWriter {
                 return "\"\(name)\" is no longer in AliasBar's block, so it can't be renamed. Something else edited your shell config. Reopen and try again."
             case .multilineCommand:
                 return "An alias has to be a single line. For anything multi-line, write a shell function instead."
-            case .collateralDamage(let names):
-                return "That edit would also have removed \(names), which you didn't ask to change, so nothing was written. Edit the line by hand instead."
+            case .collateralDamage(_, let suspect):
+                return "This would also remove `\(suspect)`, which you didn't ask to change."
             case .wouldBreakSyntax(let why):
                 return "That edit would have left your shell config unable to parse, so nothing was written. Edit the line by hand instead. (zsh said: \(why))"
             }
@@ -254,9 +260,14 @@ enum AliasWriter {
     /// already defined outside the managed block, which this writer deliberately will
     /// not touch.
     @discardableResult
+    /// - Parameter confirmedCollateral: set only after the user has been shown the exact
+    ///   lines this will remove and has said to go ahead. It skips the collateral check and
+    ///   nothing else. `guardSyntax` still runs, because leaving a `.zshrc` that cannot
+    ///   parse is never a thing to confirm your way into, and a backup is still written.
     static func apply(_ operation: Operation,
                       path: String,
-                      allEntries: [ShellEntry]) throws -> String {
+                      allEntries: [ShellEntry],
+                      confirmedCollateral: Bool = false) throws -> String {
         // Both writing operations validate identically, and both must run every check
         // before anything is committed.
         var nameToWrite: String?
@@ -327,7 +338,7 @@ enum AliasWriter {
         case .delete, .rename: destructive = true
         }
         try guardSyntax(original: original, rewritten: text, destructive: destructive, removed: removedSpans)
-        try guardCollateral(removed: removedSpans)
+        if !confirmedCollateral { try guardCollateral(removed: removedSpans) }
 
         let backup = try writeBackup(of: original, for: target)
         try atomicWrite(text, to: target, expecting: snapshotAtRead, matching: original)
@@ -386,7 +397,8 @@ enum AliasWriter {
         for span in removed where !span.isEmpty {
             guard removalIsProvablyOneAlias(span.joined(separator: "\n")) else {
                 throw WriteError.collateralDamage(
-                    "`\(span[0].trimmingCharacters(in: .whitespaces))`, which is more than one statement")
+                    removing: removed.flatMap { $0 },
+                    suspect: span[0].trimmingCharacters(in: .whitespaces))
             }
         }
 
@@ -395,7 +407,9 @@ enum AliasWriter {
                 let above = span[0..<index].joined(separator: "\n") + "\n"
                 guard isCompleteStatement(above) else { continue }
                 let bare = span[index].trimmingCharacters(in: .whitespaces)
-                throw WriteError.collateralDamage(bare.isEmpty ? "a blank line" : "`\(bare)`")
+                throw WriteError.collateralDamage(
+                    removing: removed.flatMap { $0 },
+                    suspect: bare.isEmpty ? "(a blank line)" : bare)
             }
         }
     }

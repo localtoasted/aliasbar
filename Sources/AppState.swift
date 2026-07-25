@@ -64,6 +64,20 @@ final class AppState: ObservableObject {
     @Published var editor: EditTarget?
     @Published var toast: String?
     @Published var errorMessage: String?
+    /// Set when a write would remove more than the definition asked for. Holds the exact
+    /// lines so the user can look at them and decide, rather than being handed a refusal
+    /// and told to go edit the file by hand.
+    @Published var confirmRemoval: RemovalConfirmation?
+
+    struct RemovalConfirmation: Identifiable {
+        let id = UUID()
+        /// Every line the edit would delete, verbatim.
+        let lines: [String]
+        /// The one that does not look like part of the alias being removed.
+        let suspect: String
+        /// Re-runs the same operation with the collateral check waived.
+        let proceed: () -> Void
+    }
     /// Bumped on every open. The popover reuses one hosting view for the life of the
     /// app, so `onAppear` fires exactly once and cannot be used to restore focus to the
     /// search field on the second and every subsequent open.
@@ -403,13 +417,29 @@ final class AppState: ObservableObject {
             show(toast: "\(entry.name) lives outside AliasBar's block")
             return
         }
+        delete(entry, confirmed: false)
+    }
+
+    private func delete(_ entry: ShellEntry, confirmed: Bool) {
         do {
             _ = try AliasWriter.apply(.delete(name: entry.name),
                                       path: ZshrcParser.path,
-                                      allEntries: store.ranked.map(\.entry))
+                                      allEntries: store.ranked.map(\.entry),
+                                      confirmedCollateral: confirmed)
+            confirmRemoval = nil
             store.reload()
             clampSelection()
             show(toast: "Deleted \(entry.name)")
+        } catch let error as AliasWriter.WriteError {
+            // The one error worth asking about rather than reporting. Everything else is
+            // a genuine refusal the user cannot resolve by insisting.
+            if case .collateralDamage(let lines, let suspect) = error {
+                confirmRemoval = RemovalConfirmation(lines: lines, suspect: suspect) { [weak self] in
+                    self?.delete(entry, confirmed: true)
+                }
+            } else {
+                errorMessage = error.localizedDescription
+            }
         } catch {
             errorMessage = error.localizedDescription
         }
