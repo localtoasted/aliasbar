@@ -384,7 +384,7 @@ enum AliasWriter {
         // file that still parses. Result syntax cannot prove that only the requested
         // statement was removed; that has to be established about the span itself.
         for span in removed where !span.isEmpty {
-            guard removalIsProvablyOneAlias(span[0]) else {
+            guard removalIsProvablyOneAlias(span.joined(separator: "\n")) else {
                 throw WriteError.collateralDamage(
                     "`\(span[0].trimmingCharacters(in: .whitespaces))`, which is more than one statement")
             }
@@ -418,36 +418,29 @@ enum AliasWriter {
 
         let trimmed = line.trimmingCharacters(in: .whitespaces)
         guard trimmed.hasPrefix("alias ") else { return false }
-        let rest = String(trimmed.dropFirst("alias ".count))
-        guard let eq = rest.firstIndex(of: "=") else { return false }
-
-        let name = String(rest[..<eq])
-        let value = String(rest[rest.index(after: eq)...])
+        // Ask zsh to split the line into words, then require exactly two: the `alias`
+        // command and a single assignment.
+        //
+        // The previous version tested the value against a blacklist of characters that
+        // could start another statement, and Codex round 17 walked straight past it with
+        // `alias doomed=x victim=y`. That is ONE `alias` invocation defining TWO aliases,
+        // with no `;`, `|` or `&` anywhere. Deleting `doomed` took `victim` with it and the
+        // file still parsed. The finding came with the right diagnosis: a growing character
+        // blacklist is not a sound basis for editing someone's `.zshrc`, because the next
+        // grammar feature is always another bypass.
+        //
+        // `${(z)}` is zsh's own word splitter, so this is a real parse rather than a guess
+        // at one. It splits without expanding or executing anything, which is what makes it
+        // safe to point at a line nobody has vetted. Words also cover the earlier routes:
+        // `alias x=1; print y` splits to five words, `alias x=a|b` to five, and both are
+        // refused by the same rule rather than by a special case.
+        guard let assignment = soleAliasAssignment(in: trimmed) else { return false }
+        guard let assignEq = assignment.firstIndex(of: "=") else { return false }
+        let name = String(assignment[..<assignEq])
         // The name is validated on its own. `splitAliasAssignment` takes everything before
         // the first `=`, so without this `alias doomed; print -r -- keep='x'` presents a
-        // name of `doomed; print -r -- keep` and deleting it removes the `print` too.
-        guard (try? validate(name: name, command: "placeholder")) != nil else { return false }
-
-        if let delimiter = value.first, delimiter == "'" || delimiter == "\"",
-           value.count >= 2, value.last == delimiter {
-            // One quoted word, provided the quote does not close early and reopen.
-            let inner = value.dropFirst().dropLast()
-            if delimiter == "'" { return !inner.contains("'") }
-            return !inner.contains("\"") && !inner.contains("$(") && !inner.contains("`")
-        }
-
-        // Unquoted, or the opening line of a multi-line legacy alias whose quote is still
-        // open. Either way it must hold nothing that could begin another statement.
-        //
-        // Only these four. Substitution syntax is deliberately allowed: `${HOME}`,
-        // `$((1))`, `$(date)` and `<(cmd)` all sit *inside* the alias value, so removing
-        // the line removes one statement and takes nothing independent with it. An earlier
-        // draft rejected `$`, parens and angle brackets too, which refused four legitimate
-        // deletes for no safety gain. An unquoted `;`, `|` or `&` is different: in
-        // `alias x=a|b` the alias definition really is piped into `b`, and dropping that
-        // line drops both halves.
-        let unsafe: Set<Character> = [";", "|", "&", "\n"]
-        return !value.contains(where: { unsafe.contains($0) })
+        // name of `doomed; print -r -- keep`.
+        return (try? validate(name: name, command: "placeholder")) != nil
     }
 
     /// Whether `line` is exactly one alias statement in the canonical form this writer
@@ -483,6 +476,56 @@ enum AliasWriter {
         // written by AliasBar is not one this fallback should vouch for.
         guard (try? validate(name: name, command: command)) != nil else { return false }
         return trimmed == aliasLine(name: name, command: command)
+    }
+
+    /// Splits `line` with zsh's own word splitter and returns the single assignment word,
+    /// or nil if the line is anything other than `alias` followed by exactly one operand.
+    ///
+    /// `${(z)}` performs the shell's word splitting **without expanding or executing**
+    /// anything, so it is safe to run over a line that has not been vetted. Nothing in the
+    /// value is evaluated; command substitutions come back as literal text.
+    private static func soleAliasAssignment(in line: String) -> String? {
+        // Words from a trailing comment onward are dropped. `alias plain='1' # note` is one
+        // alias statement, and zsh's own tokenizer is what says where the comment starts:
+        // a `#` that opens a word. A `#` inside a word, as in `alias tagged=echo#tag`, stays
+        // part of that word, which is exactly the distinction the hand-written lexer spent
+        // three rounds getting wrong.
+        let script = """
+        line=$1
+        words=(${(z)line})
+        [[ ${words[1]} == alias ]] || exit 1
+        shift words
+        assignments=()
+        for w in $words; do
+          # A `#` opening a word starts a comment: the statement is over, harmlessly.
+          [[ $w == '#'* ]] && break
+          # A separator token means a second statement shares this line. zsh has already
+          # decided these are tokens rather than text, which is the part that cannot be
+          # done by inspecting characters.
+          case $w in
+            ';'|'|'|'||'|'&'|'&&'|'('|')'|'{'|'}'|'&|'|';;'|'|&') exit 1 ;;
+          esac
+          # An operand without `=` is an alias LOOKUP, not a definition. `alias a=1 b`
+          # defines `a` and prints `b`; removing the line takes no definition but `a`.
+          [[ $w == *=* ]] && assignments+=($w)
+        done
+        (( ${#assignments} == 1 )) || exit 1
+        print -r -- ${assignments[1]}
+        """
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/bin/zsh")
+        task.arguments = ["-f", "-c", script, "aliasbar", line]
+        let out = Pipe()
+        task.standardOutput = out
+        task.standardError = Pipe()
+        guard (try? task.run()) != nil else { return nil }
+        let data = out.fileHandleForReading.readDataToEndOfFile()
+        task.waitUntilExit()
+        guard task.terminationStatus == 0 else { return nil }
+
+        let word = String(data: data, encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return word.contains("=") ? word : nil
     }
 
     /// The inverse of `quote(_:)` for canonically quoted values, or nil for anything else.

@@ -1401,6 +1401,40 @@ for (label, line) in [
     check("\(label): its neighbour survives", read(f).contains("alias other='7'"), read(f))
 }
 
+// Codex round 17: ONE `alias` invocation can define TWO aliases. No separator character
+// appears anywhere, so the character blacklist this replaced walked straight past it.
+check("a two-assignment alias invocation is not provably one alias",
+      !AliasWriter.removalIsProvablyOneAlias("alias doomed=x victim=y"))
+check("nor three", !AliasWriter.removalIsProvablyOneAlias("alias a=1 b=2 c=3"))
+check("but an operand without = is a lookup, not a definition",
+      AliasWriter.removalIsProvablyOneAlias("alias solo=1 lookmeup"))
+check("a separator token is still refused",
+      !AliasWriter.removalIsProvablyOneAlias("alias solo=1; print hi"))
+check("and so is a pipe", !AliasWriter.removalIsProvablyOneAlias("alias solo=a|b"))
+check("a trailing comment is fine",
+      AliasWriter.removalIsProvablyOneAlias("alias solo='1' # a note"))
+check("a # inside a word is not a comment",
+      AliasWriter.removalIsProvablyOneAlias("alias tagged=echo#tag"))
+
+for (opLabel, op) in [
+    ("delete", AliasWriter.Operation.delete(name: "doomed")),
+    ("upsert", AliasWriter.Operation.upsert(name: "doomed", command: "echo new", comment: nil)),
+    ("rename", AliasWriter.Operation.rename(from: "doomed", to: "renamed", command: "echo x")),
+] {
+    let f = scratch("""
+    \(ManagedBlock.begin)
+    alias doomed=x victim=y
+    alias bystander='9'
+    \(ManagedBlock.end)
+    """)
+    check("\(opLabel): the two-assignment fixture is valid zsh", zshAccepts(f))
+    let before = read(f)
+    _ = Result { try AliasWriter.apply(op, path: f, allEntries: []) }
+    let after = read(f)
+    check("\(opLabel): a second alias on the same line is never silently removed",
+          after == before || after.contains("victim=y"), after)
+}
+
 // An ordinary edit must not be slowed or blocked by the guard.
 let guardNormal = scratch("""
 \(ManagedBlock.begin)
