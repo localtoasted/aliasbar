@@ -28,6 +28,7 @@ struct RootView: View {
         }
         .frame(width: state.mode == .manage ? 780 : 520)
         .background(background)
+        .overlay(alignment: .top) { topHighlight }
         .environment(\.theme, theme)
         .overlay(alignment: .bottom) { toast }
         .sheet(item: $state.editor) { _ in
@@ -49,10 +50,30 @@ struct RootView: View {
 
     @ViewBuilder
     private var background: some View {
-        if theme.usesMaterial {
+        if let vibrancy = theme.vibrancy {
+            ZStack {
+                VisualEffect(material: vibrancy.material)
+                theme.background.opacity(vibrancy.tint)
+            }
+        } else if theme.usesMaterial {
             Rectangle().fill(.ultraThinMaterial)
         } else {
             theme.background
+        }
+    }
+
+    /// A one-pixel highlight along the top edge only.
+    ///
+    /// The macOS convention is light from above: a surface catches it on its upper lip
+    /// and nowhere else. It is the cheapest single thing that separates a window that
+    /// looks moulded from one that looks drawn. Dark surfaces only — on paper stock a
+    /// white edge is invisible at best and a seam at worst.
+    @ViewBuilder
+    private var topHighlight: some View {
+        if !theme.isLight {
+            Rectangle()
+                .fill(Color.white.opacity(0.09))
+                .frame(height: 1)
         }
     }
 
@@ -288,6 +309,10 @@ struct FindView: View {
     @ObservedObject var state: AppState
     @ObservedObject var settings: AppSettings
     @Environment(\.theme) private var theme
+    /// One capsule, shared by every row. Only the selected row draws it, so SwiftUI
+    /// treats a selection change as the same view moving and slides it there — rather
+    /// than one fill switching off and another switching on.
+    @Namespace private var highlight
 
     var body: some View {
         let results = state.results
@@ -318,19 +343,29 @@ struct FindView: View {
                         }
 
                         ForEach(Array(results.enumerated()), id: \.element.id) { index, entry in
-                            if index == 0 && !state.query.isEmpty {
-                                PrimaryResult(entry: entry,
-                                              selected: state.selection == 0,
-                                              conflicts: state.store.conflicts(for: entry.name))
-                                    .onTapGesture { state.selection = 0; activate(entry) }
-                            } else {
-                                AlternateRow(entry: entry, selected: state.selection == index)
-                                    .onTapGesture { state.selection = index; activate(entry) }
+                            Group {
+                                if index == 0 && !state.query.isEmpty {
+                                    PrimaryResult(entry: entry,
+                                                  selected: state.selection == 0,
+                                                  conflicts: state.store.conflicts(for: entry.name),
+                                                  highlight: highlight)
+                                        .onTapGesture { state.selection = 0; activate(entry) }
+                                } else {
+                                    AlternateRow(entry: entry,
+                                                 selected: state.selection == index,
+                                                 highlight: highlight)
+                                        .onTapGesture { state.selection = index; activate(entry) }
+                                }
                             }
+                            .arriving(index)
                         }
                     }
                     .padding(.horizontal, 10)
                     .padding(.vertical, 9)
+                    // The capsule below only travels if the selection change is animated.
+                    // Animating the container rather than each caller means every route
+                    // into the selection — arrows, typing, a click — moves it the same way.
+                    .animation(Motion.standard, value: state.selection)
                 }
                 .frame(maxHeight: 440)
             }
@@ -353,6 +388,7 @@ private struct PrimaryResult: View {
     let entry: RankedEntry
     let selected: Bool
     let conflicts: [Conflict]
+    let highlight: Namespace.ID
 
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
@@ -391,14 +427,37 @@ private struct PrimaryResult: View {
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(selected ? theme.selectionFill : theme.surface.opacity(0.45),
+        .background(theme.surface.opacity(0.45),
                     in: RoundedRectangle(cornerRadius: theme.cornerRadius + 3))
         .overlay(
             RoundedRectangle(cornerRadius: theme.cornerRadius + 3)
-                .strokeBorder(selected ? theme.selectionStroke : theme.rule.opacity(0.35),
-                              lineWidth: selected ? 1.5 : 1)
+                .strokeBorder(theme.rule.opacity(0.35), lineWidth: 1)
         )
+        .background {
+            if selected {
+                SelectionCapsule(radius: theme.cornerRadius + 3, namespace: highlight)
+            }
+        }
         .contentShape(Rectangle())
+    }
+}
+
+/// The travelling selection highlight.
+///
+/// Exactly one of these exists at a time. Giving it a stable identity across rows is
+/// what lets it slide instead of blink; the effect is the thing people describe as
+/// feeling expensive without being able to name it.
+private struct SelectionCapsule: View {
+    @Environment(\.theme) private var theme
+    let radius: CGFloat
+    let namespace: Namespace.ID
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: radius)
+            .fill(theme.selectionFill)
+            .overlay(RoundedRectangle(cornerRadius: radius)
+                .strokeBorder(theme.selectionStroke, lineWidth: 1.5))
+            .matchedGeometryEffect(id: "selection", in: namespace)
     }
 }
 
@@ -406,33 +465,55 @@ private struct AlternateRow: View {
     @Environment(\.theme) private var theme
     let entry: RankedEntry
     let selected: Bool
+    let highlight: Namespace.ID
 
     var body: some View {
         HStack(spacing: 8) {
             KindBadge(kind: entry.entry.kind, size: 18)
             Text(entry.name)
                 .font(.system(size: 14.5, weight: .medium, design: theme.nameDesign))
+                // Monospaced faces set loose by default. Names here are shell tokens read
+                // as single units, and a touch of negative tracking makes them cohere.
+                .kerning(-0.15)
                 .foregroundStyle(theme.text)
+                .layoutPriority(1)
             Text(entry.entry.comment ?? entry.entry.command
                     .replacingOccurrences(of: "\n", with: " ⏎ "))
-                .font(.system(size: 12, design: theme.bodyDesign))
-                .foregroundStyle(theme.faint)
+                .font(.system(size: 12.5, design: theme.bodyDesign))
+                .foregroundStyle(theme.dim.opacity(0.72))
                 .lineLimit(1)
-            Spacer(minLength: 4)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                // Fades the tail instead of chopping it with an ellipsis. Taking the
+                // width from a fixed-width gradient rather than a proportional stop
+                // keeps the fade the same length on every row, and on a short command
+                // it falls over empty space and does nothing.
+                .mask(
+                    HStack(spacing: 0) {
+                        Rectangle()
+                        LinearGradient(colors: [.black, .clear],
+                                       startPoint: .leading, endPoint: .trailing)
+                            .frame(width: 24)
+                    }
+                )
             if entry.uses > 0 {
                 Text("\(entry.uses)×")
                     .font(.system(size: 9.5, design: .monospaced))
+                    .monospacedDigit()
                     .foregroundStyle(theme.faint)
+                    // A fixed trailing column, so the counts line up down the list
+                    // instead of ragging with the length of each command.
+                    .frame(width: 34, alignment: .trailing)
+            } else {
+                Spacer().frame(width: 34)
             }
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 9)
-        .background(selected ? theme.selectionFill : .clear,
-                    in: RoundedRectangle(cornerRadius: theme.cornerRadius + 1))
-        .overlay(
-            RoundedRectangle(cornerRadius: theme.cornerRadius + 1)
-                .strokeBorder(selected ? theme.selectionStroke : .clear, lineWidth: 1)
-        )
+        .background {
+            if selected {
+                SelectionCapsule(radius: theme.cornerRadius + 1, namespace: highlight)
+            }
+        }
         .contentShape(Rectangle())
     }
 }
@@ -548,12 +629,28 @@ private struct Keycap: View {
         .frame(height: density.keyHeight)
         .background(selected ? theme.selectionFill : theme.surface,
                     in: RoundedRectangle(cornerRadius: theme.cornerRadius + 2))
+        // Two shadows, not one: a tight contact shadow that says the key is sitting on
+        // the surface, and a wide ambient one that says the whole thing is lit from
+        // somewhere. A single mid-blur drop shadow is the most recognisable tell of
+        // generated UI work, and it reads flat because nothing in the world casts one.
+        .shadow(color: .black.opacity(theme.isLight ? 0.10 : 0.28), radius: 1.5, y: 1)
+        .shadow(color: .black.opacity(theme.isLight ? 0.06 : 0.20), radius: 10, y: 5)
         .overlay(
             RoundedRectangle(cornerRadius: theme.cornerRadius + 2)
                 .strokeBorder(selected ? theme.selectionStroke
                                        : theme.tint(for: entry.entry.kind).opacity(0.35),
                               lineWidth: selected ? 1.5 : 1)
         )
+        // The lit upper lip, matching the window's. On a keycap it is doing the literal
+        // job it was invented for.
+        .overlay {
+            if !theme.isLight {
+                RoundedRectangle(cornerRadius: theme.cornerRadius + 2)
+                    .strokeBorder(LinearGradient(colors: [.white.opacity(0.14), .clear],
+                                                 startPoint: .top, endPoint: .bottom),
+                                  lineWidth: 1)
+            }
+        }
         // Dimming rather than hiding: the grid never reflows, so position stays learnable.
         .opacity(dimmed ? 0.22 : 1)
         .contentShape(Rectangle())

@@ -15,9 +15,13 @@ final class PalettePanel: NSPanel {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
 
-    /// While true, a content-size change keeps the *top* edge where it is instead of the
-    /// bottom one. The list shrinks as you type; AppKit's default would walk the whole
-    /// window up the screen on every keystroke.
+    /// While true, a content-size change keeps the window's top edge and horizontal
+    /// centre where they are, rather than its bottom-left corner.
+    ///
+    /// Both halves are load-bearing. The list shrinks as you type, and AppKit's default
+    /// would walk the window up the screen on every keystroke. The width changes too —
+    /// Manage is wider than Find — and without re-centring the window would grow out to
+    /// the right and sit off-centre for the rest of the session.
     var anchorsTop = true
 
     override func setContentSize(_ size: NSSize) {
@@ -26,9 +30,11 @@ final class PalettePanel: NSPanel {
             return
         }
         let top = frame.maxY
+        let centre = frame.midX
         super.setContentSize(size)
         var moved = frame
         moved.origin.y = top - moved.height
+        moved.origin.x = (centre - moved.width / 2).rounded()
         super.setFrame(moved, display: true)
     }
 }
@@ -53,9 +59,15 @@ final class PaletteController: NSObject, NSWindowDelegate {
     func show() {
         let panel = panel ?? makePanel()
         self.panel = panel
-        // Sizing has to happen before positioning, or the first open is placed using the
-        // previous run's height.
+        // Sizing has to happen before positioning, and it has to be forced rather than
+        // waited for. Left to itself the hosting controller reports its real size a beat
+        // *after* the window is placed, so the window is centred at its placeholder
+        // width and then grows out to the right of centre.
         panel.layoutIfNeeded()
+        if let view = panel.contentViewController?.view {
+            let fitting = view.fittingSize
+            if fitting.width > 1, fitting.height > 1 { panel.setContentSize(fitting) }
+        }
         position(panel)
         panel.makeKeyAndOrderFront(nil)
     }

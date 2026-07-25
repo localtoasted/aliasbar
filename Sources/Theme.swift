@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 /// The five looks from the design round, kept as themes rather than as separate
 /// architectures. Each one commits to a distinct material: a printed ledger, a
@@ -51,6 +52,23 @@ struct Theme {
     /// Whether the popover paints its own background or lets the system material show.
     var usesMaterial: Bool
 
+    /// How much of the desktop shows through, and which system material carries it.
+    ///
+    /// This is the difference between a surface that belongs to macOS and one pasted on
+    /// top of it: the window picks up whatever is behind it, and the theme colour becomes
+    /// a tint over that rather than an opaque fill.
+    ///
+    /// Deliberately absent on the paper themes. Ledger, Index, and Dictionary each commit
+    /// to a physical stock, and a sheet of paper you can see the desktop through is not a
+    /// subtler version of that idea — it is a different, incoherent one.
+    var vibrancy: Vibrancy? = nil
+
+    struct Vibrancy {
+        var material: NSVisualEffectView.Material
+        /// Alpha the theme's own background is painted at, over the material.
+        var tint: Double
+    }
+
     static func current(_ name: ThemeName) -> Theme {
         switch name {
         case .slate:
@@ -72,7 +90,8 @@ struct Theme {
                 isLight: false,
                 bodyDesign: .default,
                 nameDesign: .monospaced,
-                usesMaterial: false
+                usesMaterial: false,
+                vibrancy: Vibrancy(material: .hudWindow, tint: 0.78)
             )
 
         case .phosphor:
@@ -90,7 +109,10 @@ struct Theme {
                 isLight: false,
                 bodyDesign: .monospaced,
                 nameDesign: .monospaced,
-                usesMaterial: false
+                usesMaterial: false,
+                // A CRT is glass with a lit phosphor layer behind it, so it takes the
+                // most transparency of any theme here without losing what it is.
+                vibrancy: Vibrancy(material: .underWindowBackground, tint: 0.72)
             )
 
         case .ledger:
@@ -126,7 +148,8 @@ struct Theme {
                 isLight: false,
                 bodyDesign: .monospaced,
                 nameDesign: .monospaced,
-                usesMaterial: false
+                usesMaterial: false,
+                vibrancy: Vibrancy(material: .hudWindow, tint: 0.82)
             )
 
         case .index:
@@ -197,6 +220,68 @@ struct Theme {
     var selectionStroke: Color {
         accent.opacity(isLight ? 0.55 : 0.75)
     }
+}
+
+/// The system's own blur, sampling whatever is behind the window.
+///
+/// SwiftUI's `.ultraThinMaterial` blurs what is behind it *within the window*, which over
+/// a transparent background is nothing at all. Only `NSVisualEffectView` with
+/// `.behindWindow` blending reaches past the window to the desktop.
+struct VisualEffect: NSViewRepresentable {
+    let material: NSVisualEffectView.Material
+
+    func makeNSView(context: Context) -> NSVisualEffectView {
+        let view = NSVisualEffectView()
+        view.material = material
+        view.blendingMode = .behindWindow
+        // `.followsWindowActiveState` would drain the blur the moment focus moves to a
+        // sheet, which is exactly when the window is most on show.
+        view.state = .active
+        return view
+    }
+
+    func updateNSView(_ view: NSVisualEffectView, context: Context) {
+        view.material = material
+    }
+}
+
+/// Motion for everything that moves. One curve, used everywhere.
+///
+/// Ease-out-quint: fast at the start, decelerating hard. No spring, no overshoot — real
+/// objects settle rather than bounce, and bounce is the tell of a UI designed in 2019.
+enum Motion {
+    static let standard = Animation.timingCurve(0.22, 1, 0.36, 1, duration: 0.18)
+    /// Entrance is allowed to be slower than response; nothing is waiting on it.
+    static let entrance = Animation.timingCurve(0.22, 1, 0.36, 1, duration: 0.28)
+    /// Rows arrive in sequence rather than all at once, capped so a long list does not
+    /// turn the reveal into a wait.
+    static func stagger(_ index: Int) -> Animation {
+        entrance.delay(Double(min(index, 8)) * 0.02)
+    }
+}
+
+/// Fades and lifts a row into place, offset by its position in the list.
+///
+/// Keyed on identity, not on the list: a row that survives a keystroke does not replay
+/// its entrance, so typing filters the list without the surviving rows flickering.
+struct Arriving: ViewModifier {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    let index: Int
+    @State private var arrived = false
+
+    func body(content: Content) -> some View {
+        content
+            .opacity(arrived ? 1 : 0)
+            .offset(y: arrived ? 0 : 4)
+            .onAppear {
+                guard !reduceMotion else { arrived = true; return }
+                withAnimation(Motion.stagger(index)) { arrived = true }
+            }
+    }
+}
+
+extension View {
+    func arriving(_ index: Int) -> some View { modifier(Arriving(index: index)) }
 }
 
 /// Reads the current theme once and hands it down, so views never touch Settings
