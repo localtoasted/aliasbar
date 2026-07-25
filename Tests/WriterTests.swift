@@ -464,6 +464,70 @@ check("and the old name is gone", !r3.contains("alias a1="))
 check("and it holds the new command", r3.contains("alias b1='echo merged'"))
 
 // ---------------------------------------------------------------------------
+print("\n14. Rename edge cases")
+
+// from == to is a no-op rename, not a delete.
+let sameName = scratch("# x\n")
+_ = try! AliasWriter.apply(.upsert(name: "same", command: "echo before", comment: nil),
+                           path: sameName, allEntries: [])
+_ = try! AliasWriter.apply(.rename(from: "same", to: "same", command: "echo after"),
+                           path: sameName, allEntries: [])
+let sn = read(sameName)
+check("rename to the same name keeps the alias", sn.contains("alias same="))
+check("rename to the same name updates the command", sn.contains("alias same='echo after'"))
+check("rename to the same name leaves exactly one definition",
+      sn.components(separatedBy: "alias same=").count - 1 == 1, sn)
+
+// Renaming something that is not in the block should not fabricate a deletion.
+let absent = scratch("# x\n")
+_ = try! AliasWriter.apply(.upsert(name: "present", command: "echo here", comment: nil),
+                           path: absent, allEntries: [])
+_ = try! AliasWriter.apply(.rename(from: "ghost", to: "newghost", command: "echo boo"),
+                           path: absent, allEntries: [])
+check("renaming an absent alias leaves the existing one alone",
+      read(absent).contains("alias present='echo here'"))
+
+// ---------------------------------------------------------------------------
+print("\n15. Block content that could confuse a line-level edit")
+
+// A marker lookalike inside the block must not be mistaken for a real marker, and a
+// value containing the marker text must survive.
+let lookalike = scratch("""
+# before
+\(ManagedBlock.begin)
+\(ManagedBlock.notice)
+alias sneaky='echo # >>> aliasbar managed block >>>'
+alias normal='1'
+\(ManagedBlock.end)
+# after
+""")
+_ = try! AliasWriter.apply(.upsert(name: "extra", command: "echo extra", comment: nil),
+                           path: lookalike, allEntries: [])
+let lk = read(lookalike)
+check("an alias whose value contains the marker text survives",
+      lk.contains("alias sneaky="), lk)
+check("still exactly one real begin marker",
+      lk.components(separatedBy: "\n").filter { $0.trimmingCharacters(in: .whitespaces) == ManagedBlock.begin }.count == 1)
+check("the new alias landed", lk.contains("alias extra='echo extra'"))
+check("content outside survives", lk.contains("# before") && lk.contains("# after"))
+
+// A relative symlink, which is what dotfile managers usually create.
+let relDir = "\(sandbox)/relhome"
+try! FileManager.default.createDirectory(atPath: relDir, withIntermediateDirectories: true)
+try! "alias rel='1'\n".write(toFile: "\(relDir)/real-zshrc", atomically: true, encoding: .utf8)
+let relLink = "\(relDir)/.zshrc"
+try! FileManager.default.createSymbolicLink(atPath: relLink, withDestinationPath: "real-zshrc")
+_ = try! AliasWriter.apply(.upsert(name: "viaRel", command: "echo rel", comment: nil),
+                           path: relLink, allEntries: [])
+var relInfo = stat()
+lstat(relLink, &relInfo)
+check("a relative symlink stays a symlink", (relInfo.st_mode & S_IFMT) == S_IFLNK)
+check("a relative symlink resolves to its target",
+      read("\(relDir)/real-zshrc").contains("alias viaRel='echo rel'"))
+check("the relative target kept its original content",
+      read("\(relDir)/real-zshrc").contains("alias rel='1'"))
+
+// ---------------------------------------------------------------------------
 print("\n" + String(repeating: "-", count: 60))
 print("\(passes) passed, \(failures) failed")
 exit(failures == 0 ? 0 : 1)
