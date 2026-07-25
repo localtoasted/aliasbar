@@ -348,52 +348,84 @@ enum AliasWriter {
                 guard let (existing, _) = ZshrcParser.splitAliasAssignment(rest),
                       existing == name else { continue }
 
-                // Walk forward while the statement is still inside an open quote.
+                // Walk forward until the statement is lexically complete.
                 var last = i
-                var open = quoteStateAfter(lines[i], startingOpen: false)
-                while open && last + 1 < end {
+                var (state, continues) = scan(lines[i], from: .unquoted)
+                while continues && last + 1 < end {
                     last += 1
-                    open = quoteStateAfter(lines[last], startingOpen: true)
+                    (state, continues) = scan(lines[last], from: state)
                 }
-                // Reaching the end marker still quoted means the block is already
+                // Still incomplete at the end marker means the block is already
                 // malformed. Consuming to the end would delete everything after it, so
                 // refuse and let the user look at their own file.
-                if open {
+                if continues {
                     throw WriteError.malformedMarkers(
-                        "the definition of \"\(name)\" has an unterminated quote")
+                        "the definition of \"\(name)\" is never terminated")
                 }
                 return i...last
             }
             return nil
         }
 
-        /// Tracks single-quote state across a line, following zsh's actual rules.
+        /// Where the lexer is when a line ends.
         ///
-        /// The subtlety that makes counting quotes wrong: **inside** single quotes a
-        /// backslash is a literal character and escapes nothing, so the very next
-        /// apostrophe still closes the string. Outside quotes, `\'` *is* an escaped
-        /// literal apostrophe. Treating any backslash-apostrophe pair as non-structural
-        /// misreads a command containing a literal backslash and can leave the scanner
-        /// stuck open, consuming every following comment, function, and alias in the
-        /// block.
-        func quoteStateAfter(_ line: String, startingOpen wasOpen: Bool) -> Bool {
-            var open = wasOpen
-            var iterator = line.startIndex
-            while iterator < line.endIndex {
-                let ch = line[iterator]
-                if open {
-                    // Literal until the closing quote. Backslash has no power here.
-                    if ch == "'" { open = false }
-                } else if ch == "\\" {
-                    // Escapes the next character, whatever it is.
-                    iterator = line.index(after: iterator)
-                    if iterator == line.endIndex { break }
-                } else if ch == "'" {
-                    open = true
+        /// Tracking single quotes alone is not enough. Three cases break it:
+        /// an apostrophe inside a double-quoted value (`alias x="echo it's fine"`) looks
+        /// like an opening quote; a double-quoted value spanning lines looks complete
+        /// after the first; and a trailing unescaped backslash continues the statement
+        /// onto the next line with no quote involved at all. Each of those either
+        /// rejects a valid alias or, worse, truncates a statement and leaves the
+        /// remainder as a bare command that runs at shell startup.
+        enum QuoteState { case unquoted, single, double }
+
+        /// Advances the lexer across one line. Returns the state at end of line and
+        /// whether the statement continues onto the next one.
+        func scan(_ line: String, from entering: QuoteState) -> (QuoteState, Bool) {
+            var state = entering
+            var index = line.startIndex
+            var trailingEscape = false
+
+            while index < line.endIndex {
+                let ch = line[index]
+                trailingEscape = false
+
+                switch state {
+                case .single:
+                    // Wholly literal. A backslash here is just a backslash, so the very
+                    // next apostrophe closes the string.
+                    if ch == "'" { state = .unquoted }
+
+                case .double:
+                    if ch == "\\" {
+                        let next = line.index(after: index)
+                        if next == line.endIndex { trailingEscape = true; index = next; continue }
+                        index = next
+                    } else if ch == "\"" {
+                        state = .unquoted
+                    }
+
+                case .unquoted:
+                    if ch == "\\" {
+                        let next = line.index(after: index)
+                        if next == line.endIndex { trailingEscape = true; index = next; continue }
+                        index = next
+                    } else if ch == "'" {
+                        state = .single
+                    } else if ch == "\"" {
+                        state = .double
+                    } else if ch == "#" {
+                        // A comment runs to end of line and cannot open anything.
+                        return (state, false)
+                    }
                 }
-                iterator = line.index(after: iterator)
+                index = line.index(after: index)
             }
-            return open
+
+            // The statement continues if a quote is still open, or if the line ended on
+            // an unescaped backslash. In single quotes a trailing backslash is literal,
+            // but the open quote already means continuation.
+            let continues = state != .unquoted || trailingEscape
+            return (state, continues)
         }
 
         guard let begin = bounds.begin, let end = bounds.end else {
@@ -528,11 +560,24 @@ enum AliasWriter {
         // landing inside a single mtime tick has identical metadata, so identity alone
         // would wave it through.
         let currentSnapshot = FileSnapshot.of(path)
-        let existsNow = fm.fileExists(atPath: path)
+        // lstat, not fileExists. `fileExists` follows symlinks, so a dangling symlink
+        // planted at this path since the read reads as "absent" — and renaming over it
+        // would destroy the link. With no original contents there is also no backup, so
+        // that loss would be unrecoverable. Any directory entry that was not there
+        // before is a reason to stop.
+        var entry = stat()
+        let entryExists = lstat(path, &entry) == 0
         let unchanged: Bool
-        if !existsNow {
-            // The file being absent is only acceptable if it was absent when we read.
+        if !entryExists {
+            // Absent now is only acceptable if it was absent when we read.
             unchanged = originalContents.isEmpty && snapshotAtRead == nil
+        } else if snapshotAtRead == nil {
+            // It was absent when we read and something exists now, whatever it is.
+            unchanged = false
+        } else if (entry.st_mode & S_IFMT) == S_IFLNK {
+            // The target resolved to a real file at read time. If it is a symlink now,
+            // the chain changed underneath us.
+            unchanged = false
         } else if currentSnapshot != snapshotAtRead {
             unchanged = false
         } else {

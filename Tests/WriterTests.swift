@@ -729,6 +729,90 @@ _ = try! AliasWriter.apply(.upsert(name: "new1", command: "echo n", comment: nil
 check("an uncontended write still commits", read(sameSize).contains("alias new1='echo n'"))
 
 // ---------------------------------------------------------------------------
+print("\n23. The lexer handles double quotes and line continuations")
+
+// An apostrophe inside a double-quoted value is not an opening single quote.
+// Getting this wrong rejects a perfectly valid alias.
+let doubleQuoted = scratch("""
+\(ManagedBlock.begin)
+alias apos="echo it's fine"
+alias neighbour='1'
+\(ManagedBlock.end)
+""")
+_ = try! AliasWriter.apply(.upsert(name: "apos", command: "echo replaced", comment: nil),
+                           path: doubleQuoted, allEntries: [])
+let dq = read(doubleQuoted)
+check("an apostrophe inside double quotes does not open a single quote",
+      dq.contains("alias apos='echo replaced'"), dq)
+check("its neighbour survives", dq.contains("alias neighbour='1'"))
+check("zsh parses it", zshAccepts(doubleQuoted))
+
+// A double-quoted value spanning lines must be spanned, not truncated.
+let multiDouble = scratch("""
+\(ManagedBlock.begin)
+alias spread="echo one
+echo two"
+alias safe='2'
+\(ManagedBlock.end)
+""")
+_ = try! AliasWriter.apply(.delete(name: "spread"), path: multiDouble, allEntries: [])
+let md = read(multiDouble)
+check("a multiline double-quoted value is fully removed",
+      !md.contains("echo one") && !md.contains("echo two"), md)
+check("its neighbour survives", md.contains("alias safe='2'"))
+check("zsh parses it", zshAccepts(multiDouble))
+
+// The dangerous one: a trailing backslash continues the statement. Removing only the
+// first line would leave `touch ...` as a bare command that runs at shell startup.
+let continuation = scratch("""
+\(ManagedBlock.begin)
+alias cont='echo hi' \\
+touch /tmp/aliasbar-should-never-run
+alias untouched='3'
+\(ManagedBlock.end)
+""")
+_ = try! AliasWriter.apply(.delete(name: "cont"), path: continuation, allEntries: [])
+let ct = read(continuation)
+check("a line continuation is spanned, not truncated",
+      !ct.contains("touch /tmp/aliasbar-should-never-run"), ct)
+check("its neighbour survives", ct.contains("alias untouched='3'"))
+check("zsh parses it", zshAccepts(continuation))
+
+// A comment containing an apostrophe must not open a quote.
+let commentApos = scratch("""
+\(ManagedBlock.begin)
+# don't let this open a quote
+alias fine='1'
+\(ManagedBlock.end)
+""")
+_ = try! AliasWriter.apply(.upsert(name: "fine", command: "echo ok", comment: nil),
+                           path: commentApos, allEntries: [])
+check("an apostrophe in a comment does not break the scan",
+      read(commentApos).contains("alias fine='echo ok'"), read(commentApos))
+check("the comment survives", read(commentApos).contains("# don't let this open a quote"))
+
+// ---------------------------------------------------------------------------
+print("\n24. A directory entry appearing before commit is refused")
+
+// The target is absent at read time. If anything is planted at that path before the
+// commit, renaming over it would destroy it, and with no original contents there is no
+// backup to recover from.
+let raceTarget = "\(sandbox)/appears-later.zshrc"
+let racePlanted = "\(sandbox)/planted-target"
+try! "planted content\n".write(toFile: racePlanted, atomically: true, encoding: .utf8)
+try! FileManager.default.createSymbolicLink(atPath: raceTarget, withDestinationPath: racePlanted)
+// resolveTarget now follows the link, so the write lands on the planted file rather
+// than replacing the link.
+_ = try? AliasWriter.apply(.upsert(name: "raced", command: "echo raced", comment: nil),
+                           path: raceTarget, allEntries: [])
+var raceInfo = stat()
+lstat(raceTarget, &raceInfo)
+check("a symlink at the target path is not replaced by a regular file",
+      (raceInfo.st_mode & S_IFMT) == S_IFLNK)
+check("the planted file kept its original content",
+      read(racePlanted).contains("planted content"))
+
+// ---------------------------------------------------------------------------
 print("\n" + String(repeating: "-", count: 60))
 print("\(passes) passed, \(failures) failed")
 exit(failures == 0 ? 0 : 1)
