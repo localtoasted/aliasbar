@@ -37,6 +37,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             forName: .aliasBarHotkeyFired, object: nil, queue: .main
         ) { [weak self] _ in self?.summon() }
 
+        // A look with a second ground follows macOS between light and dark. The window is
+        // usually closed when the user flips the system setting, so this cannot wait to be
+        // noticed at render time.
+        settings.systemIsDark = AppSettings.readSystemIsDark()
+        DistributedNotificationCenter.default.addObserver(
+            forName: Notification.Name("AppleInterfaceThemeChangedNotification"),
+            object: nil, queue: .main
+        ) { [weak self] _ in
+            self?.settings.systemIsDark = AppSettings.readSystemIsDark()
+        }
+
         // Worth recording every launch. The app is ad-hoc signed, so every rebuild gets a
         // new code identity and macOS silently stops honouring the Accessibility grant —
         // the entry stays visible in System Settings while `AXIsProcessTrusted` returns
@@ -49,11 +60,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         }
 
         // Opens itself so a screenshot harness does not have to synthesise a keystroke,
-        // which needs Accessibility permission and cannot run over SSH. Set it to
-        // "history" to land in the history palette instead of the default view.
+        // which needs Accessibility permission and cannot run over SSH. "history" lands in
+        // the history palette; "settings" opens the settings window instead, which is
+        // otherwise only reachable by clicking.
         let openOnLaunch = ProcessInfo.processInfo.environment["ALIASBAR_OPEN_ON_LAUNCH"]
-        if openOnLaunch == "1" || openOnLaunch == "history" {
+        if openOnLaunch == "1" || openOnLaunch == "history" || openOnLaunch == "settings" {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
+                if openOnLaunch == "settings" {
+                    self?.openSettings()
+                    return
+                }
                 self?.summon()
                 if openOnLaunch == "history" { self?.state.enterHistory() }
             }

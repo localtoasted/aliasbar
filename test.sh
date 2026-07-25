@@ -16,6 +16,7 @@ swiftc -target "$(uname -m)-apple-macos13.0" \
     "${PROJECT_DIR}/Sources/Model.swift" \
     "${PROJECT_DIR}/Sources/Settings.swift" \
     "${PROJECT_DIR}/Sources/Theme.swift" \
+    "${PROJECT_DIR}/Sources/Appearance.swift" \
     "${PROJECT_DIR}/Sources/AliasWriter.swift" \
     "${BUILD_DIR}/main.swift" \
     -o "${BUILD_DIR}/writer-tests"

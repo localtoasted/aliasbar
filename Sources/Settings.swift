@@ -239,7 +239,9 @@ final class AppSettings: ObservableObject {
         static let defaultView = "defaultView"
         static let searchScope = "searchScope"
         static let sortOrder = "sortOrder"
-        static let theme = "theme"
+        static let appearance = "appearance"
+        static let savedPresets = "savedPresets"
+        static let followsSystemAppearance = "followsSystemAppearance"
         static let boardDensity = "boardDensity"
         static let presentationStyle = "presentationStyle"
         static let rcPath = "rcPathOverride"
@@ -271,8 +273,47 @@ final class AppSettings: ObservableObject {
 
     // MARK: Appearance
 
-    @Published var themeName: ThemeName {
-        didSet { defaults.set(themeName.rawValue, forKey: Key.theme) }
+    /// The look currently in use. Always a *working copy*: picking a preset copies its
+    /// values in, and every subsequent tweak edits this rather than the preset. That is
+    /// what lets someone start from Clay, change the accent, and still have Clay mean
+    /// Clay tomorrow.
+    @Published var appearance: Appearance {
+        didSet { persist(appearance, forKey: Key.appearance) }
+    }
+
+    /// Looks the user saved. The built-in three are not in here — they are code, they
+    /// cannot be edited, and they cannot be deleted.
+    @Published var savedPresets: [Appearance] {
+        didSet { persist(savedPresets, forKey: Key.savedPresets) }
+    }
+
+    /// When true and the current look defines a second ground, the window follows macOS
+    /// between light and dark.
+    @Published var followsSystemAppearance: Bool {
+        didSet { defaults.set(followsSystemAppearance, forKey: Key.followsSystemAppearance) }
+    }
+
+    /// Whether macOS is currently in dark mode. Not persisted — it is a reading, not a
+    /// setting. `App` keeps it current; the initial value is read at launch.
+    @Published var systemIsDark: Bool = AppSettings.readSystemIsDark()
+
+    static func readSystemIsDark() -> Bool {
+        NSApp?.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+    }
+
+    /// Every look available to pick, built-ins first.
+    var allPresets: [Appearance] { Appearance.builtIns + savedPresets }
+
+    /// The theme the views render, resolved against the system appearance if the look
+    /// opted into following it.
+    func theme(systemIsDark: Bool) -> Theme {
+        Theme.derive(from: appearance,
+                     dark: followsSystemAppearance && appearance.darkGround != nil && systemIsDark)
+    }
+
+    private func persist<T: Encodable>(_ value: T, forKey key: String) {
+        guard let data = try? JSONEncoder().encode(value) else { return }
+        defaults.set(data, forKey: key)
     }
     @Published var boardDensity: BoardDensity {
         didSet { defaults.set(boardDensity.rawValue, forKey: Key.boardDensity) }
@@ -337,7 +378,20 @@ final class AppSettings: ObservableObject {
         defaultView = decode(Key.defaultView, ViewMode.find)
         searchScope = decode(Key.searchScope, SearchScope.everything)
         sortOrder = decode(Key.sortOrder, SortOrder.usage)
-        themeName = decode(Key.theme, ThemeName.slate)
+        // A look stored by an older build, or by a build with a different set of fields,
+        // decodes to nil and falls back rather than refusing to launch. Appearance is not
+        // worth crashing over.
+        func decodeJSON<T: Decodable>(_ key: String, _ fallback: T) -> T {
+            guard let data = store.data(forKey: key),
+                  let value = try? JSONDecoder().decode(T.self, from: data) else { return fallback }
+            return value
+        }
+        appearance = decodeJSON(Key.appearance, Appearance.graphite)
+        savedPresets = decodeJSON(Key.savedPresets, [Appearance]())
+        // Off by default. Picking Clay should give you Clay, not its dark variant because
+        // macOS happens to be dark this evening — two of the three looks are built on a
+        // light ground and choosing one is a choice, not an accident to be corrected.
+        followsSystemAppearance = store.object(forKey: Key.followsSystemAppearance) as? Bool ?? false
         boardDensity = decode(Key.boardDensity, BoardDensity.comfortable)
         // Centred by default. The menu bar popover is the fallback, not the other way
         // round: on a laptop with a full menu bar the icon is not reliably placed, and

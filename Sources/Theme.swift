@@ -1,38 +1,13 @@
 import SwiftUI
 import AppKit
 
-/// The five looks from the design round, kept as themes rather than as separate
-/// architectures. Each one commits to a distinct material: a printed ledger, a
-/// blueprint, a library index card, a dictionary page, a phosphor terminal.
-enum ThemeName: String, CaseIterable, Identifiable {
-    case slate, phosphor, ledger, blueprint, index, dictionary, system
-    var id: String { rawValue }
-
-    var label: String {
-        switch self {
-        case .slate: return "Slate"
-        case .phosphor: return "Phosphor"
-        case .ledger: return "Ledger"
-        case .blueprint: return "Blueprint"
-        case .index: return "Index"
-        case .dictionary: return "Dictionary"
-        case .system: return "System"
-        }
-    }
-
-    var blurb: String {
-        switch self {
-        case .slate: return "Clean, quiet, modern"
-        case .phosphor: return "Green CRT terminal"
-        case .ledger: return "Ruled accounting paper"
-        case .blueprint: return "Cyanotype technical drawing"
-        case .index: return "Library card catalogue"
-        case .dictionary: return "Typeset reference page"
-        case .system: return "Follows macOS light and dark"
-        }
-    }
-}
-
+/// The tokens the views actually read.
+///
+/// Nothing constructs one of these by hand any more. A `Theme` is derived from an
+/// `Appearance` — the handful of things the user picked — and the derivation lives in
+/// `Appearance.swift`. Keeping the two apart is what makes contrast a guarantee rather
+/// than a hope: the values that have to hold a ratio are computed, and the values the
+/// user chose are the ones they chose.
 struct Theme {
     var background: Color
     var surface: Color
@@ -43,24 +18,25 @@ struct Theme {
     var accent: Color
     var aliasTint: Color
     var functionTint: Color
+    /// Contrasting colours for anything drawn on top of a filled accent or tint.
+    var onAccent: Color
+    var onAliasTint: Color
+    var onFunctionTint: Color
     var cornerRadius: CGFloat
-    /// True for the themes built on paper stock, which read better in light appearance.
+    /// Derived from the ground's luminance, not declared. A user who picks a pale ground
+    /// gets the light treatment without having to also tell us it is light.
     var isLight: Bool
-    /// Body font design. The mono-first themes use it for names and commands alike.
+    /// Body font design. Names and commands can use different faces.
     var bodyDesign: Font.Design
     var nameDesign: Font.Design
-    /// Whether the popover paints its own background or lets the system material show.
-    var usesMaterial: Bool
 
     /// How much of the desktop shows through, and which system material carries it.
     ///
     /// This is the difference between a surface that belongs to macOS and one pasted on
     /// top of it: the window picks up whatever is behind it, and the theme colour becomes
-    /// a tint over that rather than an opaque fill.
-    ///
-    /// Deliberately absent on the paper themes. Ledger, Index, and Dictionary each commit
-    /// to a physical stock, and a sheet of paper you can see the desktop through is not a
-    /// subtler version of that idea — it is a different, incoherent one.
+    /// a tint over that rather than an opaque fill. Nil when the user set translucency to
+    /// zero — a look committed to being a printed page should not have a desktop showing
+    /// through it.
     var vibrancy: Vibrancy? = nil
 
     struct Vibrancy {
@@ -69,150 +45,20 @@ struct Theme {
         var tint: Double
     }
 
-    static func current(_ name: ThemeName) -> Theme {
-        switch name {
-        case .slate:
-            // The default. Near-black tinted toward blue rather than pure grey, a single
-            // indigo accent, and one clear step between text, dim, and faint. Names stay
-            // monospaced because they are things you type; everything else is the system
-            // sans, which reads far better at small sizes than a terminal face does.
-            return Theme(
-                background: Color(red: 0.043, green: 0.047, blue: 0.055),
-                surface: Color(red: 0.086, green: 0.094, blue: 0.110),
-                rule: Color(red: 0.212, green: 0.227, blue: 0.263),
-                text: Color(red: 0.949, green: 0.957, blue: 0.973),
-                dim: Color(red: 0.612, green: 0.639, blue: 0.702),
-                faint: Color(red: 0.408, green: 0.435, blue: 0.502),
-                accent: Color(red: 0.416, green: 0.451, blue: 0.902),
-                aliasTint: Color(red: 0.416, green: 0.451, blue: 0.902),
-                functionTint: Color(red: 0.541, green: 0.361, blue: 0.859),
-                cornerRadius: 6,
-                isLight: false,
-                bodyDesign: .default,
-                nameDesign: .monospaced,
-                usesMaterial: false,
-                vibrancy: Vibrancy(material: .hudWindow, tint: 0.78)
-            )
-
-        case .phosphor:
-            return Theme(
-                background: Color(red: 0.043, green: 0.063, blue: 0.051),
-                surface: Color(red: 0.075, green: 0.106, blue: 0.086),
-                rule: Color(red: 0.22, green: 0.42, blue: 0.28),
-                text: Color(red: 0.72, green: 0.98, blue: 0.78),
-                dim: Color(red: 0.45, green: 0.72, blue: 0.52),
-                faint: Color(red: 0.30, green: 0.50, blue: 0.36),
-                accent: Color(red: 0.38, green: 0.95, blue: 0.50),
-                aliasTint: Color(red: 0.45, green: 0.92, blue: 0.62),
-                functionTint: Color(red: 0.70, green: 0.95, blue: 0.42),
-                cornerRadius: 3,
-                isLight: false,
-                bodyDesign: .monospaced,
-                nameDesign: .monospaced,
-                usesMaterial: false,
-                // A CRT is glass with a lit phosphor layer behind it, so it takes the
-                // most transparency of any theme here without losing what it is.
-                vibrancy: Vibrancy(material: .underWindowBackground, tint: 0.72)
-            )
-
-        case .ledger:
-            return Theme(
-                background: Color(red: 0.976, green: 0.965, blue: 0.937),
-                surface: Color(red: 0.996, green: 0.992, blue: 0.976),
-                rule: Color(red: 0.78, green: 0.80, blue: 0.72),
-                text: Color(red: 0.13, green: 0.13, blue: 0.11),
-                dim: Color(red: 0.42, green: 0.42, blue: 0.38),
-                faint: Color(red: 0.62, green: 0.62, blue: 0.57),
-                accent: Color(red: 0.62, green: 0.16, blue: 0.16),
-                aliasTint: Color(red: 0.20, green: 0.32, blue: 0.55),
-                functionTint: Color(red: 0.55, green: 0.30, blue: 0.10),
-                cornerRadius: 2,
-                isLight: true,
-                bodyDesign: .monospaced,
-                nameDesign: .monospaced,
-                usesMaterial: false
-            )
-
-        case .blueprint:
-            return Theme(
-                background: Color(red: 0.055, green: 0.145, blue: 0.290),
-                surface: Color(red: 0.086, green: 0.196, blue: 0.365),
-                rule: Color(red: 0.35, green: 0.55, blue: 0.78),
-                text: Color(red: 0.90, green: 0.94, blue: 1.0),
-                dim: Color(red: 0.64, green: 0.76, blue: 0.92),
-                faint: Color(red: 0.44, green: 0.58, blue: 0.78),
-                accent: Color(red: 1.0, green: 0.85, blue: 0.35),
-                aliasTint: Color(red: 0.55, green: 0.82, blue: 1.0),
-                functionTint: Color(red: 1.0, green: 0.80, blue: 0.55),
-                cornerRadius: 0,
-                isLight: false,
-                bodyDesign: .monospaced,
-                nameDesign: .monospaced,
-                usesMaterial: false,
-                vibrancy: Vibrancy(material: .hudWindow, tint: 0.82)
-            )
-
-        case .index:
-            return Theme(
-                background: Color(red: 0.988, green: 0.976, blue: 0.941),
-                surface: Color(red: 1.0, green: 0.996, blue: 0.980),
-                rule: Color(red: 0.85, green: 0.72, blue: 0.66),
-                text: Color(red: 0.16, green: 0.14, blue: 0.13),
-                dim: Color(red: 0.45, green: 0.40, blue: 0.38),
-                faint: Color(red: 0.68, green: 0.62, blue: 0.58),
-                accent: Color(red: 0.78, green: 0.28, blue: 0.24),
-                aliasTint: Color(red: 0.22, green: 0.40, blue: 0.52),
-                functionTint: Color(red: 0.52, green: 0.34, blue: 0.52),
-                cornerRadius: 4,
-                isLight: true,
-                bodyDesign: .default,
-                nameDesign: .monospaced,
-                usesMaterial: false
-            )
-
-        case .dictionary:
-            return Theme(
-                background: Color(red: 0.992, green: 0.988, blue: 0.976),
-                surface: Color(red: 1.0, green: 1.0, blue: 0.996),
-                rule: Color(red: 0.80, green: 0.78, blue: 0.74),
-                text: Color(red: 0.09, green: 0.09, blue: 0.09),
-                dim: Color(red: 0.38, green: 0.38, blue: 0.37),
-                faint: Color(red: 0.60, green: 0.60, blue: 0.58),
-                accent: Color(red: 0.15, green: 0.15, blue: 0.15),
-                aliasTint: Color(red: 0.30, green: 0.30, blue: 0.30),
-                functionTint: Color(red: 0.48, green: 0.44, blue: 0.40),
-                cornerRadius: 2,
-                isLight: true,
-                bodyDesign: .serif,
-                nameDesign: .serif,
-                usesMaterial: false
-            )
-
-        case .system:
-            return Theme(
-                background: Color.clear,
-                surface: Color.primary.opacity(0.06),
-                rule: Color.primary.opacity(0.12),
-                text: Color.primary,
-                dim: Color.secondary,
-                faint: Color.secondary.opacity(0.6),
-                accent: Color(red: 0.35, green: 0.85, blue: 0.45),
-                aliasTint: Color(red: 0.35, green: 0.75, blue: 1.0),
-                functionTint: Color(red: 0.65, green: 0.55, blue: 1.0),
-                cornerRadius: 8,
-                isLight: false,
-                bodyDesign: .default,
-                nameDesign: .monospaced,
-                usesMaterial: true
-            )
-        }
-    }
-
     func tint(for kind: ShellEntry.Kind) -> Color {
         kind == .function ? functionTint : aliasTint
     }
 
-    /// Selection fill. Paper themes need a wash rather than a glow.
+    /// Glyph colour for something drawn *on* a tint — the kind badge, mainly.
+    ///
+    /// It cannot follow the ground's lightness, which is what it used to do. A user is
+    /// free to pick an acid yellow tint on a white ground, and white-on-acid-yellow is
+    /// not a subtle failure; it is an invisible glyph. These ask the tint itself.
+    func onTint(for kind: ShellEntry.Kind) -> Color {
+        kind == .function ? onFunctionTint : onAliasTint
+    }
+
+    /// Selection fill. Light grounds need a wash rather than a glow.
     var selectionFill: Color {
         isLight ? accent.opacity(0.14) : accent.opacity(0.20)
     }
@@ -257,6 +103,11 @@ enum WindowLayout {
     /// room, and Find at 780 is a lot of air around two-character names. One size that is
     /// slightly generous for one view beats two sizes that are each perfect.
     static let windowWidth: CGFloat = 660
+    /// The header is fixed too, for the same reason the body is. It looks content-sized,
+    /// but a serif interface face is a fraction taller than a sans one, and a look that
+    /// changed the window's height by a point when you switched typeface would be exactly
+    /// the thing this was supposed to stop.
+    static let headerHeight: CGFloat = 93
     /// The area between the header rule and the footer rule. Header and footer are fixed
     /// by their own content, so fixing this fixes the window.
     /// Sized so the whole window still clears the Dock at the 20%-from-top position on a
@@ -309,7 +160,7 @@ extension View {
 /// Reads the current theme once and hands it down, so views never touch Settings
 /// directly for appearance.
 private struct ThemeKey: EnvironmentKey {
-    static let defaultValue = Theme.current(.slate)
+    static let defaultValue = Theme.derive(from: .graphite)
 }
 
 extension EnvironmentValues {

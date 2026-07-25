@@ -1665,6 +1665,163 @@ check("matching is case-insensitive", HistoryScanner.score("GIT", in: "git statu
 
 
 // ---------------------------------------------------------------------------
+// Appearance: colour maths, derivation, contrast guarantees, presets
+// ---------------------------------------------------------------------------
+
+check("hex parses with a leading hash", HexColor(hex: "#4B5BC4") != nil)
+check("hex parses without one", HexColor(hex: "4B5BC4") != nil)
+check("hex parses the short form", HexColor(hex: "#FFF")?.hex == "#FFFFFF")
+check("hex is case-insensitive", HexColor(hex: "#4b5bc4") == HexColor(hex: "#4B5BC4"))
+check("a bad hex is rejected rather than defaulted", HexColor(hex: "#GGGGGG") == nil)
+check("a short hex is rejected", HexColor(hex: "#12345") == nil)
+check("hex round-trips", HexColor(hex: "#0A0B0D")?.hex == "#0A0B0D")
+
+// Every channel, not just the greys: a round trip that only works for greys would
+// pass with the chroma term dropped entirely.
+var worstRoundTrip = 0.0
+for hex in ["#000000", "#FFFFFF", "#0A0B0D", "#F1EFE7", "#D2764F", "#1414EE",
+            "#E8FA4A", "#58CBFA", "#7F7F7F", "#123456"] {
+    let original = HexColor(hex: hex)!
+    let viaOklch = Oklch(original).rgb
+    let drift = max(abs(original.red - viaOklch.red),
+                    max(abs(original.green - viaOklch.green), abs(original.blue - viaOklch.blue)))
+    worstRoundTrip = max(worstRoundTrip, drift)
+}
+check("sRGB survives a round trip through OKLCH", worstRoundTrip < 0.004,
+      "worst channel drift \(worstRoundTrip)")
+
+check("white is lighter than black in OKLab",
+      Oklch(HexColor(hex: "#FFFFFF")!).l > Oklch(HexColor(hex: "#000000")!).l)
+check("a grey has almost no chroma", Oklch(HexColor(hex: "#7F7F7F")!).c < 0.01)
+check("a saturated blue has chroma", Oklch(HexColor(hex: "#1414EE")!).c > 0.1)
+
+check("white on black is the maximum contrast",
+      abs(HexColor(hex: "#FFFFFF")!.contrast(against: HexColor(hex: "#000000")!) - 21) < 0.01)
+check("a colour has no contrast with itself",
+      abs(HexColor(hex: "#4B5BC4")!.contrast(against: HexColor(hex: "#4B5BC4")!) - 1) < 0.001)
+
+// The guarantee. Grounds that nobody sensible would pick are the point: a colour well
+// makes mid-grey and acid green reachable in one drag, and the derivation has to hold.
+//
+// Two different promises, and only one of them is absolute. Where the ground can carry
+// the ladder, every rung hits its target. Where it cannot — a mid-grey tops out near
+// 5.3:1 against anything — the promise is that the rungs stay in order and stay apart,
+// because text and dim rendering as the same colour is the failure that actually shows.
+let awkwardGrounds = ["#0A0B0D", "#F1EFE7", "#F6F6F6", "#7F7F7F", "#808080",
+                      "#2B2B2B", "#FFFFFF", "#000000", "#4B5BC4", "#00FF00", "#191813"]
+for groundHex in awkwardGrounds {
+    let ground = HexColor(hex: groundHex)!
+    let scale = Theme.contrastScale(against: ground)
+    let roomy = scale >= 1
+    for accentHex in ["#4B5BC4", "#D2764F", "#1414EE", "#E8FA4A"] {
+        let hue = Oklch(HexColor(hex: accentHex)!).h
+        func rung(_ target: Double) -> HexColor {
+            Theme.lightness(forContrast: Theme.scaled(target, by: scale),
+                            against: ground, hue: hue, chroma: 0.015)
+        }
+        let text = rung(ContrastTarget.text)
+        let dim = rung(ContrastTarget.dim)
+        let faint = rung(ContrastTarget.faint)
+        let label = "\(groundHex)/\(accentHex)"
+
+        if roomy {
+            check("text hits its ratio on \(label)",
+                  text.contrast(against: ground) >= ContrastTarget.text - 0.15,
+                  "got \(text.contrast(against: ground))")
+            check("dim hits its ratio on \(label)",
+                  dim.contrast(against: ground) >= ContrastTarget.dim - 0.1,
+                  "got \(dim.contrast(against: ground))")
+            check("faint hits its ratio on \(label)",
+                  faint.contrast(against: ground) >= ContrastTarget.faint - 0.1,
+                  "got \(faint.contrast(against: ground))")
+        }
+        check("the ladder stays in order on \(label)",
+              text.contrast(against: ground) > dim.contrast(against: ground)
+                  && dim.contrast(against: ground) > faint.contrast(against: ground),
+              "\(text.contrast(against: ground)) / \(dim.contrast(against: ground)) "
+                  + "/ \(faint.contrast(against: ground))")
+        // Apart, not merely ordered: three shades separated by a rounding error would
+        // satisfy the ordering check and still look like one colour.
+        check("the rungs stay visibly apart on \(label)",
+              text.contrast(against: ground) - dim.contrast(against: ground) > 0.4
+                  && dim.contrast(against: ground) - faint.contrast(against: ground) > 0.2,
+              "\(text.contrast(against: ground)) / \(dim.contrast(against: ground)) "
+                  + "/ \(faint.contrast(against: ground))")
+        check("faint is still readable on \(label)",
+              faint.contrast(against: ground) >= 1.7,
+              "got \(faint.contrast(against: ground))")
+    }
+}
+
+check("a mid-grey ground admits it cannot carry the full ladder",
+      Theme.contrastScale(against: HexColor(hex: "#7F7F7F")!) < 1)
+check("a near-black ground carries it in full",
+      Theme.contrastScale(against: HexColor(hex: "#0A0B0D")!) == 1)
+check("white reaches the most contrast there is",
+      abs(Theme.reachableContrast(against: HexColor(hex: "#FFFFFF")!) - 21) < 0.01)
+
+// A ground so light that 11:1 is unreachable — #FFFFFF tops out at 21, but a pale
+// yellow does not. The solver must return its best effort rather than something random.
+let paleGround = HexColor(hex: "#FFFFCC")!
+let onPale = Theme.lightness(forContrast: 21, against: paleGround, hue: 0, chroma: 0.01)
+check("an impossible target still returns a dark colour on a pale ground",
+      onPale.luminance < paleGround.luminance)
+
+check("an accent too dark for a dark ground is lifted, not replaced",
+      Theme.legible(HexColor(hex: "#101020")!, on: HexColor(hex: "#0A0B0D")!,
+                    minimum: 3.4).contrast(against: HexColor(hex: "#0A0B0D")!) >= 3.4)
+check("an accent that already reads is left alone",
+      Theme.legible(HexColor(hex: "#58CBFA")!, on: HexColor(hex: "#0A0B0D")!,
+                    minimum: 2.6) == HexColor(hex: "#58CBFA")!)
+
+for preset in Appearance.builtIns {
+    let theme = Theme.derive(from: preset)
+    check("\(preset.name) knows whether it is light",
+          theme.isLight == (preset.ground.luminance > 0.35))
+    check("\(preset.name) keeps its corner radius", theme.cornerRadius == preset.cornerRadius)
+    check("\(preset.name) is built in", preset.isBuiltIn)
+}
+check("Graphite is the dark one", !Theme.derive(from: .graphite).isLight)
+check("Clay is a light one", Theme.derive(from: .clay).isLight)
+check("Ultramarine is a light one", Theme.derive(from: .ultramarine).isLight)
+check("an opaque look has no vibrancy", Theme.derive(from: .clay).vibrancy == nil)
+check("a translucent look has vibrancy", Theme.derive(from: .graphite).vibrancy != nil)
+
+// The second ground is what "follow macOS" switches to, and only when asked.
+check("a second ground is used when the system is dark",
+      Theme.derive(from: .clay, dark: true).isLight == false)
+check("a second ground is ignored when the system is light",
+      Theme.derive(from: .clay, dark: false).isLight)
+check("a look with one ground ignores the system entirely",
+      Theme.derive(from: .graphite, dark: true).isLight
+          == Theme.derive(from: .graphite, dark: false).isLight)
+
+// Glyphs drawn on a tint: the acid-yellow function tint is exactly the case that made
+// this necessary, and white-on-yellow is the failure it prevents.
+check("a light tint takes a dark glyph",
+      Theme.wantsDarkGlyph(over: Appearance.ultramarine.functionTint))
+check("a dark tint takes a white glyph",
+      !Theme.wantsDarkGlyph(over: Appearance.graphite.accent))
+check("a mid tint still resolves one way or the other",
+      Theme.wantsDarkGlyph(over: HexColor(hex: "#7F7F7F")!)
+          || !Theme.wantsDarkGlyph(over: HexColor(hex: "#7F7F7F")!))
+
+let exported = PresetTransfer.export(.clay)
+check("an exported look is readable text", exported.contains("Clay") && exported.contains("#"))
+let reimported = PresetTransfer.importing(exported, id: "fresh")
+check("an exported look imports back", reimported != nil)
+check("an import keeps the values", reimported?.ground == Appearance.clay.ground)
+check("an import gets a new identity", reimported?.id == "fresh")
+check("an import is never built in", reimported?.isBuiltIn == false)
+check("junk does not import", PresetTransfer.importing("not a preset", id: "x") == nil)
+
+let mine = Appearance.graphite.copy(named: "Mine", id: "mine")
+check("a copy takes the new name", mine.name == "Mine")
+check("a copy is not built in", !mine.isBuiltIn)
+check("a copy keeps the values it was made from", mine.accent == Appearance.graphite.accent)
+check("a copy is not equal to its source", mine != Appearance.graphite)
+
+// ---------------------------------------------------------------------------
 print("\n" + String(repeating: "-", count: 60))
 print("\(passes) passed, \(failures) failed")
 exit(failures == 0 ? 0 : 1)

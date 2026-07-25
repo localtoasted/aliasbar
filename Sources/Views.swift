@@ -6,8 +6,13 @@ struct RootView: View {
     @ObservedObject var state: AppState
     @ObservedObject var settings: AppSettings
     @FocusState private var searchFocused: Bool
-
-    private var theme: Theme { Theme.current(settings.themeName) }
+    // The system appearance matters only when the chosen look defines a second ground
+    // and the user opted into following it; `settings.theme(systemIsDark:)` decides that.
+    //
+    // Read from settings rather than from `\.colorScheme`, because the window forces its
+    // own scheme below. Reading the value we just set would be a loop with one stable
+    // state and it would not be the right one.
+    private var theme: Theme { settings.theme(systemIsDark: settings.systemIsDark) }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -30,6 +35,11 @@ struct RootView: View {
             footer
         }
         .frame(width: WindowLayout.windowWidth)
+        // Tells AppKit which way round this window is, which decides everything we do not
+        // draw ourselves: the search field's placeholder, the caret, scrollers, and the
+        // sheets. A light look inside a window AppKit believes is dark renders its
+        // placeholder in near-white on paper, which is to say not at all.
+        .preferredColorScheme(theme.isLight ? .light : .dark)
         .background(background)
         .overlay(alignment: .top) { topHighlight }
         .environment(\.theme, theme)
@@ -58,8 +68,6 @@ struct RootView: View {
                 VisualEffect(material: vibrancy.material)
                 theme.background.opacity(vibrancy.tint)
             }
-        } else if theme.usesMaterial {
-            Rectangle().fill(.ultraThinMaterial)
         } else {
             theme.background
         }
@@ -154,6 +162,7 @@ struct RootView: View {
         .padding(.horizontal, 12)
         .padding(.top, 11)
         .padding(.bottom, 9)
+        .frame(height: WindowLayout.headerHeight)
     }
 
     private var searchPrompt: String {
@@ -234,7 +243,7 @@ struct RootView: View {
         if let message = state.toast {
             Text(message)
                 .font(.system(size: 11, weight: .medium, design: theme.bodyDesign))
-                .foregroundStyle(theme.isLight ? Color.white : theme.background)
+                .foregroundStyle(theme.onAccent)
                 .padding(.horizontal, 12)
                 .padding(.vertical, 7)
                 .background(theme.accent, in: Capsule())
@@ -276,7 +285,7 @@ struct KindBadge: View {
     var body: some View {
         Text(kind == .function ? "ƒ" : "@")
             .font(.system(size: size * 0.6, weight: .bold, design: .monospaced))
-            .foregroundStyle(theme.isLight ? Color.white : theme.background)
+            .foregroundStyle(theme.onTint(for: kind))
             .frame(width: size, height: size)
             .background(theme.tint(for: kind),
                         in: RoundedRectangle(cornerRadius: theme.cornerRadius + 1))
@@ -831,7 +840,7 @@ struct ManageView: View {
                     Image(systemName: "plus").font(.system(size: 9, weight: .bold))
                     Text("New alias").font(.system(size: 11, weight: .medium))
                 }
-                .foregroundStyle(theme.isLight ? Color.white : theme.background)
+                .foregroundStyle(theme.onAccent)
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 6)
                 .background(theme.accent, in: RoundedRectangle(cornerRadius: theme.cornerRadius + 1))
@@ -1105,8 +1114,7 @@ struct EditorSheet: View {
         }
         .padding(16)
         .frame(width: 380)
-        .background(theme.usesMaterial ? AnyView(Rectangle().fill(.ultraThinMaterial))
-                                       : AnyView(theme.background))
+        .background(theme.background)
         .onAppear { nameFocused = true }
     }
 

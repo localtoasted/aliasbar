@@ -125,7 +125,10 @@ enum AppIconRenderer {
         let pixel = size * scale
         let view = NSHostingView(
             rootView: AliasBarMark(size: pixel, tint: Color(red: 0.416, green: 0.451, blue: 0.902))
-                .environment(\.theme, Theme.current(.slate))
+                // The icon is fixed. It is stamped once into the bundle and cannot follow
+                // a look the user changes later, so it uses the default rather than
+                // whatever happens to be current.
+                .environment(\.theme, Theme.derive(from: .graphite))
         )
         view.frame = NSRect(x: 0, y: 0, width: pixel, height: pixel)
         guard let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return nil }

@@ -12,13 +12,114 @@ import ServiceManagement
 /// on top of the app instead of the app's actual appearance.
 struct SettingsView: View {
     @ObservedObject var settings: AppSettings
-    @State private var section: SettingsSection = .behaviour
+    // Behaviour, unless a harness asked for another section. The appearance section is
+    // otherwise four clicks and a keystroke away from a cold launch, which is four clicks
+    // more than a screenshot script can manage without Accessibility permission.
+    @State private var section: SettingsSection =
+        SettingsSection(rawValue: ProcessInfo.processInfo.environment["ALIASBAR_SETTINGS_SECTION"] ?? "")
+        ?? .behaviour
     @State private var launchAtLogin = SMAppService.mainApp.status == .enabled
     @State private var loginError: String?
     @State private var recordingHotkey = false
     @State private var hotkeyError: String?
+    @State private var savingPreset = false
+    @State private var renaming = false
+    @State private var newPresetName = ""
+    @State private var transferNotice: String?
 
-    private var theme: Theme { Theme.current(settings.themeName) }
+    private var theme: Theme { settings.theme(systemIsDark: settings.systemIsDark) }
+
+    // MARK: Appearance editing
+
+    /// Edits the working copy in place. Every knob writes through this, so none of them
+    /// has to know that a preset was ever involved.
+    private func binding<T>(_ path: WritableKeyPath<Appearance, T>) -> Binding<T> {
+        Binding(
+            get: { settings.appearance[keyPath: path] },
+            set: { settings.appearance[keyPath: path] = $0 }
+        )
+    }
+
+    /// True when the working copy no longer matches any preset — the state where "Save
+    /// as…" is the only thing keeping the user's changes.
+    private var isEditedCopy: Bool {
+        !settings.allPresets.contains(settings.appearance)
+    }
+
+    private var suggestedPresetName: String {
+        let base = settings.appearance.isBuiltIn
+            ? "\(settings.appearance.name) mine"
+            : settings.appearance.name
+        let taken = Set(settings.allPresets.map(\.name))
+        if !taken.contains(base) { return base }
+        for n in 2...99 where !taken.contains("\(base) \(n)") { return "\(base) \(n)" }
+        return base
+    }
+
+    private func savePreset() {
+        let name = newPresetName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { return }
+        let saved = settings.appearance.copy(named: name, id: UUID().uuidString)
+        settings.savedPresets.append(saved)
+        settings.appearance = saved
+        savingPreset = false
+        transferNotice = nil
+    }
+
+    /// One field, shared by saving and renaming: the same shape asking for the same
+    /// thing, and two of them on screen at once would be a puzzle rather than a choice.
+    private var presetNameField: some View {
+        TextField("Name", text: $newPresetName)
+            .textFieldStyle(.plain)
+            .font(.system(size: 12))
+            .foregroundStyle(theme.text)
+            .frame(width: 150)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 5)
+            .background(theme.surface, in: RoundedRectangle(cornerRadius: theme.cornerRadius))
+            .overlay(RoundedRectangle(cornerRadius: theme.cornerRadius)
+                .strokeBorder(theme.rule.opacity(0.6), lineWidth: 1))
+    }
+
+    /// Where the current look sits among the user's own. -1 when it is a built-in or an
+    /// unsaved edit, which is what disables the reorder buttons.
+    private var presetIndex: Int {
+        settings.savedPresets.firstIndex { $0.id == settings.appearance.id } ?? -1
+    }
+
+    private func renamePreset() {
+        let name = newPresetName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty, let index = settings.savedPresets.firstIndex(where: {
+            $0.id == settings.appearance.id
+        }) else { return }
+        settings.savedPresets[index].name = name
+        settings.appearance.name = name
+        renaming = false
+    }
+
+    private func move(by offset: Int) {
+        let index = presetIndex
+        let target = index + offset
+        guard index >= 0, target >= 0, target < settings.savedPresets.count else { return }
+        settings.savedPresets.swapAt(index, target)
+    }
+
+    private func deletePreset() {
+        let id = settings.appearance.id
+        settings.savedPresets.removeAll { $0.id == id }
+        settings.appearance = Appearance.builtIns.first ?? .graphite
+    }
+
+    private func importFromClipboard() {
+        guard let text = NSPasteboard.general.string(forType: .string),
+              let imported = PresetTransfer.importing(text, id: UUID().uuidString) else {
+            transferNotice = "The clipboard does not hold an AliasBar look."
+            return
+        }
+        settings.savedPresets.append(imported)
+        settings.appearance = imported
+        transferNotice = "Added “\(imported.name)”."
+    }
 
     enum SettingsSection: String, CaseIterable, Identifiable {
         case behaviour, appearance, content, about
@@ -218,15 +319,125 @@ struct SettingsView: View {
 
     private var appearanceSection: some View {
         VStack(alignment: .leading, spacing: 22) {
-            SettingsGroup("Theme") {
+            SettingsGroup("Presets") {
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: 10)], spacing: 10) {
-                    ForEach(ThemeName.allCases) { name in
-                        ThemeSwatch(name: name, selected: settings.themeName == name)
+                    ForEach(settings.allPresets) { preset in
+                        ThemeSwatch(appearance: preset,
+                                    systemIsDark: settings.systemIsDark,
+                                    selected: settings.appearance.id == preset.id
+                                        && settings.appearance == preset)
                             .onTapGesture {
                                 withAnimation(.easeOut(duration: 0.15)) {
-                                    settings.themeName = name
+                                    settings.appearance = preset
                                 }
                             }
+                    }
+                }
+                if isEditedCopy {
+                    // Says what a checkmark's absence would otherwise leave the user to
+                    // infer: their changes are live but unnamed, and picking another
+                    // preset will lose them.
+                    NoticeText("Edited — not saved to a preset yet.", tone: .info)
+                }
+                HStack(spacing: 8) {
+                    ThemedButton(savingPreset ? "Cancel" : "Save as…") {
+                        savingPreset.toggle()
+                        renaming = false
+                        newPresetName = suggestedPresetName
+                    }
+                    if !settings.appearance.isBuiltIn && !savingPreset {
+                        ThemedButton(renaming ? "Cancel" : "Rename") {
+                            renaming.toggle()
+                            newPresetName = settings.appearance.name
+                        }
+                    }
+                    if renaming && !savingPreset {
+                        presetNameField
+                        ThemedButton("Rename") { renamePreset() }
+                    }
+                    if savingPreset {
+                        presetNameField
+                        ThemedButton("Save") { savePreset() }
+                    } else if !settings.appearance.isBuiltIn && !renaming {
+                        ThemedButton("Delete") { deletePreset() }
+                        // Presets wrap across a grid rather than stacking, so "up" and
+                        // "down" would name nothing the user can see. Earlier and later
+                        // are true wherever a row happens to break.
+                        ThemedButton("Move earlier") { move(by: -1) }
+                            .disabled(presetIndex == 0)
+                        ThemedButton("Move later") { move(by: 1) }
+                            .disabled(presetIndex == settings.savedPresets.count - 1)
+                    }
+                    Spacer(minLength: 0)
+                    ThemedButton("Copy") {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(
+                            PresetTransfer.export(settings.appearance), forType: .string)
+                        transferNotice = "Copied this look to the clipboard."
+                    }
+                    ThemedButton("Paste") { importFromClipboard() }
+                }
+                if let transferNotice {
+                    NoticeText(transferNotice, tone: transferNotice.hasPrefix("Copied")
+                               || transferNotice.hasPrefix("Added") ? .info : .warning)
+                }
+            }
+
+            SettingsGroup("Colour") {
+                SettingsRow("Ground",
+                            hint: "Everything else — text, rules, the dim and faint greys — is computed from this and the accent, at contrast ratios that hold whatever you pick.") {
+                    ColourWell(colour: binding(\.ground))
+                }
+                SettingsRow("Accent", hint: nil) { ColourWell(colour: binding(\.accent)) }
+                SettingsRow("Alias colour", hint: nil) { ColourWell(colour: binding(\.aliasTint)) }
+                SettingsRow("Function colour", hint: nil) {
+                    ColourWell(colour: binding(\.functionTint))
+                }
+                SettingsRow("Follow macOS",
+                            hint: settings.appearance.darkGround == nil
+                                ? "This look has one ground, so it stays as it is whichever appearance macOS is in."
+                                : "Switches to this look's second ground when macOS is dark.") {
+                    ThemedToggle(isOn: $settings.followsSystemAppearance,
+                                 label: settings.followsSystemAppearance ? "On" : "Off")
+                        .disabled(settings.appearance.darkGround == nil)
+                }
+                // Warning and danger colours are deliberately absent. If they were
+                // tintable someone would eventually make a warning invisible, and it
+                // would be the conflict one.
+                NoticeText("Warnings stay orange in every look. They are the one thing a colour choice must not be able to hide.", tone: .info)
+            }
+
+            SettingsGroup("Type and shape") {
+                SettingsRow("Interface", hint: nil) {
+                    ThemedSegments(selection: binding(\.uiFont),
+                                   options: FontChoice.allCases,
+                                   label: { $0.label })
+                }
+                SettingsRow("Alias names",
+                            hint: "System faces only. The faces these looks were drawn from are licensed and cannot ship inside an app.") {
+                    ThemedSegments(selection: binding(\.nameFont),
+                                   options: FontChoice.allCases,
+                                   label: { $0.label })
+                }
+                SettingsRow("Corner radius", hint: nil) {
+                    HStack(spacing: 8) {
+                        Slider(value: binding(\.cornerRadius), in: 0...14, step: 1)
+                            .frame(width: 160)
+                        Text("\(Int(settings.appearance.cornerRadius))")
+                            .font(.system(size: 12, design: .monospaced))
+                            .foregroundStyle(theme.dim)
+                            .frame(width: 20, alignment: .trailing)
+                    }
+                }
+                SettingsRow("Translucency",
+                            hint: "Zero is an opaque window. Above that the desktop shows through, which suits a look built on glass and fights one built on paper.") {
+                    HStack(spacing: 8) {
+                        Slider(value: binding(\.translucency), in: 0...1)
+                            .frame(width: 160)
+                        Text("\(Int(settings.appearance.translucency * 100))%")
+                            .font(.system(size: 12, design: .monospaced))
+                            .foregroundStyle(theme.dim)
+                            .frame(width: 36, alignment: .trailing)
                     }
                 }
             }
@@ -597,20 +808,75 @@ struct PermissionNotice: View {
     }
 }
 
-/// Live preview of a theme, rendered in that theme rather than described in words.
+/// A colour, editable, shown as the hex the user can copy out.
+///
+/// The hex field is not decoration. Colours arrive from other places — a brand guide, a
+/// terminal theme, a screenshot someone eyedropped — and typing six characters is faster
+/// than steering a colour wheel to a value you already know.
+struct ColourWell: View {
+    @Environment(\.theme) private var theme
+    @Binding var colour: HexColor
+    @State private var typed: String = ""
+    @FocusState private var editing: Bool
+
+    var body: some View {
+        HStack(spacing: 8) {
+            ColorPicker("", selection: Binding(
+                get: { colour.color },
+                set: { newValue in
+                    if let converted = NSColor(newValue).usingColorSpace(.sRGB) {
+                        colour = HexColor(red: Double(converted.redComponent),
+                                          green: Double(converted.greenComponent),
+                                          blue: Double(converted.blueComponent))
+                    }
+                }
+            ), supportsOpacity: false)
+            .labelsHidden()
+            .frame(width: 44)
+
+            TextField("#000000", text: $typed)
+                .textFieldStyle(.plain)
+                .font(.system(size: 12, design: .monospaced))
+                .foregroundStyle(theme.text)
+                .focused($editing)
+                .frame(width: 76)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 5)
+                .background(theme.surface, in: RoundedRectangle(cornerRadius: theme.cornerRadius))
+                .overlay(RoundedRectangle(cornerRadius: theme.cornerRadius)
+                    .strokeBorder(theme.rule.opacity(0.6), lineWidth: 1))
+                .onSubmit { commit() }
+                .onChange(of: editing) { focused in if !focused { commit() } }
+                .onAppear { typed = colour.hex }
+                // While the field has focus the user is mid-typing and half a hex string
+                // is not a colour; only mirror the well back into it when they are done.
+                .onChange(of: colour) { new in if !editing { typed = new.hex } }
+        }
+    }
+
+    private func commit() {
+        if let parsed = HexColor(hex: typed) {
+            colour = parsed
+        }
+        typed = colour.hex
+    }
+}
+
+/// Live preview of a look, rendered in that look rather than described in words.
 struct ThemeSwatch: View {
     @Environment(\.theme) private var current
-    let name: ThemeName
+    let appearance: Appearance
+    let systemIsDark: Bool
     let selected: Bool
 
-    private var t: Theme { Theme.current(name) }
+    private var t: Theme { Theme.derive(from: appearance, dark: systemIsDark) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
                 Text("@")
                     .font(.system(size: 8, weight: .bold, design: .monospaced))
-                    .foregroundStyle(t.isLight ? Color.white : t.background)
+                    .foregroundStyle(t.onAliasTint)
                     .frame(width: 14, height: 14)
                     .background(t.aliasTint, in: RoundedRectangle(cornerRadius: t.cornerRadius))
                 Text("gs")
@@ -637,10 +903,10 @@ struct ThemeSwatch: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(t.surface, in: RoundedRectangle(cornerRadius: t.cornerRadius))
 
-            Text(name.label)
-                .font(.system(size: 10.5, weight: .semibold))
+            Text(appearance.name)
+                .font(.system(size: 10.5, weight: .semibold, design: t.bodyDesign))
                 .foregroundStyle(t.text)
-            Text(name.blurb)
+            Text(appearance.isBuiltIn ? "Built in" : "Yours")
                 .font(.system(size: 9))
                 .foregroundStyle(t.faint)
                 .lineLimit(1)
@@ -648,9 +914,7 @@ struct ThemeSwatch: View {
         .padding(10)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
-            RoundedRectangle(cornerRadius: t.cornerRadius + 3)
-                .fill(t.usesMaterial ? AnyShapeStyle(.ultraThinMaterial)
-                                     : AnyShapeStyle(t.background))
+            RoundedRectangle(cornerRadius: t.cornerRadius + 3).fill(t.background)
         )
         .overlay(
             RoundedRectangle(cornerRadius: t.cornerRadius + 3)
