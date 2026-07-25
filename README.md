@@ -6,7 +6,7 @@ You wrote the perfect alias six months ago. Now you're grepping `.zshrc` trying 
 
 That's the actual problem: an alias is a compression artifact, and the key to retrieving it is your memory of having made it. Compression outpaces recall. AliasBar hits `⌥⌘A`, you type two letters, and the name lands in your terminal.
 
-<!-- screenshot: docs/screenshot.png -->
+![AliasBar](docs/launch.gif)
 
 ## Three views, no more
 
@@ -15,6 +15,8 @@ That's the actual problem: an alias is a compression artifact, and the key to re
 **Board** — every alias at once as a keycap grid. Names are two to four characters, so a list shows eight where a grid shows fifty. Typing *dims* non-matches instead of removing them, so the grid never reflows and you can learn where things live.
 
 **Manage** — sidebar, list, detail. Buckets for functions, aliases, most used, **never run**, by file, and **conflicts**. This is where you find out that alias you wrote in 2023 has never once been executed.
+
+![Board and Manage](docs/manage.png)
 
 ## What it tells you that you didn't know
 
