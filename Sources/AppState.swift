@@ -107,7 +107,14 @@ final class AppState: ObservableObject {
     /// the user has to read, and reading is slower than typing one more character.
     var results: [RankedEntry] {
         let ranked = Ranker.rank(pool, query: query, scope: settings.searchScope)
-        return Array(ranked.prefix(settings.resultLimit))
+        // The cap answers "do not make me read a wall of near-misses", which is a claim
+        // about searching. At rest nobody is searching: the list is simply what the
+        // window contains, and capping it there only leaves the window half empty now
+        // that its height is fixed.
+        let limit = query.isEmpty
+            ? max(settings.resultLimit, WindowLayout.restRows)
+            : settings.resultLimit
+        return Array(ranked.prefix(limit))
     }
 
     // MARK: - History

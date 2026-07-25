@@ -21,12 +21,15 @@ struct RootView: View {
                 case .manage: ManageView(state: state, settings: settings)
                 }
             }
+            // Fixed, not merely bounded. Every view fills this and scrolls inside it, so
+            // no view can move the window by having more or less to show.
+            .frame(height: WindowLayout.bodyHeight)
             .frame(maxWidth: .infinity)
 
             Rectangle().fill(theme.rule.opacity(0.6)).frame(height: 1)
             footer
         }
-        .frame(width: state.mode == .manage ? 780 : 520)
+        .frame(width: WindowLayout.windowWidth)
         .background(background)
         .overlay(alignment: .top) { topHighlight }
         .environment(\.theme, theme)
@@ -188,10 +191,14 @@ struct RootView: View {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .font(.system(size: 10))
                     .foregroundStyle(.orange)
+                // One line, not two. An error arriving must not make the footer taller,
+                // because the footer's height is part of the window's.
                 Text(error)
                     .font(.system(size: 10))
                     .foregroundStyle(theme.dim)
-                    .lineLimit(2)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .help(error)
             } else if state.historyMode {
                 KeyHint(keys: "⏎", label: "run it")
                 KeyHint(keys: "⌘⏎", label: "make an alias")
@@ -217,6 +224,7 @@ struct RootView: View {
             .foregroundStyle(theme.dim)
             .help("Settings — ⌘,")
         }
+        .frame(height: 16)
         .padding(.horizontal, 12)
         .padding(.vertical, 7)
     }
@@ -320,7 +328,10 @@ struct EmptyStateView: View {
                 .foregroundStyle(theme.faint)
                 .multilineTextAlignment(.center)
         }
-        .frame(maxWidth: .infinity)
+        // Centred in whatever it is given rather than sized to its text: the body is a
+        // fixed height now, and an empty state pinned to the top of it looks like a
+        // rendering failure rather than an answer.
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding(.vertical, 40)
         .padding(.horizontal, 24)
     }
@@ -380,9 +391,10 @@ struct FindView: View {
                     .padding(.vertical, 9)
                     .animation(Motion.standard, value: state.selection)
                 }
-                .frame(maxHeight: 440)
+                .frame(maxHeight: .infinity)
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }
 
     // MARK: Aliases
@@ -440,9 +452,10 @@ struct FindView: View {
                     // into the selection — arrows, typing, a click — moves it the same way.
                     .animation(Motion.standard, value: state.selection)
                 }
-                .frame(maxHeight: 440)
+                .frame(maxHeight: .infinity)
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }
 
     /// Names the rest state honestly. With no shell history to rank by, calling the list
@@ -689,12 +702,13 @@ struct BoardView: View {
                     }
                     .padding(10)
                 }
-                .frame(maxHeight: 380)
+                .frame(maxHeight: .infinity)
 
                 Rectangle().fill(theme.rule.opacity(0.5)).frame(height: 1)
                 readout
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }
 
     /// Fixed-height footer. The focused key's details go here rather than inline so
@@ -803,7 +817,7 @@ struct ManageView: View {
             Rectangle().fill(theme.rule.opacity(0.5)).frame(width: 1)
             detail
         }
-        .frame(height: 470)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private var sidebar: some View {
@@ -826,7 +840,10 @@ struct ManageView: View {
             .help("New alias — ⌘N")
         }
         .padding(8)
-        .frame(width: 196)
+        // Narrower than it was, because the window is. The two fixed panes give up what
+        // they can spare so the detail pane — the one holding a whole command — keeps a
+        // usable width at 660.
+        .frame(width: 172)
     }
 
     private func bucketRow(_ bucket: Bucket) -> some View {
@@ -882,7 +899,7 @@ struct ManageView: View {
                 withAnimation(.easeOut(duration: 0.12)) { proxy.scrollTo(entry.id, anchor: .center) }
             }
         }
-        .frame(width: 250)
+        .frame(width: 224)
     }
 
     private func manageRow(_ entry: RankedEntry, index: Int) -> some View {
@@ -963,17 +980,25 @@ struct ManageView: View {
 
                     metadata(entry)
 
-                    HStack(spacing: 6) {
-                        detailButton("Copy name", "doc.on.doc") {
-                            state.perform(.copyName, on: entry)
+                    // Two rows rather than one. Four labelled buttons do not fit across a
+                    // 262pt pane, and a row that silently truncates "Copy command" to
+                    // "Copy com…" is worse than a row that wraps on purpose.
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack(spacing: 6) {
+                            detailButton("Copy name", "doc.on.doc") {
+                                state.perform(.copyName, on: entry)
+                            }
+                            detailButton("Copy command", "terminal") {
+                                state.perform(.copyCommand, on: entry)
+                            }
+                            Spacer(minLength: 0)
                         }
-                        detailButton("Copy command", "terminal") {
-                            state.perform(.copyCommand, on: entry)
-                        }
-                        Spacer()
                         if entry.entry.managed {
-                            detailButton("Edit", "pencil") { state.beginEdit(entry.entry) }
-                            detailButton("Delete", "trash") { state.delete(entry.entry) }
+                            HStack(spacing: 6) {
+                                detailButton("Edit", "pencil") { state.beginEdit(entry.entry) }
+                                detailButton("Delete", "trash") { state.delete(entry.entry) }
+                                Spacer(minLength: 0)
+                            }
                         }
                     }
                     Spacer(minLength: 0)

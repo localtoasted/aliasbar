@@ -245,6 +245,28 @@ struct VisualEffect: NSViewRepresentable {
     }
 }
 
+/// The window's dimensions, which do not depend on what is in it.
+///
+/// One size for every view, and the same size whether a search matched forty things or
+/// two. A window that appears under your gaze and is read in under a second has to be
+/// still; a two-result search leaving empty space below is the cheaper cost. Everything
+/// that used to change the window's height — switching views, filtering, entering
+/// history — now scrolls inside a fixed body instead.
+enum WindowLayout {
+    /// A compromise, deliberately. Manage is cramped at 520 because three panes need the
+    /// room, and Find at 780 is a lot of air around two-character names. One size that is
+    /// slightly generous for one view beats two sizes that are each perfect.
+    static let windowWidth: CGFloat = 660
+    /// The area between the header rule and the footer rule. Header and footer are fixed
+    /// by their own content, so fixing this fixes the window.
+    /// Sized so the whole window still clears the Dock at the 20%-from-top position on a
+    /// 1280 × 800 display, the smallest ground worth designing for.
+    static let bodyHeight: CGFloat = 420
+    /// How many rows the body holds at rest. Roughly what fits in `bodyHeight`; the list
+    /// scrolls past it rather than being clipped, so being a row out is harmless.
+    static let restRows = 10
+}
+
 /// Motion for everything that moves. One curve, used everywhere.
 ///
 /// Ease-out-quint: fast at the start, decelerating hard. No spring, no overshoot — real

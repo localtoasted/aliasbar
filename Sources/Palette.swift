@@ -78,7 +78,9 @@ final class PaletteController: NSObject, NSWindowDelegate {
     }
 
     private func makePanel() -> PalettePanel {
-        let panel = PalettePanel(contentRect: NSRect(x: 0, y: 0, width: 520, height: 360),
+        let panel = PalettePanel(contentRect: NSRect(x: 0, y: 0,
+                                                     width: WindowLayout.windowWidth,
+                                                     height: WindowLayout.bodyHeight),
                                  styleMask: [.borderless],
                                  backing: .buffered,
                                  defer: false)
@@ -107,8 +109,14 @@ final class PaletteController: NSObject, NSWindowDelegate {
         let visible = screen.visibleFrame
         let size = panel.frame.size
         let x = visible.midX - size.width / 2
-        let y = visible.maxY - visible.height * 0.20 - size.height
-        panel.setFrame(NSRect(x: x.rounded(), y: max(visible.minY, y).rounded(),
+        let wanted = visible.maxY - visible.height * 0.20 - size.height
+        // On a short screen the fifth-of-the-way-down rule would put the bottom edge under
+        // the Dock. Slide up rather than clip, and stop at the top of the visible area so
+        // a window taller than the screen loses its bottom rather than its search field.
+        let lowest = visible.minY + 12
+        let highest = max(visible.maxY - size.height, visible.minY)
+        let y = min(max(wanted, lowest), highest)
+        panel.setFrame(NSRect(x: x.rounded(), y: y.rounded(),
                               width: size.width, height: size.height),
                        display: false)
     }
