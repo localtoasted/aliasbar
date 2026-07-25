@@ -383,6 +383,10 @@ final class AppState: ObservableObject {
     }
 
     func commitEditor() {
+        commitEditor(confirmed: false)
+    }
+
+    private func commitEditor(confirmed: Bool) {
         guard let target = editor else { return }
         let name = target.name.trimmingCharacters(in: .whitespaces)
         let command = target.command.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -399,7 +403,9 @@ final class AppState: ObservableObject {
             let operation: AliasWriter.Operation = isRename
                 ? .rename(from: target.originalName, to: name, command: command)
                 : .upsert(name: name, command: command, comment: nil)
-            _ = try AliasWriter.apply(operation, path: path, allEntries: entries)
+            _ = try AliasWriter.apply(operation, path: path, allEntries: entries,
+                                      confirmedCollateral: confirmed)
+            confirmRemoval = nil
             editor = nil
             errorMessage = nil
             store.reload()
@@ -407,6 +413,16 @@ final class AppState: ObservableObject {
             // cursor on whatever row index it happened to occupy before the reload.
             restoreSelection(to: activeList.first { $0.name == name }?.id)
             show(toast: "Saved \(name). Run `source \(ZshrcParser.displayPath)` to use it now.")
+        } catch let error as AliasWriter.WriteError {
+            // Replacing a definition removes the old lines, so an edit can take collateral
+            // exactly like a delete can. Same treatment: show what goes, let the user call it.
+            if case .collateralDamage(let lines, let suspect) = error {
+                confirmRemoval = RemovalConfirmation(lines: lines, suspect: suspect) { [weak self] in
+                    self?.commitEditor(confirmed: true)
+                }
+            } else {
+                errorMessage = error.localizedDescription
+            }
         } catch {
             errorMessage = error.localizedDescription
         }
