@@ -3,7 +3,7 @@ import AppKit
 
 // MARK: - First-run flow
 
-/// The four questions worth answering before first use, and nothing else.
+/// The five questions worth answering before first use, and nothing else.
 ///
 /// This app exists to save seconds, so the flow is built to be left: every step has a
 /// working default, every step can be skipped, and closing the window at any point is a
@@ -19,6 +19,8 @@ struct OnboardingView: View {
     /// so there is exactly one place that marks the flow done.
     var onDone: () -> Void
 
+    @ObservedObject private var updater = Updater.shared
+
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var step = 0
 
@@ -31,13 +33,13 @@ struct OnboardingView: View {
     // so the callout can acknowledge it instead of asking again.
     @State private var axPrompted = false
 
-    // Step 4: look
+    // Step 5: look
     @State private var customising = false
     @State private var savingPreset = false
     @State private var newPresetName = ""
     @State private var presetNotice: String?
 
-    private static let stepCount = 4
+    private static let stepCount = 5
 
     private var theme: Theme { settings.theme(systemIsDark: settings.systemIsDark) }
     private var motion: MotionPlan {
@@ -54,6 +56,7 @@ struct OnboardingView: View {
                         case 0: shortcutStep
                         case 1: enterStep
                         case 2: fileStep
+                        case 3: updatesStep
                         default: lookStep
                         }
                     }
@@ -81,6 +84,7 @@ struct OnboardingView: View {
         case 0: return "One keystroke, from anywhere"
         case 1: return "What Enter does"
         case 2: return "Where your aliases live"
+        case 3: return "Staying up to date"
         default: return "Pick a look"
         }
     }
@@ -411,7 +415,34 @@ struct OnboardingView: View {
         }
     }
 
-    // MARK: Step 4 — the look
+    // MARK: Step 4 — updates
+
+    /// The choice Sparkle would otherwise ask for with its own dialog on second launch.
+    /// Asking here instead keeps the promise the rest of the flow makes: every prompt
+    /// arrives with its explanation already on screen. The toggle drives the same
+    /// setting as Settings > About — on by default, and honoured even if this flow is
+    /// closed without reaching this step.
+    private var updatesStep: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("AliasBar can check its release feed in the background and offer new versions when they appear. Nothing installs without asking you first.")
+                .font(.system(size: 13, design: theme.bodyDesign))
+                .foregroundStyle(theme.dim)
+                .fixedSize(horizontal: false, vertical: true)
+
+            SettingsGroup("Automatic updates") {
+                SettingsRow("Background checks",
+                            hint: "You can change this any time in Settings > About.") {
+                    ThemedToggle(isOn: $updater.automaticallyChecksForUpdates,
+                                 label: "Check for updates automatically")
+                }
+            }
+
+            NoticeText("The check sends nothing about you or your aliases — it only fetches the release feed. Downloads happen only when you accept an update.",
+                       tone: .info)
+        }
+    }
+
+    // MARK: Step 5 — the look
 
     private var lookStep: some View {
         VStack(alignment: .leading, spacing: 14) {
