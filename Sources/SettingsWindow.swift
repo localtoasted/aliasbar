@@ -1,5 +1,6 @@
 import SwiftUI
 import ServiceManagement
+import UniformTypeIdentifiers
 
 /// Settings live in their own window, never in the popover.
 ///
@@ -124,13 +125,14 @@ struct SettingsView: View {
     }
 
     enum SettingsSection: String, CaseIterable, Identifiable {
-        case behaviour, appearance, content, about
+        case behaviour, appearance, content, sync, about
         var id: String { rawValue }
         var label: String {
             switch self {
             case .behaviour: return "Behaviour"
             case .appearance: return "Appearance"
             case .content: return "Content"
+            case .sync: return "Sync"
             case .about: return "About"
             }
         }
@@ -139,6 +141,7 @@ struct SettingsView: View {
             case .behaviour: return "keyboard"
             case .appearance: return "paintpalette"
             case .content: return "doc.text"
+            case .sync: return "arrow.triangle.2.circlepath"
             case .about: return "info.circle"
             }
         }
@@ -154,6 +157,7 @@ struct SettingsView: View {
                     case .behaviour: behaviourSection
                     case .appearance: appearanceSection
                     case .content: contentSection
+                    case .sync: syncSection
                     case .about: aboutSection
                     }
                 }
@@ -533,6 +537,86 @@ struct SettingsView: View {
                 NoticeText("Counts come from ~/.zsh_history, read locally and never written to or sent anywhere. They power ranking and the Never run bucket.",
                            tone: .info)
             }
+        }
+    }
+
+    // MARK: Sync
+
+    private var syncSection: some View {
+        VStack(alignment: .leading, spacing: 22) {
+            SettingsGroup("File sync") {
+                SettingsRow("Sync settings & presets",
+                            hint: "Off by default. Writes one JSON file at a path you choose — put it in iCloud Drive, Dropbox, or a dotfiles repo to carry your look and presets to another Mac.") {
+                    ThemedToggle(isOn: Binding(
+                        get: { settings.syncFileURL != nil },
+                        set: { on in
+                            if on {
+                                if settings.syncFileURL == nil { chooseNewSyncFile() }
+                            } else {
+                                settings.syncFileURL = nil
+                            }
+                        }
+                    ), label: settings.syncFileURL != nil ? "On" : "Off")
+                }
+                if let url = settings.syncFileURL {
+                    SettingsRow("File", hint: nil) {
+                        HStack(spacing: 8) {
+                            Text(url.path)
+                                .font(.system(size: 11, design: .monospaced))
+                                .foregroundStyle(theme.dim)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                                .frame(maxWidth: 260, alignment: .leading)
+                            ThemedButton("Choose existing…") { chooseExistingSyncFile() }
+                            ThemedButton("Choose new…") { chooseNewSyncFile() }
+                        }
+                    }
+                    if let syncError = settings.syncError {
+                        NoticeText(syncError, tone: .warning)
+                    }
+                    let conflicts = SettingsSync.conflictFiles(near: url)
+                    if !conflicts.isEmpty {
+                        HStack(alignment: .top, spacing: 8) {
+                            NoticeText("\(conflicts.count) conflict \(conflicts.count == 1 ? "copy" : "copies") saved next to the sync file. Nothing was lost — every version is still on disk.",
+                                       tone: .warning)
+                            ThemedButton("Reveal") {
+                                NSWorkspace.shared.activateFileViewerSelecting(conflicts)
+                            }
+                        }
+                    }
+                }
+            }
+
+            SettingsGroup("What roams") {
+                NoticeText("Appearance — the current look and every saved preset — plus search scope, sort order, the startup view, the Find result limit, and the Enter / ⌘⏎ actions. Nothing else.",
+                           tone: .info)
+            }
+            SettingsGroup("What stays on this Mac") {
+                NoticeText("The sync file's own location, your shell config path, hotkey, launch-at-login, onboarding state, Accessibility permission, window placement, all three clipboard toggles, and usage counts. Clipboard history and snippets only ever enter this file through their own separate opt-in — turning this on does not turn either of those on.",
+                           tone: .info)
+            }
+        }
+    }
+
+    private func chooseNewSyncFile() {
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.json]
+        panel.nameFieldStringValue = "aliasbar-sync.json"
+        panel.directoryURL = URL(fileURLWithPath: NSHomeDirectory())
+        if panel.runModal() == .OK, let url = panel.url {
+            settings.syncFileURL = url
+        }
+    }
+
+    private func chooseExistingSyncFile() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = [.json]
+        panel.directoryURL = URL(fileURLWithPath: NSHomeDirectory())
+        if panel.runModal() == .OK, let url = panel.url {
+            settings.syncFileURL = url
         }
     }
 
