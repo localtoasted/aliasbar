@@ -636,3 +636,31 @@ enum AliasNameSuggester {
         return base
     }
 }
+
+// MARK: - Path resolution
+
+/// Pure precedence rules for locating the rc file and the history file. Lives in the
+/// Foundation-only core, not in `AppPaths`, so a second executable (the `ab` CLI) can
+/// resolve paths the exact same way the app does without linking anything app-owned —
+/// it just passes `stored: nil`, since it has no app settings to consult.
+enum CorePaths {
+    static func resolveRcPath(stored: String?,
+                              environmentOverride: String?,
+                              homeDirectory: String) -> String {
+        if let stored, !stored.isEmpty {
+            return (stored as NSString).expandingTildeInPath
+        }
+        if let environmentOverride, !environmentOverride.isEmpty {
+            return (environmentOverride as NSString).expandingTildeInPath
+        }
+        return homeDirectory + "/.zshrc"
+    }
+
+    static func resolveHistoryPath(environmentOverride: String?,
+                                   homeDirectory: String) -> String {
+        if let environmentOverride, !environmentOverride.isEmpty {
+            return (environmentOverride as NSString).expandingTildeInPath
+        }
+        return homeDirectory + "/.zsh_history"
+    }
+}

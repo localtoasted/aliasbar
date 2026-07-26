@@ -78,6 +78,21 @@ swiftc -O -target "${ARCH}-apple-macos13.0" \
     -Xlinker -rpath -Xlinker "@executable_path/../Frameworks" \
     -o "${BUILD_DIR}/${APP_NAME}"
 
+echo "==> Compiling ab CLI"
+# Foundation-only: the core (Model.swift, AliasWriter.swift) plus Sources/CLI, and
+# nothing else. No AppKit, no SwiftUI, no Settings/Store/AppState — those pull in
+# UserDefaults and app-only state the CLI must never touch.
+CLI_SOURCES=("${PROJECT_DIR}"/Sources/CLI/*.swift)
+if [ ${#CLI_SOURCES[@]} -eq 0 ]; then
+    echo "No sources found in ${PROJECT_DIR}/Sources/CLI" >&2
+    exit 1
+fi
+swiftc -O -target "${ARCH}-apple-macos13.0" \
+    "${PROJECT_DIR}/Sources/Model.swift" \
+    "${PROJECT_DIR}/Sources/AliasWriter.swift" \
+    "${CLI_SOURCES[@]}" \
+    -o "${BUILD_DIR}/ab"
+
 echo "==> Assembling app bundle"
 mkdir -p "${APP_BUNDLE}/Contents/MacOS"
 cp "${BUILD_DIR}/${APP_NAME}" "${APP_BUNDLE}/Contents/MacOS/${APP_NAME}"
@@ -173,3 +188,4 @@ if [ "${INSTALL}" = true ]; then
 else
     echo "==> Done: ${APP_BUNDLE}"
 fi
+echo "==> ab CLI: ${BUILD_DIR}/ab"
