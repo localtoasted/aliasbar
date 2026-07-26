@@ -101,7 +101,32 @@ final class AppState: ObservableObject {
 
     // MARK: - Derived content
 
-    private var pool: [RankedEntry] { store.visible(settings) }
+    /// Everything the current bucket admits, out of everything the user has chosen to
+    /// see. View is presentation, bucket is subset: FIND, BOARD and MANAGE all draw
+    /// from this, so ⌘↑ ⌘↓ narrow whatever you are looking at instead of taking you
+    /// somewhere else.
+    private var pool: [RankedEntry] { bucketSubset(of: store.visible(settings)) }
+
+    /// The bucket as a pure membership test. Order is left to the caller: each view
+    /// already has its own idea of presentation, and the two buckets that carry an
+    /// order of their own (`mostUsed`, `byFile`) reassert it in `bucketEntries`.
+    private func bucketSubset(of entries: [RankedEntry]) -> [RankedEntry] {
+        switch bucket {
+        case .all, .byFile:
+            return entries
+        case .functions:
+            return entries.filter { $0.entry.kind == .function }
+        case .aliases:
+            return entries.filter { $0.entry.kind == .alias }
+        case .mostUsed:
+            return entries.filter { $0.uses > 0 }.sorted { $0.uses > $1.uses }
+        case .neverRun:
+            return entries.filter { $0.uses == 0 }
+        case .conflicts:
+            let names = Set(store.conflicts.map(\.name))
+            return entries.filter { names.contains($0.name) }
+        }
+    }
 
     /// FIND results, ranked and capped. The cap is the point: a wall of results means
     /// the user has to read, and reading is slower than typing one more character.
@@ -220,10 +245,11 @@ final class AppState: ObservableObject {
         return base
     }
 
-    /// BOARD shows everything, always. Typing dims rather than removes, so the grid
-    /// keeps its shape and muscle memory survives.
+    /// BOARD shows the whole pool, always. Typing dims rather than removes, so the grid
+    /// keeps its shape and muscle memory survives. The bucket is different: it changes
+    /// what the pool *is*, so a bucketed board genuinely has fewer keys.
     var boardEntries: [RankedEntry] {
-        store.sorted(pool, by: settings.sortOrder)
+        store.sorted(pool, by: bucket == .byFile ? .fileOrder : settings.sortOrder)
     }
 
     func boardMatches(_ entry: RankedEntry) -> Bool {
@@ -231,22 +257,14 @@ final class AppState: ObservableObject {
     }
 
     var bucketEntries: [RankedEntry] {
-        let entries: [RankedEntry]
-        switch bucket {
-        case .all: entries = pool
-        case .functions: entries = store.functions
-        case .aliases: entries = store.aliases
-        case .mostUsed: entries = store.mostUsed
-        case .neverRun: entries = store.neverRun
-        case .byFile: entries = store.sorted(pool, by: .fileOrder)
-        case .conflicts: entries = store.conflictedEntries
-        }
         guard !query.isEmpty else {
-            return bucket == .mostUsed || bucket == .byFile
-                ? entries
-                : store.sorted(entries, by: settings.sortOrder)
+            switch bucket {
+            case .mostUsed: return pool
+            case .byFile: return store.sorted(pool, by: .fileOrder)
+            default: return store.sorted(pool, by: settings.sortOrder)
+            }
         }
-        return Ranker.rank(entries, query: query, scope: settings.searchScope)
+        return Ranker.rank(pool, query: query, scope: settings.searchScope)
     }
 
     /// The list the selection cursor is currently moving through.
@@ -336,6 +354,15 @@ final class AppState: ObservableObject {
                 historyMode = false
                 return true
             }
+            // A non-All bucket is a second thing to be inside of, so it is the second
+            // thing escape steps out of — but only where the bucket is a modifier. In
+            // MANAGE the bucket is the place itself, named in the sidebar; escape
+            // there still means leave, exactly as it always has.
+            if bucket != .all && mode != .manage {
+                bucket = .all
+                selection = 0
+                return true
+            }
             dismiss(restoringFocus: true)
             return true
 
@@ -348,8 +375,9 @@ final class AppState: ObservableObject {
             if command { promoteToAlias(entry) } else { run(entry) }
             return true
 
-        // Buckets are the folders, and ⌘↑ ⌘↓ walk them the way ⌘↑ walks Finder's. They
-        // only mean anything in MANAGE, so they take you there rather than doing nothing.
+        // Buckets are the folders, and ⌘↑ ⌘↓ walk them the way ⌘↑ walks Finder's — in
+        // place, whichever view you are in. The view is how you look; the bucket is
+        // what you are looking at.
         case kVK_UpArrow where command:
             cycleBucket(by: -1)
             return true
@@ -478,10 +506,13 @@ final class AppState: ObservableObject {
         WindowLayout.boardColumns(keyWidth: settings.boardDensity.keyWidth)
     }
 
-    /// Walks the MANAGE buckets, taking you to MANAGE if you were not there. A shortcut
-    /// that silently did nothing in two of three views would read as broken.
+    /// Walks the buckets in place. Every view draws from the bucketed pool, so this
+    /// narrows what you are looking at without moving you; the header chip (and in
+    /// MANAGE, the sidebar) says where you have landed.
     private func cycleBucket(by delta: Int) {
-        if mode != .manage { switchTo(.manage) }
+        // Buckets slice your aliases, not your history. Reaching for one while looking
+        // at history is a statement that you are done with history.
+        if historyMode { historyMode = false }
         let all = Bucket.allCases
         guard let idx = all.firstIndex(of: bucket) else { return }
         bucket = all[(idx + delta + all.count) % all.count]
