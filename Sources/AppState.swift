@@ -434,7 +434,12 @@ final class AppState: ObservableObject {
             return true
 
         case kVK_Return:
-            guard let entry = selectedEntry else { return true }
+            guard let entry = selectedEntry else {
+                // A dead-end search is one keystroke from being a new alias's name, so
+                // Return on "no match" opens the editor with the name already filled in.
+                if !query.isEmpty { editor = .create(name: query) }
+                return true
+            }
             perform(command ? settings.enterAction.secondary : settings.enterAction, on: entry)
             return true
 
