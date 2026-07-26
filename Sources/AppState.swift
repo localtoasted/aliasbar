@@ -1,9 +1,9 @@
 import SwiftUI
 import Carbon.HIToolbox
 
-/// Sidebar buckets in MANAGE.
+/// Sidebar buckets in MANAGE's shell dialect.
 enum Bucket: String, CaseIterable, Identifiable {
-    case all, functions, aliases, mostUsed, neverRun, byFile, conflicts
+    case all, functions, aliases, mostUsed, neverRun, byFile, conflicts, suggested
     var id: String { rawValue }
 
     var label: String {
@@ -15,6 +15,7 @@ enum Bucket: String, CaseIterable, Identifiable {
         case .neverRun: return "Never run"
         case .byFile: return "By file"
         case .conflicts: return "Conflicts"
+        case .suggested: return "Suggested"
         }
     }
 
@@ -27,14 +28,48 @@ enum Bucket: String, CaseIterable, Identifiable {
         case .neverRun: return "moon.zzz"
         case .byFile: return "doc.text"
         case .conflicts: return "exclamationmark.triangle"
+        case .suggested: return "sparkles"
         }
     }
 
     /// FIND and BOARD need a header warning only when a bucket removes entries.
     /// MANAGE names every bucket in its sidebar, while `byFile` changes order without
     /// narrowing the pool.
+    ///
+    /// `suggested` never actually reaches FIND or BOARD's header in practice — its
+    /// pool is `[AliasSuggestion]`, not `[RankedEntry]`, so nothing outside MANAGE's
+    /// own sidebar ever sets `bucket` to it — but it still answers this the same way
+    /// `conflicts` or `neverRun` would, rather than carve out an exception for a case
+    /// that can't currently reach here.
     func showsHeaderFilter(in mode: ViewMode) -> Bool {
         mode != .manage && self != .all && self != .byFile
+    }
+}
+
+/// MANAGE's prompt-dialect sidebar sections — Library, Delivery, Health — parallel
+/// to `Bucket` for the shell dialect, but sharing no cases with it: a prompt's
+/// Health diagnosis (stale, colliding) has no shell equivalent, and a shell entry's
+/// `conflicts` bucket has no prompt equivalent either. Kept as its own type rather
+/// than folded into `Bucket` so neither dialect's sidebar can accidentally select a
+/// case that means nothing for it.
+enum PromptBucket: String, CaseIterable, Identifiable {
+    case library, delivery, health
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .library: return "Library"
+        case .delivery: return "Delivery"
+        case .health: return "Health"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .library: return "text.book.closed"
+        case .delivery: return "arrow.up.circle"
+        case .health: return "stethoscope"
+        }
     }
 }
 
@@ -68,6 +103,11 @@ final class AppState: ObservableObject {
     @Published var query = ""
     @Published var selection = 0
     @Published var bucket: Bucket = .all
+    /// MANAGE's prompt-dialect counterpart to `bucket` — which of Library/Delivery/
+    /// Health the sidebar has selected. Independent of `bucket` on purpose: flipping
+    /// dialect and flipping back should not have quietly moved the shell sidebar's
+    /// own selection.
+    @Published var promptBucket: PromptBucket = .library
     /// Which kind of thing FIND currently favors when there isn't enough query yet to
     /// know: `.shell` for a terminal-shaped previous app, `.prompt` for an AI-native
     /// one. Recomputed fresh on every summon by `ContextDetector`; ⇥ flips it by hand
@@ -138,6 +178,14 @@ final class AppState: ObservableObject {
     /// Usage counts for those prompts, loaded alongside them for the same reason.
     private var promptUsageCache: [String: PromptUsageCounter.Entry] = [:]
 
+    /// MANAGE's Suggested bucket, read once per summon like `promptCache` — mining
+    /// history for repeated commands on every keystroke would be exactly the kind of
+    /// per-keystroke file scan `loadHistoryIfNeeded` already exists to avoid.
+    /// Refreshed early (not just at the next summon) after anything that could
+    /// change it: dismissing one (`ignoreSuggestion`) or saving a new alias
+    /// (`commitEditor`), since either can remove a candidate from the list.
+    private var suggestionCache: [AliasSuggestion] = []
+
     /// Set by the app delegate. Lets actions close the popover without the state layer
     /// knowing anything about AppKit.
     var onDismiss: (() -> Void)?
@@ -185,6 +233,12 @@ final class AppState: ObservableObject {
         case .conflicts:
             let names = Set(store.conflicts.map(\.name))
             return entries.filter { names.contains($0.name) }
+        case .suggested:
+            // Suggested's pool is `[AliasSuggestion]`, not `[RankedEntry]` — see
+            // `suggestedEntries` below. `ManageView` routes to its own view entirely
+            // for this bucket rather than ever reading `bucketEntries`/`activeList`
+            // for it, so this branch exists only to keep the switch exhaustive.
+            return []
         }
     }
 
@@ -252,6 +306,17 @@ final class AppState: ObservableObject {
     /// in MANAGE and in FIND's history mode, neither of which has anything to flip.
     func flipDialect() {
         guard (mode == .find && !historyMode) || mode == .board else { return }
+        dialect = dialect == .shell ? .prompt : .shell
+        selection = 0
+    }
+
+    /// ⇥ in MANAGE: swap between the shell bucket sidebar (All/Functions/.../
+    /// Suggested) and the prompt-dialect sidebar (Library/Delivery/Health), mirroring
+    /// FIND's ⇥ flip above. A dedicated function rather than widening `flipDialect`'s
+    /// own guard: MANAGE has no `historyMode` to worry about, and keeping the two
+    /// call sites separate means each view's flip can be read on its own.
+    func flipManageDialect() {
+        guard mode == .manage else { return }
         dialect = dialect == .shell ? .prompt : .shell
         selection = 0
     }
@@ -354,6 +419,269 @@ final class AppState: ObservableObject {
         let expected = SHA256Digest.hex(
             PromptCompiler.render(description: shortcut.description, body: shortcut.body))
         return entry.sha256 == expected ? .installed : .stale
+    }
+
+    /// Instance-side convenience over the static `promptDeliveryStatus(for:registryPath:)`
+    /// above, always against the real registry — the one MANAGE's Delivery bucket
+    /// (an instance context) reads. Tests call the static form directly against a
+    /// fixture path; nothing here duplicates its logic.
+    func promptDeliveryStatus(for shortcut: Shortcut) -> PromptDeliveryStatus {
+        Self.promptDeliveryStatus(for: shortcut, registryPath: AppPaths.compiledRegistryPath)
+    }
+
+    // MARK: - Manage: prompt dialect (Library / Delivery / Health)
+
+    /// Every stored prompt as a `Shortcut`, usage filled in — the same adapter
+    /// `findPool` builds, so MANAGE's prompt dialect never disagrees with FIND about
+    /// what a prompt "is" or how often it's been used.
+    private var promptShortcuts: [Shortcut] {
+        promptCache.map { prompt -> Shortcut in
+            var shortcut = Shortcut(prompt: prompt)
+            shortcut.uses = promptUsageCache[prompt.name]?.count ?? 0
+            return shortcut
+        }
+    }
+
+    /// One diagnosis Health surfaces for a prompt. A prompt can carry more than one
+    /// at once (a stale prompt can also collide with a builtin).
+    struct PromptHealthIssue: Identifiable, Equatable {
+        enum Kind: Equatable {
+            case stale
+            case builtinCollision
+            /// The other prompt's name, exactly as it differs only by case.
+            case duplicateName(String)
+        }
+        let kind: Kind
+        var id: String {
+            switch kind {
+            case .stale: return "stale"
+            case .builtinCollision: return "builtin"
+            case .duplicateName(let other): return "dup-\(other)"
+            }
+        }
+
+        var headline: String {
+            switch kind {
+            // Exact copy, per spec — never reworded, so a test asserting this string
+            // is also asserting the app never accidentally implies cross-machine
+            // knowledge it doesn't have.
+            case .stale: return "not used on this Mac in 90+ days"
+            case .builtinCollision: return "Shadows a Claude Code builtin"
+            case .duplicateName(let other): return "Collides with \"\(other)\""
+            }
+        }
+
+        var detail: String {
+            switch kind {
+            // Exact machine-scoped copy — usage is per-machine (like shell history),
+            // so this can only ever describe *this* Mac, never claim anything about
+            // any other machine the same prompt file might also live on.
+            case .stale:
+                return "Usage is tracked per machine. This is only worth a look, not a delete — the prompt may simply be used elsewhere."
+            case .builtinCollision:
+                return "\(BuiltinSlashCommands.version) already defines this as a built-in command. Installing anyway still works; it just shadows the builtin."
+            case .duplicateName(let other):
+                return "\"\(other)\" is the same name except for case, which most filesystems treat as one file. Rename one of them."
+            }
+        }
+    }
+
+    /// 90 days, per the interview's frozen copy for staleness. A local `let` rather
+    /// than buried in `isPromptStale` so a test asserting the boundary reads the same
+    /// number the check does.
+    static let promptStaleThreshold: TimeInterval = 90 * 24 * 60 * 60
+
+    /// Whether a prompt last used at `lastUsed` (nil if never, on this Mac) hasn't
+    /// been used in 90+ days.
+    ///
+    /// A prompt with no usage record at all is *not* automatically stale: without a
+    /// last-used date there is nothing to measure 90 days against, and a prompt
+    /// authored an hour ago that hasn't been run yet is new, not neglected. When the
+    /// prompt file itself records an `edited` date (frontmatter, app-managed), that
+    /// stands in for "how long has this existed with no use" instead; a hand-written
+    /// prompt with neither signal is simply never flagged stale — false silence over
+    /// false alarm.
+    static func isPromptStale(lastUsed: Date?, editedAt: Date?, now: Date = Date()) -> Bool {
+        if let lastUsed {
+            return now.timeIntervalSince(lastUsed) >= promptStaleThreshold
+        }
+        guard let editedAt else { return false }
+        return now.timeIntervalSince(editedAt) >= promptStaleThreshold
+    }
+
+    /// Every Health diagnosis `shortcut` currently carries, against the full prompt
+    /// library and this Mac's usage record. Collisions are relative to every *other*
+    /// stored prompt, so this takes the whole library rather than reading
+    /// `promptShortcuts` directly — that, plus taking `usage` explicitly instead of
+    /// reading `promptUsageCache`, keeps the whole diagnosis independently testable
+    /// against fixtures with a fake clock.
+    static func promptHealthIssues(for shortcut: Shortcut, library: [Shortcut],
+                                   usage: [String: PromptUsageCounter.Entry],
+                                   now: Date = Date()) -> [PromptHealthIssue] {
+        var issues: [PromptHealthIssue] = []
+        if isPromptStale(lastUsed: usage[shortcut.name]?.lastUsed, editedAt: shortcut.editedAt, now: now) {
+            issues.append(PromptHealthIssue(kind: .stale))
+        }
+        if BuiltinSlashCommands.collides(name: shortcut.name) != nil {
+            issues.append(PromptHealthIssue(kind: .builtinCollision))
+        }
+        for other in library
+        where other.name != shortcut.name && other.name.lowercased() == shortcut.name.lowercased() {
+            issues.append(PromptHealthIssue(kind: .duplicateName(other.name)))
+        }
+        return issues
+    }
+
+    func promptHealthIssues(for shortcut: Shortcut) -> [PromptHealthIssue] {
+        Self.promptHealthIssues(for: shortcut, library: promptShortcuts, usage: promptUsageCache)
+    }
+
+    /// MANAGE's prompt-dialect pool, filtered to whatever `promptBucket` admits.
+    /// Library is everything; Delivery is everything too (it presents installed and
+    /// not-installed prompts as two sections of the same list, rather than hiding
+    /// one); Health narrows to prompts actually carrying a diagnosis.
+    private var promptBucketSubset: [Shortcut] {
+        switch promptBucket {
+        case .library, .delivery:
+            return promptShortcuts
+        case .health:
+            let library = promptShortcuts
+            return library.filter {
+                !Self.promptHealthIssues(for: $0, library: library, usage: promptUsageCache).isEmpty
+            }
+        }
+    }
+
+    /// MANAGE's prompt-dialect list: `promptBucketSubset`, ranked and narrowed by
+    /// `query` through the exact same `ShortcutRanker` FIND's union already uses —
+    /// name/description/body matching for a pure-prompt pool reduces to prompt
+    /// ranking, and the "boost" half of `rank` is inert here since every row already
+    /// matches `.prompt`.
+    var promptManageResults: [Shortcut] {
+        ShortcutRanker.rank(promptBucketSubset, query: query, scope: settings.searchScope, dialect: .prompt)
+    }
+
+    /// MANAGE's prompt-dialect counterpart to `selectedEntry`/`selectedShortcut` — no
+    /// fallback to the first row for the same reason those two don't: an index left
+    /// over from a reranked list should point at nothing rather than whatever slid
+    /// underneath it.
+    var selectedPromptManageShortcut: Shortcut? {
+        let list = promptManageResults
+        guard list.indices.contains(selection) else { return nil }
+        return list[selection]
+    }
+
+    /// Delivery's Install action: compiles `shortcut` into a real Claude Code slash
+    /// command via the real registry. `CompileError`'s messages are already
+    /// user-grade, so they surface in `errorMessage` verbatim rather than reworded.
+    /// A builtin-collision warning never blocks the install — it's advisory, exactly
+    /// as `PromptCompiler` documents — it only changes which toast is shown.
+    func installPrompt(_ shortcut: Shortcut) {
+        guard shortcut.kind == .prompt else { return }
+        do {
+            let result = try PromptCompiler.compile(name: shortcut.name,
+                                                     description: shortcut.description,
+                                                     body: shortcut.body,
+                                                     commandsDir: AppPaths.claudeCommandsDirectory,
+                                                     registryPath: AppPaths.compiledRegistryPath)
+            errorMessage = nil
+            if result.builtinCollision != nil {
+                show(toast: "Installed /\(shortcut.name) — heads up, that shadows a Claude Code builtin")
+            } else {
+                show(toast: "Installed /\(shortcut.name) in Claude Code")
+            }
+        } catch let error as PromptCompiler.CompileError {
+            errorMessage = error.errorDescription
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    /// Delivery's Uninstall action, for a prompt currently `.installed` or `.stale`.
+    /// Same verbatim-error-surfacing rule as `installPrompt`.
+    func uninstallPrompt(_ shortcut: Shortcut) {
+        guard shortcut.kind == .prompt else { return }
+        do {
+            _ = try PromptCompiler.uninstall(name: shortcut.name,
+                                             commandsDir: AppPaths.claudeCommandsDirectory,
+                                             registryPath: AppPaths.compiledRegistryPath)
+            errorMessage = nil
+            show(toast: "Uninstalled /\(shortcut.name) from Claude Code")
+        } catch let error as PromptCompiler.CompileError {
+            errorMessage = error.errorDescription
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    /// Health's Reveal action for a stale or colliding prompt — the "Edit/view
+    /// action" the packet calls for in place of anything destructive. Opens Finder
+    /// with the prompt's file selected; editing the prompt itself stays a job for
+    /// whatever editor the user already keeps `~/.aliasbar/prompts` open in.
+    func revealPromptFile(_ shortcut: Shortcut) {
+        guard shortcut.kind == .prompt else { return }
+        let url = URL(fileURLWithPath: AppPaths.promptsDirectory).appendingPathComponent("\(shortcut.name).md")
+        NSWorkspace.shared.activateFileViewerSelecting([url])
+    }
+
+    // MARK: - Manage: Suggested (history-mined alias suggestions)
+
+    /// Recomputes `suggestionCache` from history, existing aliases, and the ignore
+    /// store. Called at `prepareForShow` and again after anything that could change
+    /// membership: dismissing a suggestion or saving a new alias.
+    private func refreshSuggestions() {
+        suggestionCache = SuggestionEngine.suggest(
+            history: AppPaths.historyPath,
+            existingEntries: store.ranked.map(\.entry),
+            ignores: SuggestionIgnoreStore.all(path: AppPaths.suggestionIgnoresPath))
+    }
+
+    /// MANAGE's Suggested bucket: `suggestionCache`, narrowed by `query` against the
+    /// two things a person would actually type to find one — the name it would take,
+    /// or the command it stands in for. `SuggestionEngine`'s own count-desc/name-asc
+    /// order is left untouched rather than re-ranked by match strength: "most worth
+    /// aliasing first" is the point of that order, not just a tiebreak.
+    var suggestedEntries: [AliasSuggestion] {
+        guard !query.isEmpty else { return suggestionCache }
+        let q = query.lowercased()
+        return suggestionCache.filter {
+            $0.proposedName.lowercased().contains(q) || $0.command.lowercased().contains(q)
+        }
+    }
+
+    var selectedSuggestion: AliasSuggestion? {
+        let list = suggestedEntries
+        guard list.indices.contains(selection) else { return nil }
+        return list[selection]
+    }
+
+    /// Suggested's Create action: opens the alias editor prefilled with the
+    /// suggestion's proposed name and full command, rather than writing directly —
+    /// same reasoning as `promoteToAlias` for a history line: a suggested name is a
+    /// guess, and naming is the part a person should own. The editor's name field is
+    /// already the one that receives initial focus regardless of mode (see
+    /// `EditorSheet`), so Rename below needs no separate focus-targeting of its own —
+    /// it differs from Create only in what it's *for*, not in what it does.
+    func createFromSuggestion(_ suggestion: AliasSuggestion) {
+        editor = .create(name: suggestion.proposedName, command: suggestion.command)
+    }
+
+    /// Same editor as `createFromSuggestion`. Kept as its own named entry point
+    /// (rather than one "Create" button doing double duty) because the two Manage
+    /// detail-pane actions read differently even though they open identically: "Create"
+    /// says the guessed name is fine, "Rename" says it isn't — the editor answers both
+    /// the same way, by putting the name field in front of you before it saves anything.
+    func renameFromSuggestion(_ suggestion: AliasSuggestion) {
+        editor = .create(name: suggestion.proposedName, command: suggestion.command)
+    }
+
+    /// Suggested's Ignore action: records the full command as dismissed and
+    /// refreshes the list immediately, rather than waiting for the popover's next
+    /// summon to reflect it.
+    func ignoreSuggestion(_ suggestion: AliasSuggestion) {
+        _ = SuggestionIgnoreStore.ignore(suggestion.command, path: AppPaths.suggestionIgnoresPath)
+        refreshSuggestions()
+        clampSelection()
     }
 
     // MARK: - History
@@ -491,12 +819,25 @@ final class AppState: ObservableObject {
         }
     }
 
-    /// The count `move`, `clampSelection`, and the header's live counter share: FIND's
-    /// own shell+prompt union while in FIND, BOARD's prompt deck while BOARD is showing
-    /// it, `activeList`'s count everywhere else.
+    /// The count `move`, `clampSelection`, and the header's live counter share:
+    /// FIND's own shell+prompt union while in FIND, BOARD's prompt deck while BOARD is
+    /// showing it, MANAGE's own dispatch below while in MANAGE, `activeList`'s count
+    /// everywhere else.
     var activeCount: Int {
         if mode == .find { return findResults.count }
         if mode == .board && dialect == .prompt { return boardPrompts.count }
+        if mode == .manage { return manageActiveCount }
+        return activeList.count
+    }
+
+    /// MANAGE's own cursor width. The prompt dialect (Library/Delivery/Health) and
+    /// the Suggested bucket each hold a list shape — `Shortcut` or `AliasSuggestion`
+    /// — that doesn't fit `[RankedEntry]`, so they size the keyboard cursor here
+    /// instead of through `activeList`, which stays `bucketEntries` for every other
+    /// shell bucket exactly as it always has.
+    private var manageActiveCount: Int {
+        if dialect == .prompt { return promptManageResults.count }
+        if bucket == .suggested { return suggestedEntries.count }
         return activeList.count
     }
 
@@ -564,6 +905,7 @@ final class AppState: ObservableObject {
         let promptsDirectory = URL(fileURLWithPath: AppPaths.promptsDirectory)
         promptCache = PromptStore.scan(directory: promptsDirectory).prompts
         promptUsageCache = PromptUsageCounter.all(path: AppPaths.promptUsagePath)
+        refreshSuggestions()
 
         if let hint = pendingPromptHint {
             pendingPromptHint = nil
@@ -677,6 +1019,11 @@ final class AppState: ObservableObject {
             flipDialect()
             return true
 
+        // MANAGE's own ⇥ flip, mirroring FIND's immediately above.
+        case kVK_Tab where mode == .manage:
+            flipManageDialect()
+            return true
+
         // Buckets are the folders, and ⌘↑ ⌘↓ walk them the way ⌘↑ walks Finder's — in
         // place, whichever view you are in. The view is how you look; the bucket is
         // what you are looking at.
@@ -785,6 +1132,11 @@ final class AppState: ObservableObject {
            let chars = event.charactersIgnoringModifiers {
             if let target = Self.prefixBucket(for: chars) {
                 mode = .manage
+                // Every prefix-jump target is a shell bucket, so this always means
+                // "show me the shell sidebar" — without this, jumping in from
+                // MANAGE's prompt dialect would set `bucket` correctly but leave the
+                // prompt sidebar on screen, since that's what `dialect` still says.
+                dialect = .shell
                 bucket = target
                 selection = 0
                 return true
@@ -836,6 +1188,16 @@ final class AppState: ObservableObject {
         // Buckets slice your aliases, not your history. Reaching for one while looking
         // at history is a statement that you are done with history.
         if historyMode { historyMode = false }
+        // MANAGE's prompt dialect has its own sidebar (Library/Delivery/Health), so
+        // ⌘↑↓ there walks `PromptBucket`, not the shell `Bucket` list — the same
+        // split FIND and BOARD never need, since neither has replaced its sidebar.
+        if mode == .manage, dialect == .prompt {
+            let all = PromptBucket.allCases
+            guard let idx = all.firstIndex(of: promptBucket) else { return }
+            promptBucket = all[(idx + delta + all.count) % all.count]
+            selection = 0
+            return
+        }
         let all = Bucket.allCases
         guard let idx = all.firstIndex(of: bucket) else { return }
         bucket = all[(idx + delta + all.count) % all.count]
@@ -984,6 +1346,11 @@ final class AppState: ObservableObject {
             editor = nil
             errorMessage = nil
             store.reload()
+            // A newly-saved alias may cover a command Suggested was still proposing
+            // (exact match, or the suggestion is this alias's command plus trailing
+            // args) — refreshed here so it drops out immediately rather than lingering
+            // until the next summon.
+            refreshSuggestions()
             // Follow the alias that was just written, by name, rather than leaving the
             // cursor on whatever row index it happened to occupy before the reload.
             restoreSelection(to: activeList.first { $0.name == name }?.id)

@@ -287,7 +287,10 @@ struct RootView: View {
                 ? "Search aliases and functions"
                 : "Search \(state.bucket.label.lowercased())"
         case .board: return "Type to highlight"
-        case .manage: return "Filter \(state.bucket.label.lowercased())"
+        case .manage:
+            if state.dialect == .prompt { return "Filter \(state.promptBucket.label.lowercased())" }
+            if state.bucket == .suggested { return "Filter suggested aliases" }
+            return "Filter \(state.bucket.label.lowercased())"
         }
     }
 
@@ -1208,37 +1211,91 @@ struct ManageView: View {
         HStack(spacing: 0) {
             sidebar
             Rectangle().fill(theme.rule.opacity(0.5)).frame(width: 1)
-            list
-            Rectangle().fill(theme.rule.opacity(0.5)).frame(width: 1)
-            detail
+            // The prompt dialect (Library/Delivery/Health) is an entirely different
+            // list-shape from the shell buckets' `[RankedEntry]` — its own list and
+            // detail panes live in PromptManageView.swift, this is only the routing.
+            if state.dialect == .prompt {
+                PromptManageView(state: state, settings: settings)
+            } else if state.bucket == .suggested {
+                SuggestedManageView(state: state, settings: settings)
+            } else {
+                list
+                Rectangle().fill(theme.rule.opacity(0.5)).frame(width: 1)
+                detail
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private var sidebar: some View {
         VStack(alignment: .leading, spacing: 1) {
-            ForEach(Bucket.allCases) { bucket in
-                bucketRow(bucket)
-            }
-            Spacer()
-            Button { state.editor = .create() } label: {
-                HStack(spacing: 5) {
-                    Image(systemName: "plus").font(.system(size: 9, weight: .bold))
-                    Text("New alias").font(.system(size: 11, weight: .medium))
+            if state.dialect == .prompt {
+                ForEach(PromptBucket.allCases) { bucket in
+                    promptBucketRow(bucket)
                 }
-                .foregroundStyle(theme.onAccent)
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 6)
-                .background(theme.accent, in: RoundedRectangle(cornerRadius: theme.cornerRadius + 1))
+                Spacer()
+                dialectFlipHint
+            } else {
+                ForEach(Bucket.allCases) { bucket in
+                    bucketRow(bucket)
+                }
+                Spacer()
+                Button { state.editor = .create() } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: "plus").font(.system(size: 9, weight: .bold))
+                        Text("New alias").font(.system(size: 11, weight: .medium))
+                    }
+                    .foregroundStyle(theme.onAccent)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 6)
+                    .background(theme.accent, in: RoundedRectangle(cornerRadius: theme.cornerRadius + 1))
+                }
+                .buttonStyle(.plain)
+                .help("New alias — ⌘N")
+                dialectFlipHint
             }
-            .buttonStyle(.plain)
-            .help("New alias — ⌘N")
         }
         .padding(8)
         // Narrower than it was, because the window is. The two fixed panes give up what
         // they can spare so the detail pane — the one holding a whole command — keeps a
         // usable width at 660.
         .frame(width: 172)
+    }
+
+    /// The one thing both sidebar shapes share: a small, constant reminder that ⇥
+    /// swaps between them. Placed under whichever list is showing rather than in the
+    /// header, since it's specifically about the sidebar directly above it.
+    private var dialectFlipHint: some View {
+        HStack(spacing: 4) {
+            Text("⇥").font(.system(size: 9.5, weight: .bold, design: .monospaced))
+            Text(state.dialect == .prompt ? "shell aliases" : "prompts")
+                .font(.system(size: 9.5))
+        }
+        .foregroundStyle(theme.faint)
+        .padding(.horizontal, 2)
+        .padding(.top, 2)
+        .help("⇥ swaps between the shell and prompt sidebars")
+    }
+
+    private func promptBucketRow(_ bucket: PromptBucket) -> some View {
+        let active = state.promptBucket == bucket
+        return HStack(spacing: 6) {
+            Image(systemName: bucket.symbol)
+                .font(.system(size: 10, weight: .semibold))
+                .frame(width: 14)
+                .foregroundStyle(active ? theme.accent : theme.dim)
+            Text(bucket.label)
+                .font(.system(size: 13, weight: active ? .semibold : .regular,
+                              design: theme.bodyDesign))
+                .foregroundStyle(active ? theme.text : theme.dim)
+            Spacer(minLength: 2)
+        }
+        .padding(.horizontal, 7)
+        .padding(.vertical, 5)
+        .background(active ? theme.selectionFill : .clear,
+                    in: RoundedRectangle(cornerRadius: theme.cornerRadius + 1))
+        .contentShape(Rectangle())
+        .live { state.promptBucket = bucket; state.selection = 0 }
     }
 
     private func bucketRow(_ bucket: Bucket) -> some View {
@@ -1275,6 +1332,7 @@ struct ManageView: View {
         case .neverRun: return state.store.neverRun.count
         case .byFile: return state.store.byFile.count
         case .conflicts: return state.store.conflicts.count
+        case .suggested: return state.suggestedEntries.count
         }
     }
 

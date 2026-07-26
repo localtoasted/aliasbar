@@ -711,4 +711,17 @@ enum CorePaths {
         }
         return homeDirectory + "/.claude"
     }
+
+    /// Where `PromptCompiler` writes the `.md` files it installs — Claude Code's own
+    /// command directory, not anything under `~/.aliasbar`. Same shape as the other
+    /// resolvers here: no per-app stored setting, just an environment override so
+    /// MANAGE's Delivery bucket (the one app-side writer of this directory) can be
+    /// tested against a fixture instead of a real `~/.claude/commands`.
+    static func resolveClaudeCommandsDirectory(environmentOverride: String?,
+                                               homeDirectory: String) -> String {
+        if let environmentOverride, !environmentOverride.isEmpty {
+            return (environmentOverride as NSString).expandingTildeInPath
+        }
+        return homeDirectory + "/.claude/commands"
+    }
 }
