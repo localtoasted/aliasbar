@@ -6411,13 +6411,13 @@ let neverCompiled = deliveryFixturePrompt(name: "never-compiled", body: "not ins
 check("a prompt never compiled reads as notInstalled",
       AppState.promptDeliveryStatus(for: neverCompiled, registryPath: deliveryRegistryPath) == .notInstalled)
 
-let standupPrompt = deliveryFixturePrompt(name: "standup", description: "Daily standup summary",
+let deliveryStandup = deliveryFixturePrompt(name: "standup", description: "Daily standup summary",
                                           body: "Summarize: {{notes}}")
-_ = try! PromptCompiler.compile(name: standupPrompt.name, description: standupPrompt.description,
-                                body: standupPrompt.body, commandsDir: deliveryCommandsDir,
+_ = try! PromptCompiler.compile(name: deliveryStandup.name, description: deliveryStandup.description,
+                                body: deliveryStandup.body, commandsDir: deliveryCommandsDir,
                                 registryPath: deliveryRegistryPath)
 check("a freshly compiled prompt whose current content matches the registry reads as installed",
-      AppState.promptDeliveryStatus(for: standupPrompt, registryPath: deliveryRegistryPath) == .installed)
+      AppState.promptDeliveryStatus(for: deliveryStandup, registryPath: deliveryRegistryPath) == .installed)
 
 let editedStandupPrompt = deliveryFixturePrompt(name: "standup", description: "Daily standup summary",
                                                 body: "Summarize, but longer now: {{notes}}")
@@ -6431,7 +6431,7 @@ check("promptDeliveryStatus only ever answers for a prompt-kind Shortcut",
       AppState.promptDeliveryStatus(for: shellKindShortcut, registryPath: deliveryRegistryPath) == .notInstalled)
 
 check("a nonexistent registry path (nothing compiled anywhere) reads as notInstalled, never crashes",
-      AppState.promptDeliveryStatus(for: standupPrompt, registryPath: "\(sandbox)/no-such-registry.json")
+      AppState.promptDeliveryStatus(for: deliveryStandup, registryPath: "\(sandbox)/no-such-registry.json")
           == .notInstalled)
 
 // --- AppState prompt delivery: broker seam, usage recording, fill-in flow ------
