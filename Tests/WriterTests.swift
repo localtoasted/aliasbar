@@ -1868,6 +1868,22 @@ check("the system setting cannot revive motion the user turned off",
 check("neither source can be overridden by the other into more motion",
       !MotionPlan.resolve(.reduced, reduceMotion: true).movesThings)
 
+// ---------------------------------------------------------------------------
+print("\n26. Enter actions: the paste/copy split the Afterwards setting relies on")
+
+// The Afterwards control disables itself for paste modes on the strength of two
+// claims: `needsAccessibility` is exactly "this action pastes", and an action's ⌘⏎
+// counterpart never crosses the paste/copy line. If a paste's secondary were a copy,
+// a greyed-out "Keep it open" would be wrong for half the keystrokes on screen.
+check("paste name needs Accessibility", EnterAction.pasteName.needsAccessibility)
+check("paste command needs Accessibility", EnterAction.pasteCommand.needsAccessibility)
+check("copy name does not", !EnterAction.copyName.needsAccessibility)
+check("copy command does not", !EnterAction.copyCommand.needsAccessibility)
+check("no secondary crosses the paste/copy line",
+      EnterAction.allCases.allSatisfy {
+          $0.secondary.needsAccessibility == $0.needsAccessibility
+      })
+
 
 // ---------------------------------------------------------------------------
 print("\n" + String(repeating: "-", count: 60))

@@ -224,10 +224,20 @@ struct SettingsView: View {
                 if settings.enterAction.needsAccessibility {
                     PermissionNotice(granted: Typist.isTrusted)
                 }
-                SettingsRow("Afterwards", hint: nil) {
+                // For the paste actions this choice does not exist: a paste can only
+                // land after the window has closed and handed focus back, so offering
+                // "Keep it open" there would be a lie. The control greys out instead
+                // of disappearing — the setting is remembered and applies again the
+                // moment Enter goes back to copying.
+                SettingsRow("Afterwards",
+                            hint: settings.enterAction.needsAccessibility
+                                ? "Pasting always closes the window — the paste can only land once the app you were in is front again. This choice applies to the copy actions."
+                                : nil) {
                     ThemedSegments(selection: $settings.afterAction,
                                    options: AfterAction.allCases,
                                    label: { $0.label })
+                        .disabled(settings.enterAction.needsAccessibility)
+                        .opacity(settings.enterAction.needsAccessibility ? 0.45 : 1)
                 }
                 SettingsRow("⌘⏎", hint: "Always the other half of the pair, so both are one keystroke away.") {
                     Text(settings.enterAction.secondary.label)
