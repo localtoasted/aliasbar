@@ -50,3 +50,62 @@ submit the zip (`xcrun notarytool submit AliasBar-<version>.zip --wait`), staple
 ticket to the **.app** (`xcrun stapler staple AliasBar.app` — a zip cannot be stapled
 directly), and re-create the distribution zip from the stapled app before uploading.
 Release as above; nothing in the update pipeline changes.
+
+## CLI release + Homebrew tap
+
+`ab` ships independently of the app: its own GitHub release asset, its own Homebrew
+tap, its own version (`abCLIVersion` in `Sources/CLI/ABMain.swift`, not the app's
+`CFBundleShortVersionString`). No Sparkle, no code signing, no notarization — it's a
+small unsigned binary, and Homebrew's own install flow is the trust boundary.
+
+### One-time setup
+
+1. **Create the tap repo**: a real GitHub repo named `localtoasted/homebrew-aliasbar`
+   (the `homebrew-` prefix is Homebrew's tap-naming convention — it's what makes
+   `brew install localtoasted/aliasbar/aliasbar` resolvable at all), containing one
+   file: `Formula/aliasbar.rb`.
+2. The first time you cut a CLI release (below), `tools/release-cli.sh` templates a
+   `Formula/aliasbar.rb` in *this* repo (gitignored — it's a build output, not source).
+   Copy that file into the tap repo at the same path, commit, and push. Every
+   subsequent release repeats just this copy-commit-push step — nothing about the tap
+   repo's structure changes.
+
+### Per-release steps
+
+1. **Bump the version**: edit `abCLIVersion` in `Sources/CLI/ABMain.swift` (e.g. to
+   `0.4.0`) and commit. `tools/release-cli.sh` refuses to build unless the compiled
+   binary's `ab --version` matches the version you give it, so this step can't be
+   silently skipped.
+2. **Build + package**:
+   ```sh
+   tools/release-cli.sh 0.4.0
+   ```
+   This builds a release `ab` (universal arm64+x86_64 via `lipo` when cross-compiling
+   the x86_64 slice succeeds on the build machine, arm64-only with a printed note
+   otherwise), runs the exact same CLI integration checks `test.sh` runs — against
+   this binary instead of a debug build — packages
+   `release/ab-0.4.0-macos.tar.gz` (binary + `LICENSE` + a short usage README), prints
+   its sha256, and templates `Formula/aliasbar.rb` from `Formula/aliasbar.rb.template`
+   with that version and hash filled in. Refuses on a dirty git tree. Idempotent: rerun
+   it as many times as you want, for the same or a different version — both outputs
+   are gitignored and get overwritten cleanly each run.
+3. **Publish the GitHub release**:
+   ```sh
+   gh release create v0.4.0 release/ab-0.4.0-macos.tar.gz \
+       --title "ab v0.4.0" --notes "..."
+   ```
+   (This can be the same tag/release an app update goes out under, or its own —
+   they're independent artifacts.)
+4. **Update the tap**: copy the templated `Formula/aliasbar.rb` into the
+   `localtoasted/homebrew-aliasbar` repo at `Formula/aliasbar.rb`, commit, push.
+5. **Verify**:
+   ```sh
+   brew tap localtoasted/aliasbar          # first time only, per machine
+   brew install localtoasted/aliasbar/aliasbar
+   # or, upgrading an existing install:
+   brew upgrade localtoasted/aliasbar/aliasbar
+   ab --version                            # should print "ab 0.4.0"
+   ```
+
+`tools/release-cli.sh` only ever writes inside this repo's working tree — the GitHub
+release and the tap push are deliberate, separate, manual steps.

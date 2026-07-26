@@ -1,0 +1,16 @@
+class Aliasbar < Formula
+  desc "Command-line front end for AliasBar's shell alias management"
+  homepage "https://github.com/localtoasted/aliasbar"
+  url "https://github.com/localtoasted/aliasbar/releases/download/v{{VERSION}}/ab-{{VERSION}}-macos.tar.gz"
+  sha256 "{{SHA256}}"
+  license "MIT"
+  version "{{VERSION}}"
+
+  def install
+    bin.install "ab"
+  end
+
+  test do
+    assert_match version.to_s, shell_output("#{bin}/ab --version")
+  end
+end
