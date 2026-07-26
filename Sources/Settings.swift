@@ -558,7 +558,9 @@ final class AppSettings: ObservableObject {
         hasEverPasted = store.object(forKey: Key.hasEverPasted) as? Bool ?? false
         resultLimit = store.object(forKey: Key.resultLimit) as? Int ?? 6
 
-        clipboardMonitoring = store.object(forKey: Key.clipboardMonitoring) as? Bool ?? true
+        // Off until the user turns it on. Watching the clipboard is this product's
+        // trust wedge; starting the read silently on launch would undercut it.
+        clipboardMonitoring = store.object(forKey: Key.clipboardMonitoring) as? Bool ?? false
         clipboardPersistence = store.object(forKey: Key.clipboardPersistence) as? Bool ?? false
         clipboardInSyncFile = store.object(forKey: Key.clipboardInSyncFile) as? Bool ?? false
 

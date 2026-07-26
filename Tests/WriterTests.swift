@@ -4402,6 +4402,34 @@ expectThrow("uninstalling a name the registry never had refuses") {
     _ = try PromptCompiler.uninstall(name: "never-installed", commandsDir: cDir, registryPath: rPath)
 }
 
+// --- A tampered registry cannot aim uninstall outside commandsDir -----------
+// The registry may live in a synced dotfiles directory, so its paths are data,
+// not authority. An entry pointing anywhere but commandsDir/<name>.md must be
+// refused even when the hash matches perfectly.
+
+(cDir, rPath) = promptFixture()
+let victimPath = (rPath as NSString).deletingLastPathComponent + "/victim.txt"
+try! "precious user file\n".write(toFile: victimPath, atomically: true, encoding: .utf8)
+let victimHash = SHA256Digest.hex("precious user file\n")
+try! """
+{"escape": {"path": "\(victimPath)", "sha256": "\(victimHash)", "installedAt": "2026-07-26T00:00:00Z"}}
+""".write(toFile: rPath, atomically: true, encoding: .utf8)
+
+expectThrow("uninstall refuses a registry entry pointing outside commandsDir") {
+    _ = try PromptCompiler.uninstall(name: "escape", commandsDir: cDir, registryPath: rPath)
+}
+check("the out-of-directory file survives the tampered uninstall",
+      FileManager.default.fileExists(atPath: victimPath))
+
+expectThrow("uninstall also refuses a dot-dot traversal to the right filename") {
+    _ = try PromptCompiler.uninstall(name: "escape2", commandsDir: cDir, registryPath: {
+        try! """
+        {"escape2": {"path": "\(cDir)/../escape2.md", "sha256": "\(victimHash)", "installedAt": "2026-07-26T00:00:00Z"}}
+        """.write(toFile: rPath, atomically: true, encoding: .utf8)
+        return rPath
+    }())
+}
+
 // --- Atomicity: no stray temp files survive a run ---------------------------
 
 (cDir, rPath) = promptFixture()

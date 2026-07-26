@@ -361,10 +361,14 @@ final class SharedDocumentStore {
     /// Applies one mutation, merging against whatever is on disk right now.
     ///
     /// The loop is what makes this safe under a concurrent writer: each pass reads
-    /// the current file, applies the *same* mutation on top of it, and only commits
-    /// if nothing changed between that read and the rename. If something did change,
-    /// it loops and re-applies the same mutation to the new state — which is exactly
-    /// a three-way merge, because `apply(_:to:)` resolves each touched record or
+    /// the current file, applies the *same* mutation on top of it, and commits only
+    /// if a re-read just before the rename still matches what it first read. A writer
+    /// landing inside the narrow window between that final comparison and the rename
+    /// itself is still overwritten — closing that fully would need a lock file, and
+    /// the realistic concurrent writer here (a sync daemon) redelivers its version as
+    /// a later external change anyway. When the comparison does catch a change, the
+    /// loop re-applies the same mutation to the new state — which is exactly a
+    /// three-way merge, because `apply(_:to:)` resolves each touched record or
     /// setting key by `modifiedAt` rather than overwriting wholesale.
     private func mutate(_ mutation: Mutation) throws -> SharedDocument {
         var attempt = 0
