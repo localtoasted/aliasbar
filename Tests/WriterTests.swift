@@ -254,6 +254,18 @@ do {
     check("name inside the block is editable", false, "\(error)")
 }
 
+let freshlyClashing = scratch("""
+# Added after AliasBar's editor opened.
+alias collision='echo outside'
+""")
+let freshlyClashingOriginal = read(freshlyClashing)
+expectThrow("a fresh unmanaged clash is refused even when UI entries are stale") {
+    _ = try AliasWriter.apply(.upsert(name: "collision", command: "echo inside", comment: nil),
+                              path: freshlyClashing, allEntries: [])
+}
+check("a refused fresh clash leaves the file untouched",
+      read(freshlyClashing) == freshlyClashingOriginal)
+
 // ---------------------------------------------------------------------------
 print("\n7. Backups and file attributes")
 

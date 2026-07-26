@@ -318,6 +318,19 @@ enum AliasWriter {
         guard snapshotBeforeRead == snapshotAfterRead else {
             throw WriteError.modifiedElsewhere
         }
+
+        // `allEntries` came from the UI's last parse and can be stale by the time Save
+        // is pressed. Reparse the exact contents bracketed by the snapshots above so an
+        // unmanaged definition added since the editor opened cannot be shadowed by a
+        // new managed definition.
+        if let name = nameToWrite,
+           let clash = ZshrcParser.parseText(original, sourceFile: target)
+               .first(where: { $0.name == name && !$0.managed }) {
+            throw WriteError.definedOutsideBlock(name: name,
+                                                 file: clash.sourceFile,
+                                                 line: clash.line)
+        }
+
         // Re-checked immediately before the replacement. Atomic rename prevents a
         // half-written file; it does nothing about a lost update.
         let snapshotAtRead = snapshotAfterRead
