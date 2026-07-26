@@ -106,16 +106,20 @@ SIGN_IDENTITY="${ALIASBAR_SIGN_IDENTITY:-AliasBar Local Signing}"
 # trust setting, and reports "0 valid identities" for one codesign will use happily.
 # Sparkle's nested code (XPC services, Autoupdate, Updater.app) has to be signed
 # inside-out per its docs — `--deep` re-signs them in an unspecified order and is
-# deprecated besides.
+# deprecated besides. Every signature carries `--options runtime`: the helpers ship
+# from Sparkle with Hardened Runtime, and notarization requires it on everything —
+# a plain re-sign silently strips it. Downloader.xpc additionally preserves its
+# shipped entitlements, as Sparkle's signing sequence specifies.
+# https://sparkle-project.org/documentation/sandboxing/#code-signing
 sign_bundle() {
     local identity="$1"
     local fw="${APP_BUNDLE}/Contents/Frameworks/Sparkle.framework"
-    codesign --force -s "${identity}" "${fw}/Versions/B/XPCServices/Installer.xpc"
-    codesign --force -s "${identity}" "${fw}/Versions/B/XPCServices/Downloader.xpc"
-    codesign --force -s "${identity}" "${fw}/Versions/B/Autoupdate"
-    codesign --force -s "${identity}" "${fw}/Versions/B/Updater.app"
-    codesign --force -s "${identity}" "${fw}"
-    codesign --force -s "${identity}" "${APP_BUNDLE}"
+    codesign --force --options runtime -s "${identity}" "${fw}/Versions/B/XPCServices/Installer.xpc"
+    codesign --force --options runtime --preserve-metadata=entitlements -s "${identity}" "${fw}/Versions/B/XPCServices/Downloader.xpc"
+    codesign --force --options runtime -s "${identity}" "${fw}/Versions/B/Autoupdate"
+    codesign --force --options runtime -s "${identity}" "${fw}/Versions/B/Updater.app"
+    codesign --force --options runtime -s "${identity}" "${fw}"
+    codesign --force --options runtime -s "${identity}" "${APP_BUNDLE}"
 }
 
 if security find-certificate -c "${SIGN_IDENTITY}" >/dev/null 2>&1; then

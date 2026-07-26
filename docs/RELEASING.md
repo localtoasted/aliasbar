@@ -44,6 +44,8 @@ ad-hoc). Sparkle's EdDSA check passes regardless, and updates install fine on a 
 that already trusts the app — but for anyone else, Gatekeeper will refuse the first
 install of a non-notarized download, and Sparkle requires the update's code signature
 to be valid for the identity it ships under. Once the Developer ID certificate exists
-(PRE-242): sign with it in `build.sh` (`ALIASBAR_SIGN_IDENTITY`), notarize the zip
-(`xcrun notarytool submit --wait` + `xcrun stapler staple`), and release as above.
-Nothing in the update pipeline changes.
+(PRE-242): sign with it in `build.sh` (`ALIASBAR_SIGN_IDENTITY`), then notarize —
+submit the zip (`xcrun notarytool submit AliasBar-<version>.zip --wait`), staple the
+ticket to the **.app** (`xcrun stapler staple AliasBar.app` — a zip cannot be stapled
+directly), and re-create the distribution zip from the stapled app before uploading.
+Release as above; nothing in the update pipeline changes.

@@ -555,7 +555,7 @@ struct SettingsView: View {
             }
 
             SettingsGroup("Privacy") {
-                NoticeText("AliasBar reads two files on your disk: your shell config, and your shell history for usage counts. Neither is ever sent anywhere. Its only network access is checking the release feed for updates — automatically only if you switch that on, and never carrying anything beyond the request itself.",
+                NoticeText("AliasBar reads two files on your disk: your shell config, and your shell history for usage counts. Neither is ever sent anywhere. Its only network access is checking for and downloading app updates — automatic checks only if you switch them on, downloads only when you accept an update.",
                            tone: .info)
             }
 
