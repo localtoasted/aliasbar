@@ -102,6 +102,16 @@ enum AppPaths {
         )
     }
 
+    /// Where `PromptInbox` scans for untrusted proposal files — surfaced by the
+    /// Inbox bucket (PRE-265). `ALIASBAR_INBOX_DIR` exists purely for testability,
+    /// matching every other override in this file.
+    static var inboxDirectory: String {
+        CorePaths.resolveInboxDirectory(
+            environmentOverride: ProcessInfo.processInfo.environment["ALIASBAR_INBOX_DIR"],
+            homeDirectory: NSHomeDirectory()
+        )
+    }
+
     // Existing call sites (including WriterTests.swift) reach the resolvers through
     // AppPaths. Kept as thin forwarders so nothing outside this file has to change,
     // while CorePaths remains the one place the actual precedence logic lives.

@@ -27,7 +27,7 @@ struct PromptManageView: View {
                 if results.isEmpty {
                     EmptyStateView(symbol: emptySymbol,
                                    title: emptyTitle,
-                                   hint: "⇥ shows your shell aliases instead.")
+                                   hint: emptyHint)
                         .padding(.top, 40)
                 } else {
                     LazyVStack(spacing: 1) {
@@ -56,7 +56,23 @@ struct PromptManageView: View {
         case .library: return state.query.isEmpty ? "No prompts yet" : "Nothing matches \"\(state.query)\""
         case .delivery: return state.query.isEmpty ? "No prompts yet" : "Nothing matches \"\(state.query)\""
         case .health: return "No diagnoses — everything looks healthy"
+        case .inbox:
+            // Unreachable: `ManageView` routes `.inbox` to `InboxView` before this
+            // type ever renders — kept only so the switch stays exhaustive.
+            return ""
         }
+    }
+
+    /// The base hint, plus the shared ⌘I CTA appended only when there's truly
+    /// nothing in the library yet (never for a mere "nothing matches this search",
+    /// and never for Health — an empty Health list is a clean bill of health, not
+    /// an empty library).
+    private var emptyHint: String {
+        let base = "⇥ shows your shell aliases instead."
+        guard state.query.isEmpty, state.promptBucket != .health, state.promptLibraryEmpty else {
+            return base
+        }
+        return "\(base)\n\(AppState.promptLibraryEmptyHint)"
     }
 
     private func promptManageRow(_ shortcut: Shortcut, index: Int) -> some View {
@@ -104,6 +120,9 @@ struct PromptManageView: View {
             Text("\(count)")
                 .font(.system(size: 9, weight: .semibold, design: .monospaced))
                 .foregroundStyle(.orange)
+        case .inbox:
+            // Unreachable — see `emptyTitle`'s matching comment.
+            EmptyView()
         }
     }
 
@@ -119,6 +138,9 @@ struct PromptManageView: View {
                     case .library: libraryDetail(shortcut)
                     case .delivery: deliveryDetail(shortcut)
                     case .health: healthDetail(shortcut)
+                    case .inbox:
+                        // Unreachable — see `emptyTitle`'s matching comment.
+                        EmptyView()
                     }
                     Spacer(minLength: 0)
                 }
