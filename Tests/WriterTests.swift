@@ -4525,6 +4525,291 @@ for forbiddenSymbol in [
 }
 
 // ---------------------------------------------------------------------------
+print("\n37. Settings roaming via SharedDocumentStore (PRE-252-SETTINGS)")
+
+/// A fresh `AppSettings`, backed by its own throwaway `UserDefaults` suite so test
+/// cases never see each other's state and never touch the real user's preferences.
+/// `AppSettings.shared` can only ever be constructed once — a feature with real
+/// enable/merge/seed/reload state machines needs far more instances than that to test.
+func freshTestSettings() -> (settings: AppSettings, defaults: UserDefaults) {
+    let suiteName = "aliasbar-settings-tests-\(UUID().uuidString)"
+    let defaults = UserDefaults(suiteName: suiteName)!
+    return (AppSettings(defaults: defaults), defaults)
+}
+
+// --- The boundary is exactly the seven cases the interview froze (assumption A2) ---
+
+check("RoamedKey is exactly the seven keys the interview froze",
+      Set(SettingsSync.RoamedKey.allCases.map(\.rawValue)) == Set([
+          "appearance", "searchScope", "sortOrder", "defaultView",
+          "resultLimit", "enterAction", "afterAction",
+      ]))
+
+func testBoundaryNeverLeaksLocalOnlyKeys() {
+    let (settings, _) = freshTestSettings()
+    // Every local-only property gets a non-default value before sync is ever turned
+    // on, so seed-on-enable — which walks and writes every roamed key — has something
+    // to leak if the boundary table were wrong.
+    settings.rcPathOverride = "/tmp/custom.zshrc"
+    settings.hotkey = HotkeyCombo(keyCode: 99, modifiers: 0x100)
+    settings.hotkeyEnabled = false
+    settings.onboardingComplete = true
+    settings.hasEverPasted = true
+    settings.clipboardMonitoring = false
+    settings.clipboardPersistence = true
+    settings.clipboardInSyncFile = true
+    settings.boardDensity = .dense
+    settings.motionLevel = .none
+    settings.presentationStyle = .menuBar
+    settings.followsSystemAppearance = true
+    settings.showFunctions = false
+    settings.showAliases = false
+
+    let dir = sharedStoreDir()
+    let url = URL(fileURLWithPath: "\(dir)/settings.json")
+    settings.syncFileURL = url // seed-on-enable: the file is absent
+
+    guard case .success(let doc) = SharedDocumentStore(url: url).read() else {
+        check("boundary test: the seeded document is readable", false)
+        return
+    }
+    let roamedRaw = Set(SettingsSync.RoamedKey.allCases.map(\.rawValue))
+    check("only roamed keys are present in the encoded document",
+          Set(doc.settings.keys).isSubset(of: roamedRaw),
+          "found \(Set(doc.settings.keys).subtracting(roamedRaw))")
+    for localOnly in SettingsSync.LocalOnlyKey.allCases {
+        check("local-only key '\(localOnly.rawValue)' never appears in the encoded document, even set",
+              doc.settings[localOnly.rawValue] == nil)
+    }
+    check("all seven roamed keys were seeded", Set(doc.settings.keys) == roamedRaw)
+}
+testBoundaryNeverLeaksLocalOnlyKeys()
+
+// --- Seed-on-enable: an absent file adopts every current local value -------
+
+func testSeedOnEnableWritesCurrentLocalState() {
+    let (settings, _) = freshTestSettings()
+    settings.searchScope = .name
+    settings.sortOrder = .alphabetical
+    settings.defaultView = .board
+    settings.resultLimit = 9
+    settings.enterAction = .copyCommand
+    settings.afterAction = .stayOpen
+    settings.appearance = Appearance.clay
+    settings.savedPresets = [Appearance.clay.copy(named: "Mine", id: "mine-1")]
+
+    let dir = sharedStoreDir()
+    let url = URL(fileURLWithPath: "\(dir)/settings.json")
+    settings.syncFileURL = url
+
+    guard case .success(let doc) = SharedDocumentStore(url: url).read() else {
+        check("seed-on-enable: document is readable", false)
+        return
+    }
+    check("seeded searchScope", doc.settings["searchScope"]?.value == .string("name"))
+    check("seeded sortOrder", doc.settings["sortOrder"]?.value == .string("alphabetical"))
+    check("seeded defaultView", doc.settings["defaultView"]?.value == .string("board"))
+    check("seeded resultLimit", doc.settings["resultLimit"]?.value == .number(9))
+    check("seeded enterAction", doc.settings["enterAction"]?.value == .string("copyCommand"))
+    check("seeded afterAction", doc.settings["afterAction"]?.value == .string("stayOpen"))
+    let seededAppearance: Appearance? = {
+        guard case .string(let json) = doc.settings["appearance"]?.value,
+              let data = json.data(using: .utf8) else { return nil }
+        return try? JSONDecoder.aliasBarDocument.decode(Appearance.self, from: data)
+    }()
+    check("seeded appearance decodes back to Clay", seededAppearance == Appearance.clay)
+    check("seeded preset is present and live",
+          doc.records["presets"]?.contains { $0.id == "mine-1" && !$0.deleted } == true)
+}
+testSeedOnEnableWritesCurrentLocalState()
+
+// --- Merge-on-enable: an existing valid file wins, gaps get filled from local ---
+
+func testMergeOnEnablePullsDocAndSeedsGaps() {
+    let dir = sharedStoreDir()
+    let url = URL(fileURLWithPath: "\(dir)/settings.json")
+    let seedStore = SharedDocumentStore(url: url)
+    let t0 = Date(timeIntervalSince1970: 1_700_000_000)
+    _ = try! seedStore.setSetting(.string(SortOrder.alphabetical.rawValue),
+                                  forKey: "sortOrder", modifiedAt: t0)
+    _ = try! seedStore.upsert(Appearance.ultramarine.copy(named: "Shared", id: "shared-1"),
+                              id: "shared-1", in: "presets", modifiedAt: t0)
+    // Deliberately no "resultLimit" key: this document predates that setting, and a
+    // gap like that must get filled from local rather than staying absent forever.
+
+    let (settings, _) = freshTestSettings()
+    settings.sortOrder = .usage // pre-existing local value the doc should override
+    settings.resultLimit = 7 // absent from the doc — should get pushed up after merge
+    settings.syncFileURL = url
+
+    check("merge adopts the doc's pre-existing sortOrder over the local value",
+          settings.sortOrder == .alphabetical)
+    check("merge adopts the doc's pre-existing preset",
+          settings.savedPresets.contains { $0.id == "shared-1" })
+
+    guard case .success(let doc) = seedStore.read() else {
+        check("post-merge document is readable", false)
+        return
+    }
+    check("a roamed key the original doc lacked is seeded up from local after merging",
+          doc.settings["resultLimit"]?.value == .number(7))
+}
+testMergeOnEnablePullsDocAndSeedsGaps()
+
+// --- Enabling against a corrupt file fails safely: nothing lost, nothing clobbered ---
+
+func testEnableAgainstCorruptFileFailsSafely() {
+    let (settings, _) = freshTestSettings()
+    settings.sortOrder = .alphabetical
+    let dir = sharedStoreDir()
+    let url = URL(fileURLWithPath: "\(dir)/settings.json")
+    let corruptBefore = "{ this is not valid json"
+    try! corruptBefore.write(to: url, atomically: true, encoding: .utf8)
+
+    settings.syncFileURL = url
+
+    check("enabling against a corrupt file surfaces an error", settings.syncError != nil)
+    check("local settings are untouched when the chosen file is corrupt",
+          settings.sortOrder == .alphabetical)
+    check("the corrupt file itself is untouched", read(url.path) == corruptBefore)
+}
+testEnableAgainstCorruptFileFailsSafely()
+
+// --- External change application (a second writer, or another Mac) -----------
+
+func testExternalChangeIsApplied() {
+    let dir = sharedStoreDir()
+    let url = URL(fileURLWithPath: "\(dir)/settings.json")
+    let (settings, _) = freshTestSettings()
+    settings.syncFileURL = url // seeds a fresh file
+
+    // A second writer changes the file directly, entirely bypassing this process's
+    // coordinator — the same shape as another Mac, or a sync daemon, or a hand edit.
+    let externalStore = SharedDocumentStore(url: url)
+    _ = try! externalStore.setSetting(.string(ViewMode.manage.rawValue), forKey: "defaultView",
+                                      modifiedAt: Date())
+    _ = try! externalStore.upsert(Appearance.graphite.copy(named: "FromOtherMac", id: "other-1"),
+                                  id: "other-1", in: "presets", modifiedAt: Date())
+
+    settings.reloadSyncNow()
+
+    check("an external setting change is applied to local AppSettings",
+          settings.defaultView == .manage)
+    check("an external preset is adopted", settings.savedPresets.contains { $0.id == "other-1" })
+}
+testExternalChangeIsApplied()
+
+// --- No-op guard: reapplying an unchanged document must not manufacture churn ---
+
+func testNoOpReloadDoesNotRewriteUnchangedKeys() {
+    let dir = sharedStoreDir()
+    let url = URL(fileURLWithPath: "\(dir)/settings.json")
+    let (settings, _) = freshTestSettings()
+    settings.syncFileURL = url
+    settings.defaultView = .board // a genuine local edit; pushes with a fresh modifiedAt
+
+    guard case .success(let before) = SharedDocumentStore(url: url).read(),
+          let modifiedAtBefore = before.settings["defaultView"]?.modifiedAt else {
+        check("no-op guard test: pre-state is readable", false)
+        return
+    }
+    settings.reloadSyncNow() // re-reads identical content; must not re-write it
+    guard case .success(let after) = SharedDocumentStore(url: url).read(),
+          let modifiedAtAfter = after.settings["defaultView"]?.modifiedAt else {
+        check("no-op guard test: post-state is readable", false)
+        return
+    }
+    check("reapplying an unchanged remote value does not bump modifiedAt (no observer churn)",
+          modifiedAtBefore == modifiedAtAfter)
+}
+testNoOpReloadDoesNotRewriteUnchangedKeys()
+
+// --- Preset dual-write: old UserDefaults key AND the shared document both update ---
+
+func testPresetDualWrite() {
+    let (settings, defaults) = freshTestSettings()
+    let dir = sharedStoreDir()
+    let url = URL(fileURLWithPath: "\(dir)/settings.json")
+    settings.syncFileURL = url
+
+    let newPreset = Appearance.ultramarine.copy(named: "Dual", id: "dual-1")
+    settings.savedPresets.append(newPreset)
+
+    guard let data = defaults.data(forKey: "savedPresets"),
+          let decodedFromDefaults = try? JSONDecoder().decode([Appearance].self, from: data) else {
+        check("dual-write: the old UserDefaults key still holds savedPresets", false)
+        return
+    }
+    check("the new preset lands in the old UserDefaults key, unchanged in shape",
+          decodedFromDefaults.contains { $0.id == "dual-1" })
+
+    guard case .success(let doc) = SharedDocumentStore(url: url).read() else {
+        check("dual-write: the shared document is readable", false)
+        return
+    }
+    check("the new preset also lands in the shared document",
+          doc.records["presets"]?.contains { $0.id == "dual-1" && !$0.deleted } == true)
+}
+testPresetDualWrite()
+
+// --- Disabling stops writes but never touches the file that's already there ---
+
+func testDisableStopsWritesButLeavesFileIntact() {
+    let (settings, _) = freshTestSettings()
+    let dir = sharedStoreDir()
+    let url = URL(fileURLWithPath: "\(dir)/settings.json")
+    settings.syncFileURL = url
+    settings.sortOrder = .alphabetical // one genuine write-through while enabled
+
+    let bytesWhileEnabled = try! Data(contentsOf: url)
+
+    settings.syncFileURL = nil
+    settings.sortOrder = .fileOrder // further local edits after disabling
+    settings.defaultView = .manage
+    settings.appearance = Appearance.clay
+
+    check("the sync file is byte-for-byte untouched after disabling, despite further local edits",
+          (try? Data(contentsOf: url)) == bytesWhileEnabled)
+}
+testDisableStopsWritesButLeavesFileIntact()
+
+// --- Conflict file detection, for the Settings UI's non-blocking warning row ---
+
+func testConflictFileDetection() {
+    let dir = sharedStoreDir()
+    let url = URL(fileURLWithPath: "\(dir)/settings.json")
+    try! "not json at all".write(to: url, atomically: true, encoding: .utf8)
+    // Forces SharedDocumentStore to preserve a conflict copy, the same way a real
+    // corrupt-file-at-the-chosen-path scenario would.
+    let store = SharedDocumentStore(url: url)
+    _ = try? store.setSetting(.bool(true), forKey: "x", modifiedAt: Date())
+    check("conflictFiles finds the copy SharedDocumentStore preserved",
+          !SettingsSync.conflictFiles(near: url).isEmpty)
+
+    let cleanDir = sharedStoreDir()
+    let cleanURL = URL(fileURLWithPath: "\(cleanDir)/settings.json")
+    check("conflictFiles is empty when there are no conflicts",
+          SettingsSync.conflictFiles(near: cleanURL).isEmpty)
+}
+testConflictFileDetection()
+
+// --- Appearance round-trips through a SettingValue, independent of any store ---
+
+func testAppearanceRoundTripsThroughSettingValue() {
+    let (source, _) = freshTestSettings()
+    source.appearance = Appearance.ultramarine
+    guard let value = SettingsSync.settingValue(for: .appearance, in: source) else {
+        check("SettingsSync encodes Appearance as a SettingValue", false)
+        return
+    }
+    let (destination, _) = freshTestSettings()
+    SettingsSync.apply(.appearance, value: value, to: destination)
+    check("SettingsSync round-trips Appearance through a SettingValue",
+          destination.appearance == Appearance.ultramarine)
+}
+testAppearanceRoundTripsThroughSettingValue()
+
+// ---------------------------------------------------------------------------
 print("\n" + String(repeating: "-", count: 60))
 print("\(passes) passed, \(failures) failed")
 exit(failures == 0 ? 0 : 1)
