@@ -22,6 +22,33 @@ enum AppPaths {
         )
     }
 
+    /// Where `PromptStore` looks for prompt files. `ALIASBAR_PROMPTS_DIR` exists
+    /// purely for testability — there is no per-app setting for this, unlike the rc
+    /// path, so tests are the only caller that ever needs the override.
+    static var promptsDirectory: String {
+        CorePaths.resolvePromptsDirectory(
+            environmentOverride: ProcessInfo.processInfo.environment["ALIASBAR_PROMPTS_DIR"],
+            homeDirectory: NSHomeDirectory()
+        )
+    }
+
+    /// Where `PromptUsageCounter` records invocation counts: always a sibling of
+    /// whatever `promptsDirectory` resolves to, so a test pointing `ALIASBAR_PROMPTS_DIR`
+    /// at a fixture also keeps usage recording out of the real `~/.aliasbar` — a
+    /// second, independent override here would let a test forget to set it and
+    /// silently write to the real file.
+    static var promptUsagePath: String {
+        (promptsDirectory as NSString).deletingLastPathComponent + "/usage.json"
+    }
+
+    /// Where `SuggestionIgnoreStore` records dismissed suggestions.
+    static var suggestionIgnoresPath: String {
+        CorePaths.resolveSuggestionIgnoresPath(
+            environmentOverride: ProcessInfo.processInfo.environment["ALIASBAR_SUGGESTION_IGNORES"],
+            homeDirectory: NSHomeDirectory()
+        )
+    }
+
     // Existing call sites (including WriterTests.swift) reach the resolvers through
     // AppPaths. Kept as thin forwarders so nothing outside this file has to change,
     // while CorePaths remains the one place the actual precedence logic lives.

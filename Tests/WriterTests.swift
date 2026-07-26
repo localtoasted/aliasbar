@@ -4724,6 +4724,1118 @@ for forbiddenSymbol in [
 }
 
 // ---------------------------------------------------------------------------
+print("\n37. Context detection + dialect ranking (PRE-259)")
+
+// --- ContextDetector: the whole privacy boundary is this table -------------
+// A bundle ID in, a guess out — nothing here ever looks at a tab, a title, or
+// anything accessibility could see.
+
+let dialectTerminalBundleIDs: [String: String] = [
+    "com.googlecode.iterm2": "iTerm2",
+    "com.apple.Terminal": "Terminal",
+    "dev.warp.Warp-Stable": "Warp",
+    "net.kovidgoyal.kitty": "kitty",
+    "com.github.wez.wezterm": "WezTerm",
+    "org.alacritty": "Alacritty",
+    "com.mitchellh.ghostty": "Ghostty",
+]
+for (bundleID, name) in dialectTerminalBundleIDs {
+    let guess = ContextDetector.guess(forBundleID: bundleID)
+    check("terminal \(name) guesses shell", guess.dialect == .shell)
+    check("terminal \(name) chip reads \"over \(name) → shell first\"",
+          guess.chip == "over \(name) → shell first")
+}
+
+let dialectAINativeBundleIDs: [String: String] = [
+    "com.anthropic.claudefordesktop": "Claude",
+    "com.openai.chat": "ChatGPT",
+    "com.todesktop.230313mzl4w4u92": "Cursor",
+]
+for (bundleID, name) in dialectAINativeBundleIDs {
+    let guess = ContextDetector.guess(forBundleID: bundleID)
+    check("AI-native \(name) guesses prompt", guess.dialect == .prompt)
+    check("AI-native \(name) chip reads \"over \(name) → prompt first\"",
+          guess.chip == "over \(name) → prompt first")
+}
+
+let dialectBrowserBundleIDs: [String: String] = [
+    "com.google.Chrome": "Chrome",
+    "com.apple.Safari": "Safari",
+    "org.mozilla.firefox": "Firefox",
+    "company.thebrowser.Browser": "Arc",
+    "com.brave.Browser": "Brave",
+    "com.microsoft.edgemac": "Edge",
+]
+for (bundleID, name) in dialectBrowserBundleIDs {
+    let guess = ContextDetector.guess(forBundleID: bundleID)
+    check("browser \(name) guesses no dialect (a tab could be either kind of work)",
+          guess.dialect == nil)
+    check("browser \(name) chip names it and points at ⇥",
+          guess.chip == "\(name) — can't see the tab · ⇥ flips")
+}
+
+check("an unrecognized bundle ID guesses nothing",
+      ContextDetector.guess(forBundleID: "com.example.SomeRandomApp").dialect == nil)
+check("an unrecognized bundle ID has no chip at all",
+      ContextDetector.guess(forBundleID: "com.example.SomeRandomApp").chip == nil)
+check("a nil bundle ID (no previous app remembered) guesses nothing",
+      ContextDetector.guess(forBundleID: nil).dialect == nil)
+check("a nil bundle ID has no chip",
+      ContextDetector.guess(forBundleID: nil).chip == nil)
+check("guess(for:) with no running application matches guess(forBundleID: nil)",
+      ContextDetector.guess(for: nil).dialect == nil && ContextDetector.guess(for: nil).chip == nil)
+
+// --- ShortcutRanker: fixtures -------------------------------------------------
+
+func dialectShellShortcut(name: String, command: String = "echo hi", comment: String? = nil,
+                          uses: Int = 0) -> Shortcut {
+    var shortcut = Shortcut(entry: ShellEntry(kind: .alias, name: name, command: command,
+                                              comment: comment,
+                                              sourceFile: "/tmp/pre259-fixture.zshrc",
+                                              line: 1, managed: true))
+    shortcut.uses = uses
+    return shortcut
+}
+
+func dialectPromptShortcut(name: String, description: String? = nil, body: String = "body",
+                           uses: Int = 0) -> Shortcut {
+    var frontmatter: PromptFrontmatter?
+    if let description {
+        frontmatter = PromptFrontmatter.empty().setting("description", to: description)
+    }
+    var shortcut = Shortcut(prompt: Prompt(name: name, frontmatter: frontmatter, body: body))
+    shortcut.uses = uses
+    return shortcut
+}
+
+// --- Both kinds are always searchable: a boost, never a wall -----------------
+
+let boostShell = dialectShellShortcut(name: "zzz-shell")
+let boostPrompt = dialectPromptShortcut(name: "aaa-prompt")
+let boostPool = [boostShell, boostPrompt]
+
+let rankedEmptyShellDialect = ShortcutRanker.rank(boostPool, query: "", scope: .everything, dialect: .shell)
+check("empty query: shell dialect boosts the shell shortcut to the front",
+      rankedEmptyShellDialect.first?.name == "zzz-shell")
+check("empty query: the boost never removes the other kind from the list",
+      Set(rankedEmptyShellDialect.map(\.name)) == Set(boostPool.map(\.name)))
+
+let rankedEmptyPromptDialect = ShortcutRanker.rank(boostPool, query: "", scope: .everything, dialect: .prompt)
+check("empty query: prompt dialect boosts the prompt shortcut to the front",
+      rankedEmptyPromptDialect.first?.name == "aaa-prompt")
+
+// --- "Two typed letters override the guess" ---------------------------------
+
+let oneCharShell = dialectShellShortcut(name: "zshell")
+let oneCharPrompt = dialectPromptShortcut(name: "zprompt")
+let oneCharPool = [oneCharShell, oneCharPrompt]
+// Both names share the same one-character prefix, so absent the boost they would
+// tie on tier and on usage — the only thing that can be deciding order here is dialect.
+let rankedOneCharShellDialect = ShortcutRanker.rank(oneCharPool, query: "z", scope: .everything, dialect: .shell)
+check("at one typed character, the boost still applies",
+      rankedOneCharShellDialect.first?.name == "zshell")
+let rankedOneCharPromptDialect = ShortcutRanker.rank(oneCharPool, query: "z", scope: .everything, dialect: .prompt)
+check("at one typed character, flipping dialect flips which one leads",
+      rankedOneCharPromptDialect.first?.name == "zprompt")
+
+let twoCharShell = dialectShellShortcut(name: "abshel")
+let twoCharPrompt = dialectPromptShortcut(name: "abprom")
+let twoCharPool = [twoCharShell, twoCharPrompt]
+// Equal tier (both a prefix match), equal usage, equal name length — with the boost
+// off, only the alphabet is left to decide, and "abprom" < "abshel".
+let rankedTwoCharShellDialect = ShortcutRanker.rank(twoCharPool, query: "ab", scope: .everything, dialect: .shell)
+let rankedTwoCharPromptDialect = ShortcutRanker.rank(twoCharPool, query: "ab", scope: .everything, dialect: .prompt)
+check("at two typed characters, dialect no longer affects order",
+      rankedTwoCharShellDialect.map(\.name) == rankedTwoCharPromptDialect.map(\.name))
+check("at two typed characters, order falls back to relevance/alphabetical only",
+      rankedTwoCharShellDialect.map(\.name) == ["abprom", "abshel"])
+
+// --- Usage breaks ties within a tier, independent of dialect -----------------
+
+let usageTieShell = dialectShellShortcut(name: "deploy-shell", uses: 5)
+let usageTiePrompt = dialectPromptShortcut(name: "deploy-prompt", uses: 50)
+let usageTiePool = [usageTieShell, usageTiePrompt]
+// "deploy" is 6 characters, so the boost is already off; both names prefix-match it
+// at the same tier, leaving usage as the only tiebreaker.
+let rankedByUsage = ShortcutRanker.rank(usageTiePool, query: "deploy", scope: .everything, dialect: .shell)
+check("usage breaks a tier tie toward the prompt when it has more uses",
+      rankedByUsage.first?.name == "deploy-prompt")
+
+let usageTieShell2 = dialectShellShortcut(name: "sync-shell", uses: 80)
+let usageTiePrompt2 = dialectPromptShortcut(name: "sync-prompt", uses: 3)
+let rankedByUsage2 = ShortcutRanker.rank([usageTieShell2, usageTiePrompt2], query: "sync",
+                                        scope: .everything, dialect: .prompt)
+check("usage breaks a tier tie toward the shell entry even when dialect favors prompt",
+      rankedByUsage2.first?.name == "sync-shell")
+
+// --- Shell tier mirrors Ranker's scope rules; prompts ignore scope entirely --
+
+let scopedShell = dialectShellShortcut(name: "xx", command: "special-command-token",
+                                       comment: "special-comment-token")
+let scopedPrompt = dialectPromptShortcut(name: "yy", description: "special-comment-token",
+                                         body: "special-command-token")
+let scopedPool = [scopedShell, scopedPrompt]
+let scopedByName = ShortcutRanker.rank(scopedPool, query: "special", scope: .name, dialect: .shell)
+check(".name scope excludes a shell shortcut matched only in its comment/command",
+      !scopedByName.contains { $0.name == "xx" })
+check("prompts are never scope-gated: description/body still match under .name scope",
+      scopedByName.contains { $0.name == "yy" })
+
+// --- Shortcut.shellEntry: the reverse of Shortcut(entry:) --------------------
+
+let dialectOriginalEntry = ShellEntry(kind: .function, name: "myfunc", command: "echo hi",
+                                      comment: "a function", sourceFile: "/tmp/pre259-x.zshrc",
+                                      line: 12, managed: true)
+check("Shortcut(entry:).shellEntry round-trips a function",
+      Shortcut(entry: dialectOriginalEntry).shellEntry == dialectOriginalEntry)
+check("a prompt-kind Shortcut has no shellEntry to recover",
+      Shortcut(prompt: Prompt(name: "p", frontmatter: nil, body: "b")).shellEntry == nil)
+
+// --- AppState integration: prompt-dir override, dialect flip, bucket gating -
+
+// `AppSettings.shared` is a true process-wide singleton (`private init()`), and its
+// backing UserDefaults suite is decided on first touch by `ALIASBAR_DEFAULTS_SUITE`.
+// Nothing earlier in this test binary touches `AppSettings`, so setting the env var
+// here — before the first reference below — keeps every setting this section reads
+// or writes inside a throwaway suite, never the real one.
+setenv("ALIASBAR_DEFAULTS_SUITE", "aliasbar-tests-pre259-\(UUID().uuidString)", 1)
+
+let dialectSandbox = "\(sandbox)/pre259"
+try! FileManager.default.createDirectory(atPath: dialectSandbox, withIntermediateDirectories: true)
+
+let dialectRcPath = "\(dialectSandbox)/zshrc"
+try! """
+# >>> aliasbar managed block >>>
+# Edited by AliasBar. Anything outside these markers is never touched.
+# find me by name
+alias findme='echo findme'
+# <<< aliasbar managed block <<<
+""".write(toFile: dialectRcPath, atomically: true, encoding: .utf8)
+
+let dialectHistoryPath = "\(dialectSandbox)/history"
+try! "echo findme\n".write(toFile: dialectHistoryPath, atomically: true, encoding: .utf8)
+
+let dialectPromptsDirURL = URL(fileURLWithPath: "\(dialectSandbox)/prompts")
+try! FileManager.default.createDirectory(at: dialectPromptsDirURL, withIntermediateDirectories: true)
+writeRawPromptFile(
+    promptFixture(["---", "schema: 1", "description: a stored prompt", "---", "Prompt body.", ""]),
+    name: "storedprompt", in: dialectPromptsDirURL)
+
+// Never the app's real `~/.zshrc`, `~/.zsh_history`, or `~/.aliasbar/prompts` — all
+// three overrides point at this section's own sandbox fixtures.
+setenv("ALIASBAR_ZSHRC", dialectRcPath, 1)
+setenv("ALIASBAR_HISTORY", dialectHistoryPath, 1)
+setenv("ALIASBAR_PROMPTS_DIR", dialectPromptsDirURL.path, 1)
+
+let dialectSettings = AppSettings.shared
+let dialectStore = EntryStore()
+let dialectState = AppState(store: dialectStore, settings: dialectSettings)
+dialectState.prepareForShow()
+
+check("prompt-dir env override: prepareForShow's scan picks up the fixture prompt",
+      dialectState.findResults.contains { $0.name == "storedprompt" && $0.kind == .prompt })
+check("the shell fixture is in the same union pool as the fixture prompt",
+      dialectState.findResults.contains { $0.name == "findme" })
+
+dialectState.query = "findm"
+let dialectBefore = dialectState.dialect
+dialectState.flipDialect()
+check("flipDialect toggles away from the starting dialect", dialectState.dialect != dialectBefore)
+check("flipDialect preserves the query", dialectState.query == "findm")
+dialectState.flipDialect()
+check("flipDialect toggles back to the original dialect", dialectState.dialect == dialectBefore)
+
+dialectState.mode = .board
+let dialectBoardDialect = dialectState.dialect
+dialectState.flipDialect()
+check("flipDialect is a no-op outside FIND", dialectState.dialect == dialectBoardDialect)
+dialectState.mode = .find
+
+dialectState.query = ""
+dialectState.bucket = .functions
+check("a non-.all bucket excludes prompts from FIND's pool (bucket is a shell-only facet)",
+      !dialectState.findResults.contains { $0.kind == .prompt })
+dialectState.bucket = .all
+check("bucket .all restores prompts to FIND's pool",
+      dialectState.findResults.contains { $0.kind == .prompt })
+print("\n37. Settings roaming via SharedDocumentStore (PRE-252-SETTINGS)")
+
+/// A fresh `AppSettings`, backed by its own throwaway `UserDefaults` suite so test
+/// cases never see each other's state and never touch the real user's preferences.
+/// `AppSettings.shared` can only ever be constructed once — a feature with real
+/// enable/merge/seed/reload state machines needs far more instances than that to test.
+func freshTestSettings() -> (settings: AppSettings, defaults: UserDefaults) {
+    let suiteName = "aliasbar-settings-tests-\(UUID().uuidString)"
+    let defaults = UserDefaults(suiteName: suiteName)!
+    return (AppSettings(defaults: defaults), defaults)
+}
+
+// --- The boundary is exactly the seven cases the interview froze (assumption A2) ---
+
+check("RoamedKey is exactly the seven keys the interview froze",
+      Set(SettingsSync.RoamedKey.allCases.map(\.rawValue)) == Set([
+          "appearance", "searchScope", "sortOrder", "defaultView",
+          "resultLimit", "enterAction", "afterAction",
+      ]))
+
+func testBoundaryNeverLeaksLocalOnlyKeys() {
+    let (settings, _) = freshTestSettings()
+    // Every local-only property gets a non-default value before sync is ever turned
+    // on, so seed-on-enable — which walks and writes every roamed key — has something
+    // to leak if the boundary table were wrong.
+    settings.rcPathOverride = "/tmp/custom.zshrc"
+    settings.hotkey = HotkeyCombo(keyCode: 99, modifiers: 0x100)
+    settings.hotkeyEnabled = false
+    settings.onboardingComplete = true
+    settings.hasEverPasted = true
+    settings.clipboardMonitoring = false
+    settings.clipboardPersistence = true
+    settings.clipboardInSyncFile = true
+    settings.boardDensity = .dense
+    settings.motionLevel = .none
+    settings.presentationStyle = .menuBar
+    settings.followsSystemAppearance = true
+    settings.showFunctions = false
+    settings.showAliases = false
+
+    let dir = sharedStoreDir()
+    let url = URL(fileURLWithPath: "\(dir)/settings.json")
+    settings.syncFileURL = url // seed-on-enable: the file is absent
+
+    guard case .success(let doc) = SharedDocumentStore(url: url).read() else {
+        check("boundary test: the seeded document is readable", false)
+        return
+    }
+    let roamedRaw = Set(SettingsSync.RoamedKey.allCases.map(\.rawValue))
+    check("only roamed keys are present in the encoded document",
+          Set(doc.settings.keys).isSubset(of: roamedRaw),
+          "found \(Set(doc.settings.keys).subtracting(roamedRaw))")
+    for localOnly in SettingsSync.LocalOnlyKey.allCases {
+        check("local-only key '\(localOnly.rawValue)' never appears in the encoded document, even set",
+              doc.settings[localOnly.rawValue] == nil)
+    }
+    check("all seven roamed keys were seeded", Set(doc.settings.keys) == roamedRaw)
+}
+testBoundaryNeverLeaksLocalOnlyKeys()
+
+// --- Seed-on-enable: an absent file adopts every current local value -------
+
+func testSeedOnEnableWritesCurrentLocalState() {
+    let (settings, _) = freshTestSettings()
+    settings.searchScope = .name
+    settings.sortOrder = .alphabetical
+    settings.defaultView = .board
+    settings.resultLimit = 9
+    settings.enterAction = .copyCommand
+    settings.afterAction = .stayOpen
+    settings.appearance = Appearance.clay
+    settings.savedPresets = [Appearance.clay.copy(named: "Mine", id: "mine-1")]
+
+    let dir = sharedStoreDir()
+    let url = URL(fileURLWithPath: "\(dir)/settings.json")
+    settings.syncFileURL = url
+
+    guard case .success(let doc) = SharedDocumentStore(url: url).read() else {
+        check("seed-on-enable: document is readable", false)
+        return
+    }
+    check("seeded searchScope", doc.settings["searchScope"]?.value == .string("name"))
+    check("seeded sortOrder", doc.settings["sortOrder"]?.value == .string("alphabetical"))
+    check("seeded defaultView", doc.settings["defaultView"]?.value == .string("board"))
+    check("seeded resultLimit", doc.settings["resultLimit"]?.value == .number(9))
+    check("seeded enterAction", doc.settings["enterAction"]?.value == .string("copyCommand"))
+    check("seeded afterAction", doc.settings["afterAction"]?.value == .string("stayOpen"))
+    let seededAppearance: Appearance? = {
+        guard case .string(let json) = doc.settings["appearance"]?.value,
+              let data = json.data(using: .utf8) else { return nil }
+        return try? JSONDecoder.aliasBarDocument.decode(Appearance.self, from: data)
+    }()
+    check("seeded appearance decodes back to Clay", seededAppearance == Appearance.clay)
+    check("seeded preset is present and live",
+          doc.records["presets"]?.contains { $0.id == "mine-1" && !$0.deleted } == true)
+}
+testSeedOnEnableWritesCurrentLocalState()
+
+// --- Merge-on-enable: an existing valid file wins, gaps get filled from local ---
+
+func testMergeOnEnablePullsDocAndSeedsGaps() {
+    let dir = sharedStoreDir()
+    let url = URL(fileURLWithPath: "\(dir)/settings.json")
+    let seedStore = SharedDocumentStore(url: url)
+    let t0 = Date(timeIntervalSince1970: 1_700_000_000)
+    _ = try! seedStore.setSetting(.string(SortOrder.alphabetical.rawValue),
+                                  forKey: "sortOrder", modifiedAt: t0)
+    _ = try! seedStore.upsert(Appearance.ultramarine.copy(named: "Shared", id: "shared-1"),
+                              id: "shared-1", in: "presets", modifiedAt: t0)
+    // Deliberately no "resultLimit" key: this document predates that setting, and a
+    // gap like that must get filled from local rather than staying absent forever.
+
+    let (settings, _) = freshTestSettings()
+    settings.sortOrder = .usage // pre-existing local value the doc should override
+    settings.resultLimit = 7 // absent from the doc — should get pushed up after merge
+    settings.syncFileURL = url
+
+    check("merge adopts the doc's pre-existing sortOrder over the local value",
+          settings.sortOrder == .alphabetical)
+    check("merge adopts the doc's pre-existing preset",
+          settings.savedPresets.contains { $0.id == "shared-1" })
+
+    guard case .success(let doc) = seedStore.read() else {
+        check("post-merge document is readable", false)
+        return
+    }
+    check("a roamed key the original doc lacked is seeded up from local after merging",
+          doc.settings["resultLimit"]?.value == .number(7))
+}
+testMergeOnEnablePullsDocAndSeedsGaps()
+
+// --- Enabling against a corrupt file fails safely: nothing lost, nothing clobbered ---
+
+func testEnableAgainstCorruptFileFailsSafely() {
+    let (settings, _) = freshTestSettings()
+    settings.sortOrder = .alphabetical
+    let dir = sharedStoreDir()
+    let url = URL(fileURLWithPath: "\(dir)/settings.json")
+    let corruptBefore = "{ this is not valid json"
+    try! corruptBefore.write(to: url, atomically: true, encoding: .utf8)
+
+    settings.syncFileURL = url
+
+    check("enabling against a corrupt file surfaces an error", settings.syncError != nil)
+    check("local settings are untouched when the chosen file is corrupt",
+          settings.sortOrder == .alphabetical)
+    check("the corrupt file itself is untouched", read(url.path) == corruptBefore)
+}
+testEnableAgainstCorruptFileFailsSafely()
+
+// --- External change application (a second writer, or another Mac) -----------
+
+func testExternalChangeIsApplied() {
+    let dir = sharedStoreDir()
+    let url = URL(fileURLWithPath: "\(dir)/settings.json")
+    let (settings, _) = freshTestSettings()
+    settings.syncFileURL = url // seeds a fresh file
+
+    // A second writer changes the file directly, entirely bypassing this process's
+    // coordinator — the same shape as another Mac, or a sync daemon, or a hand edit.
+    let externalStore = SharedDocumentStore(url: url)
+    _ = try! externalStore.setSetting(.string(ViewMode.manage.rawValue), forKey: "defaultView",
+                                      modifiedAt: Date())
+    _ = try! externalStore.upsert(Appearance.graphite.copy(named: "FromOtherMac", id: "other-1"),
+                                  id: "other-1", in: "presets", modifiedAt: Date())
+
+    settings.reloadSyncNow()
+
+    check("an external setting change is applied to local AppSettings",
+          settings.defaultView == .manage)
+    check("an external preset is adopted", settings.savedPresets.contains { $0.id == "other-1" })
+}
+testExternalChangeIsApplied()
+
+// --- No-op guard: reapplying an unchanged document must not manufacture churn ---
+
+func testNoOpReloadDoesNotRewriteUnchangedKeys() {
+    let dir = sharedStoreDir()
+    let url = URL(fileURLWithPath: "\(dir)/settings.json")
+    let (settings, _) = freshTestSettings()
+    settings.syncFileURL = url
+    settings.defaultView = .board // a genuine local edit; pushes with a fresh modifiedAt
+
+    guard case .success(let before) = SharedDocumentStore(url: url).read(),
+          let modifiedAtBefore = before.settings["defaultView"]?.modifiedAt else {
+        check("no-op guard test: pre-state is readable", false)
+        return
+    }
+    settings.reloadSyncNow() // re-reads identical content; must not re-write it
+    guard case .success(let after) = SharedDocumentStore(url: url).read(),
+          let modifiedAtAfter = after.settings["defaultView"]?.modifiedAt else {
+        check("no-op guard test: post-state is readable", false)
+        return
+    }
+    check("reapplying an unchanged remote value does not bump modifiedAt (no observer churn)",
+          modifiedAtBefore == modifiedAtAfter)
+}
+testNoOpReloadDoesNotRewriteUnchangedKeys()
+
+// --- Preset dual-write: old UserDefaults key AND the shared document both update ---
+
+func testPresetDualWrite() {
+    let (settings, defaults) = freshTestSettings()
+    let dir = sharedStoreDir()
+    let url = URL(fileURLWithPath: "\(dir)/settings.json")
+    settings.syncFileURL = url
+
+    let newPreset = Appearance.ultramarine.copy(named: "Dual", id: "dual-1")
+    settings.savedPresets.append(newPreset)
+
+    guard let data = defaults.data(forKey: "savedPresets"),
+          let decodedFromDefaults = try? JSONDecoder().decode([Appearance].self, from: data) else {
+        check("dual-write: the old UserDefaults key still holds savedPresets", false)
+        return
+    }
+    check("the new preset lands in the old UserDefaults key, unchanged in shape",
+          decodedFromDefaults.contains { $0.id == "dual-1" })
+
+    guard case .success(let doc) = SharedDocumentStore(url: url).read() else {
+        check("dual-write: the shared document is readable", false)
+        return
+    }
+    check("the new preset also lands in the shared document",
+          doc.records["presets"]?.contains { $0.id == "dual-1" && !$0.deleted } == true)
+}
+testPresetDualWrite()
+
+// --- Disabling stops writes but never touches the file that's already there ---
+
+func testDisableStopsWritesButLeavesFileIntact() {
+    let (settings, _) = freshTestSettings()
+    let dir = sharedStoreDir()
+    let url = URL(fileURLWithPath: "\(dir)/settings.json")
+    settings.syncFileURL = url
+    settings.sortOrder = .alphabetical // one genuine write-through while enabled
+
+    let bytesWhileEnabled = try! Data(contentsOf: url)
+
+    settings.syncFileURL = nil
+    settings.sortOrder = .fileOrder // further local edits after disabling
+    settings.defaultView = .manage
+    settings.appearance = Appearance.clay
+
+    check("the sync file is byte-for-byte untouched after disabling, despite further local edits",
+          (try? Data(contentsOf: url)) == bytesWhileEnabled)
+}
+testDisableStopsWritesButLeavesFileIntact()
+
+// --- Conflict file detection, for the Settings UI's non-blocking warning row ---
+
+func testConflictFileDetection() {
+    let dir = sharedStoreDir()
+    let url = URL(fileURLWithPath: "\(dir)/settings.json")
+    try! "not json at all".write(to: url, atomically: true, encoding: .utf8)
+    // Forces SharedDocumentStore to preserve a conflict copy, the same way a real
+    // corrupt-file-at-the-chosen-path scenario would.
+    let store = SharedDocumentStore(url: url)
+    _ = try? store.setSetting(.bool(true), forKey: "x", modifiedAt: Date())
+    check("conflictFiles finds the copy SharedDocumentStore preserved",
+          !SettingsSync.conflictFiles(near: url).isEmpty)
+
+    let cleanDir = sharedStoreDir()
+    let cleanURL = URL(fileURLWithPath: "\(cleanDir)/settings.json")
+    check("conflictFiles is empty when there are no conflicts",
+          SettingsSync.conflictFiles(near: cleanURL).isEmpty)
+}
+testConflictFileDetection()
+
+// --- Appearance round-trips through a SettingValue, independent of any store ---
+
+func testAppearanceRoundTripsThroughSettingValue() {
+    let (source, _) = freshTestSettings()
+    source.appearance = Appearance.ultramarine
+    guard let value = SettingsSync.settingValue(for: .appearance, in: source) else {
+        check("SettingsSync encodes Appearance as a SettingValue", false)
+        return
+    }
+    let (destination, _) = freshTestSettings()
+    SettingsSync.apply(.appearance, value: value, to: destination)
+    check("SettingsSync round-trips Appearance through a SettingValue",
+          destination.appearance == Appearance.ultramarine)
+}
+testAppearanceRoundTripsThroughSettingValue()
+
+print("\n38. Snippets: model, store, trigger matcher (PRE-251)")
+
+// -- Trigger validation -------------------------------------------------------
+
+// `Result<Void, TriggerError>` isn't Equatable (Void isn't Equatable), so these
+// extract each side rather than comparing the Result itself.
+func isValidTrigger(_ result: Result<Void, SnippetTriggerValidation.TriggerError>) -> Bool {
+    if case .success = result { return true }
+    return false
+}
+func triggerFailure(_ result: Result<Void, SnippetTriggerValidation.TriggerError>) -> SnippetTriggerValidation.TriggerError? {
+    if case .failure(let error) = result { return error }
+    return nil
+}
+
+func testTriggerValidationEdges() {
+    check("a 1-character trigger is too short",
+          triggerFailure(SnippetTriggerValidation.validate("a", against: [])) == .tooShort)
+    check("a 2-character trigger is the shortest allowed",
+          isValidTrigger(SnippetTriggerValidation.validate("ab", against: [])))
+    check("a 64-character trigger is the longest allowed",
+          isValidTrigger(SnippetTriggerValidation.validate(String(repeating: "a", count: 64), against: [])))
+    check("a 65-character trigger is too long",
+          triggerFailure(SnippetTriggerValidation.validate(String(repeating: "a", count: 65), against: [])) == .tooLong)
+    check("a space anywhere in the trigger is rejected",
+          triggerFailure(SnippetTriggerValidation.validate(";si g", against: [])) == .containsWhitespaceOrControl)
+    check("a tab is rejected",
+          triggerFailure(SnippetTriggerValidation.validate(";si\tg", against: [])) == .containsWhitespaceOrControl)
+    check("a newline is rejected",
+          triggerFailure(SnippetTriggerValidation.validate(";si\ng", against: [])) == .containsWhitespaceOrControl)
+    check("a control character (NUL) is rejected",
+          triggerFailure(SnippetTriggerValidation.validate(";si\u{0000}g", against: [])) == .containsWhitespaceOrControl)
+    check("the ';' prefix convention is not enforced — a bare word is a valid trigger",
+          isValidTrigger(SnippetTriggerValidation.validate("sig", against: [])))
+
+    let existing = [Snippet(trigger: ";sig", template: "Best, Ada")]
+    check("an exact duplicate trigger is rejected",
+          triggerFailure(SnippetTriggerValidation.validate(";sig", against: existing)) == .duplicate(existing: ";sig"))
+    check("a case-insensitive duplicate is rejected",
+          triggerFailure(SnippetTriggerValidation.validate(";SIG", against: existing)) == .duplicate(existing: ";sig"))
+    check("a genuinely different trigger is accepted",
+          isValidTrigger(SnippetTriggerValidation.validate(";addr", against: existing)))
+    check("excluding a snippet's own id lets it keep validating against itself unchanged",
+          isValidTrigger(SnippetTriggerValidation.validate(";sig", against: existing, excluding: existing[0].id)))
+    check("excluding a *different* id still catches the collision",
+          triggerFailure(SnippetTriggerValidation.validate(";sig", against: existing, excluding: UUID()))
+              == .duplicate(existing: ";sig"))
+}
+testTriggerValidationEdges()
+
+// -- Rendering: reuses PromptSlotParser, never a second parser ----------------
+
+func testSnippetRenderingUsesSharedGrammar() {
+    let repeated = Snippet(trigger: ";sig", template: "Hi {{name}}, it's {{name}} again.")
+    check("renderPlan de-duplicates a repeated hole, matching PromptSlotParser.slots",
+          SnippetRenderer.renderPlan(snippet: repeated) == ["name"])
+    check("render fills a repeated hole with one shared value",
+          SnippetRenderer.render(snippet: repeated, values: ["name": "Ada"])
+              == "Hi Ada, it's Ada again.")
+
+    let literalOnly = Snippet(trigger: ";addr", template: "221B Baker Street, London")
+    check("a template with no holes has an empty render plan",
+          SnippetRenderer.renderPlan(snippet: literalOnly).isEmpty)
+    check("literal text round-trips through render untouched",
+          SnippetRenderer.render(snippet: literalOnly, values: [:]) == "221B Baker Street, London")
+
+    let unfilled = Snippet(trigger: ";todo", template: "{{task}} due {{when}}")
+    check("renderPlan orders holes left to right",
+          SnippetRenderer.renderPlan(snippet: unfilled) == ["task", "when"])
+    check("an unfilled hole is left exactly as written, not blanked",
+          SnippetRenderer.render(snippet: unfilled, values: ["task": "ship"]) == "ship due {{when}}")
+
+    let singleBraceLiteral = Snippet(trigger: ";py", template: "print(f\"{value}\")")
+    check("single braces stay literal, matching PromptSlotParser's f-string carve-out",
+          SnippetRenderer.renderPlan(snippet: singleBraceLiteral).isEmpty)
+}
+testSnippetRenderingUsesSharedGrammar()
+
+// -- TriggerMatcher: incremental feed, longest match, reset, buffer bound -----
+
+func feedString(_ matcher: TriggerMatcher, _ text: String) -> TriggerMatcher.Match? {
+    var last: TriggerMatcher.Match?
+    for character in text {
+        last = matcher.feed(character)
+    }
+    return last
+}
+
+func testTriggerMatcherIncrementalFeed() {
+    let sig = Snippet(trigger: ";sig", template: "Best, Ada")
+    let matcher = TriggerMatcher(snippets: [sig])
+
+    check("feeding fewer characters than the trigger never matches",
+          feedString(matcher, ";si") == nil)
+    check("completing the trigger on the next character matches",
+          matcher.feed("g") == TriggerMatcher.Match(snippet: sig, triggerLength: 4))
+    check("the match consumes the buffer — retyping the closing char alone doesn't re-match",
+          matcher.feed("g") == nil)
+}
+testTriggerMatcherIncrementalFeed()
+
+func testTriggerMatcherLongestMatchWins() {
+    // Genuine overlap: "sig" is a *suffix* of ";sig", so the character that completes
+    // ";sig" also, in that same instant, completes "sig" — both triggers become true
+    // simultaneous matches on the very same `feed` call. This is the case
+    // "longest-match-wins" actually governs (a sequential prefix relationship, like
+    // ";s" typed en route to ";sig", isn't overlap at all: ";s" would already have
+    // completed — and cleared the buffer — two characters earlier, before "sig" was
+    // even fully typed, which is a separate, expected behavior covered elsewhere).
+    let short = Snippet(trigger: "sig", template: "short")
+    let long = Snippet(trigger: ";sig", template: "long")
+    let matcher = TriggerMatcher(snippets: [short, long])
+
+    check("neither trigger has completed partway through typing the longer one",
+          feedString(matcher, ";si") == nil)
+    check("when both complete on the same character, the longer trigger wins",
+          matcher.feed("g") == TriggerMatcher.Match(snippet: long, triggerLength: 4))
+}
+testTriggerMatcherLongestMatchWins()
+
+func testTriggerMatcherShorterTriggerFiresBeforeLongerOneCanForm() {
+    // The flip side of the overlap case above: when a shorter registered trigger is
+    // merely a *prefix* of a longer one — not a suffix relationship — the shorter
+    // one completes and fires (clearing the buffer) before the longer one can ever
+    // be finished. This is expected, not a bug: the matcher has no way to know more
+    // typing is coming, and documenting it here pins down the behavior rather than
+    // leaving it as an accidental side effect of the overlap test above.
+    let short = Snippet(trigger: ";s", template: "short")
+    let long = Snippet(trigger: ";sig", template: "long")
+    let matcher = TriggerMatcher(snippets: [short, long])
+
+    check("the shorter trigger fires as soon as it's complete",
+          feedString(matcher, ";s") == TriggerMatcher.Match(snippet: short, triggerLength: 2))
+    check("its match cleared the buffer, so finishing 'ig' afterward starts fresh, no match",
+          feedString(matcher, "ig") == nil)
+}
+testTriggerMatcherShorterTriggerFiresBeforeLongerOneCanForm()
+
+func testTriggerMatcherResetSemantics() {
+    let sig = Snippet(trigger: ";sig", template: "Best, Ada")
+    let matcher = TriggerMatcher(snippets: [sig])
+
+    _ = feedString(matcher, ";si")
+    matcher.reset()
+    check("reset discards a partial buffer — finishing the trigger afterward does not match",
+          matcher.feed("g") == nil)
+    check("a full retype after reset matches normally",
+          feedString(matcher, ";sig") == TriggerMatcher.Match(snippet: sig, triggerLength: 4))
+}
+testTriggerMatcherResetSemantics()
+
+func testTriggerMatcherBufferBoundedToLongestTrigger() {
+    let short = Snippet(trigger: ";hi", template: "hello")
+    let matcher = TriggerMatcher(snippets: [short])
+
+    // Feed far more filler than the longest trigger's length (3) before ever typing
+    // a real trigger — if the buffer weren't bounded, it would grow without limit
+    // over a long typing session.
+    _ = feedString(matcher, String(repeating: "x", count: 500))
+    check("long unrelated garbage does not itself cause a false match",
+          matcher.feed("z") == nil)
+    check("typing the real trigger right after a long unrelated run still matches",
+          feedString(matcher, ";hi") == TriggerMatcher.Match(snippet: short, triggerLength: 3))
+
+    // Grow the bound so a longer trigger can complete...
+    let long = Snippet(trigger: ";signature", template: "long one")
+    matcher.updateSnippets([short, long])
+    check("updateSnippets grows the bound so a longer trigger can complete",
+          feedString(matcher, ";signature") == TriggerMatcher.Match(snippet: long, triggerLength: 10))
+
+    // ...then remove it again: it must never match again no matter how completely
+    // it's retyped, and the remaining short trigger keeps working exactly as before.
+    matcher.updateSnippets([short])
+    check("a trigger removed by updateSnippets never matches again, even fully retyped",
+          feedString(matcher, ";signature") == nil)
+    check("a still-registered trigger keeps matching normally after the bound shrinks",
+          feedString(matcher, ";hi") == TriggerMatcher.Match(snippet: short, triggerLength: 3))
+}
+testTriggerMatcherBufferBoundedToLongestTrigger()
+
+func testTriggerMatcherUnicode() {
+    // A trigger built from a multi-scalar grapheme cluster (flag emoji = two Unicode
+    // scalars, one Character) must be matched and bounded in Characters, not scalars —
+    // otherwise this either never completes or the buffer bound miscounts its length.
+    let flagTrigger = Snippet(trigger: ";🇯🇵sig", template: "よろしくお願いします")
+    let matcher = TriggerMatcher(snippets: [flagTrigger])
+    check("a trigger containing a multi-scalar grapheme cluster matches as one unit",
+          feedString(matcher, ";🇯🇵sig") == TriggerMatcher.Match(snippet: flagTrigger, triggerLength: 5))
+
+    let accented = Snippet(trigger: ";café", template: "espresso")
+    let matcher2 = TriggerMatcher(snippets: [accented])
+    check("a composed-accent trigger matches",
+          feedString(matcher2, ";café") == TriggerMatcher.Match(snippet: accented, triggerLength: 5))
+}
+testTriggerMatcherUnicode()
+
+func testTriggerMatcherEmptySnippetListNeverMatches() {
+    let matcher = TriggerMatcher(snippets: [])
+    check("an empty snippet set never matches, no matter what's typed",
+          feedString(matcher, ";sig") == nil)
+}
+testTriggerMatcherEmptySnippetListNeverMatches()
+
+// -- SnippetStore: round trip, dual-write mirror, tombstone on delete --------
+
+func snippetStorePath() -> String {
+    caseIndex += 1
+    let dir = "\(sandbox)/snippet-store-case\(caseIndex)"
+    try! FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+    return "\(dir)/snippets.json"
+}
+
+func testSnippetStoreRoundTrip() {
+    let path = snippetStorePath()
+    let store = SnippetStore(localPath: path)
+    check("a fresh store with no file yet reads as empty", store.all().isEmpty)
+
+    let sig = Snippet(trigger: ";sig", template: "Best, {{name}}")
+    let addr = Snippet(trigger: ";addr", template: "221B Baker Street")
+    store.upsert(sig)
+    store.upsert(addr)
+
+    let all = store.all()
+    check("both saved snippets round-trip", all.count == 2)
+    check("the local file is readable JSON on disk",
+          FileManager.default.fileExists(atPath: path))
+
+    let reopened = SnippetStore(localPath: path)
+    check("a second store instance at the same path reads what the first wrote",
+          Set(reopened.all().map(\.trigger)) == Set([";sig", ";addr"]))
+
+    var edited = sig
+    edited.template = "Warmly, {{name}}"
+    edited.modifiedAt = Date(timeIntervalSince1970: 1) // whatever the caller passes in...
+    let stampedNow = Date(timeIntervalSince1970: 1_700_000_999)
+    let saved = store.upsert(edited, now: stampedNow)
+    check("upsert on an existing id replaces it rather than duplicating it",
+          store.all().count == 2)
+    check("the replaced snippet carries the new template",
+          store.all().first { $0.id == sig.id }?.template == "Warmly, {{name}}")
+    check("upsert stamps modifiedAt with the save time, overriding whatever the caller's copy carried",
+          saved.modifiedAt == stampedNow && store.all().first { $0.id == sig.id }?.modifiedAt == stampedNow)
+}
+testSnippetStoreRoundTrip()
+
+func testSnippetStoreCorruptFileToleration() {
+    let path = snippetStorePath()
+    try! "{ not valid json at all".write(toFile: path, atomically: true, encoding: .utf8)
+    let store = SnippetStore(localPath: path)
+    check("a corrupt snippets file reads as empty rather than crashing", store.all().isEmpty)
+}
+testSnippetStoreCorruptFileToleration()
+
+func testSnippetStoreDualWriteMirror() {
+    let path = snippetStorePath()
+    let docURL = URL(fileURLWithPath: "\(sharedStoreDir())/doc.json")
+    let sharedStore = SharedDocumentStore(url: docURL)
+    let store = SnippetStore(localPath: path, sharedStore: sharedStore)
+
+    let sig = Snippet(trigger: ";sig", template: "Best, Ada")
+    let now = Date(timeIntervalSince1970: 1_700_000_500)
+    let saved = store.upsert(sig, now: now)
+
+    // Compare against `saved`, not `sig`: upsert stamps its own modifiedAt (proven
+    // above in the round-trip test), so `sig`'s construction-time timestamp no
+    // longer matches what's actually on disk.
+    check("the snippet is saved locally", store.all().contains(saved))
+
+    guard case .success(let doc) = sharedStore.read() else {
+        check("the shared document is readable after a dual-write upsert", false)
+        return
+    }
+    let mirrored = doc.records[SnippetStore.RecordCollection.snippets]?.first { $0.id == sig.id.uuidString }
+    check("the upsert is mirrored into the shared document's snippets collection",
+          mirrored != nil)
+    check("the mirrored record is not a tombstone", mirrored?.deleted == false)
+
+    guard let payload = mirrored?.payload,
+          let decoded = try? JSONDecoder.aliasBarDocument.decode(Snippet.self, from: payload) else {
+        check("the mirrored record's payload decodes back to the saved snippet", false)
+        return
+    }
+    check("the mirrored payload matches what was saved locally, trigger and template",
+          decoded.trigger == sig.trigger && decoded.template == sig.template)
+}
+testSnippetStoreDualWriteMirror()
+
+func testSnippetStoreTombstoneOnDelete() {
+    let path = snippetStorePath()
+    let docURL = URL(fileURLWithPath: "\(sharedStoreDir())/doc.json")
+    let sharedStore = SharedDocumentStore(url: docURL)
+    let store = SnippetStore(localPath: path, sharedStore: sharedStore)
+
+    let sig = Snippet(trigger: ";sig", template: "Best, Ada")
+    store.upsert(sig, now: Date(timeIntervalSince1970: 1_700_000_500))
+    store.delete(id: sig.id, now: Date(timeIntervalSince1970: 1_700_000_600))
+
+    check("a deleted snippet is gone from the local file", store.all().isEmpty)
+
+    guard case .success(let doc) = sharedStore.read() else {
+        check("the shared document is readable after a dual-write delete", false)
+        return
+    }
+    let mirrored = doc.records[SnippetStore.RecordCollection.snippets]?.first { $0.id == sig.id.uuidString }
+    check("the delete is mirrored as a tombstone, not a removed record",
+          mirrored?.deleted == true)
+}
+testSnippetStoreTombstoneOnDelete()
+
+func testSnippetStoreDeleteWithoutSharedStoreNeverCrashes() {
+    let path = snippetStorePath()
+    let store = SnippetStore(localPath: path)
+    let sig = Snippet(trigger: ";sig", template: "Best, Ada")
+    store.upsert(sig)
+    store.delete(id: sig.id)
+    check("delete with no shared store configured just removes locally, no crash",
+          store.all().isEmpty)
+}
+testSnippetStoreDeleteWithoutSharedStoreNeverCrashes()
+
+// -- Snippet Codable round trip, independent of the store --------------------
+
+func testSnippetCodableRoundTrip() {
+    let sig = Snippet(trigger: ";sig", template: "Best, {{name}}",
+                      modifiedAt: Date(timeIntervalSince1970: 1_700_000_000))
+    let data = try! JSONEncoder.aliasBarDocument.encode(sig)
+    let decoded = try! JSONDecoder.aliasBarDocument.decode(Snippet.self, from: data)
+    check("Snippet round-trips through JSON with the same id, trigger, template, and modifiedAt",
+          decoded == sig)
+}
+testSnippetCodableRoundTrip()
+
+// -- SnippetPaths: environment override vs. default -------------------------
+
+func testSnippetPathsResolution() {
+    check("with no override, the local path defaults under the home directory",
+          SnippetPaths.resolveLocalPath(environmentOverride: nil, homeDirectory: "/Users/test")
+              == "/Users/test/.aliasbar/snippets.json")
+    check("an empty override string is treated as absent",
+          SnippetPaths.resolveLocalPath(environmentOverride: "", homeDirectory: "/Users/test")
+              == "/Users/test/.aliasbar/snippets.json")
+    // Not tested with a "~/..." override: expandingTildeInPath resolves against the
+    // real machine's home directory (NSHomeDirectory()), not the `homeDirectory`
+    // parameter passed in here — the same reason AppPaths.resolveRcPath's own tests
+    // only exercise it with already-absolute paths.
+    check("a non-empty override wins outright over the default",
+          SnippetPaths.resolveLocalPath(environmentOverride: "/tmp/fixture-snippets.json", homeDirectory: "/Users/test")
+              == "/tmp/fixture-snippets.json")
+}
+testSnippetPathsResolution()
+
+// ---------------------------------------------------------------------------
+print("\n38. SuggestionEngine: history-mined alias suggestions (PRE-264)")
+
+func suggestionIgnoresFixturePath() -> String {
+    caseIndex += 1
+    let dir = "\(sandbox)/suggestion-ignores-case\(caseIndex)"
+    try! FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+    return dir + "/suggestion-ignores.json"
+}
+
+// --- Path resolution ---------------------------------------------------------
+
+check("CorePaths resolves the suggestion-ignores path from an override",
+      CorePaths.resolveSuggestionIgnoresPath(environmentOverride: "/tmp/custom-ignores.json",
+                                             homeDirectory: "/Users/x")
+          == "/tmp/custom-ignores.json")
+check("CorePaths falls back to ~/.aliasbar/suggestion-ignores.json with no override",
+      CorePaths.resolveSuggestionIgnoresPath(environmentOverride: nil, homeDirectory: "/Users/x")
+          == "/Users/x/.aliasbar/suggestion-ignores.json")
+
+setenv("ALIASBAR_SUGGESTION_IGNORES", "/tmp/env-override-ignores.json", 1)
+check("AppPaths.suggestionIgnoresPath honors the environment override",
+      AppPaths.suggestionIgnoresPath == "/tmp/env-override-ignores.json")
+unsetenv("ALIASBAR_SUGGESTION_IGNORES")
+
+// --- Frequency normalization: whitespace variants of one command merge -------
+
+let freqFile = scratch("""
+git  status
+git\tstatus
+git status
+git status
+git status
+""")
+let normalizedFreq = HistoryScanner.normalizedCommands(path: freqFile)
+check("frequency normalization collapses whitespace variants into a single command",
+      normalizedFreq.count == 1 && normalizedFreq.first?.text == "git status",
+      normalizedFreq.map(\.text).joined(separator: " | "))
+check("frequency normalization sums counts across the collapsed variants",
+      normalizedFreq.first?.count == 5)
+
+// --- Secret-filtered commands are never suggested, even at high frequency ----
+
+let secretFile = scratch("""
+curl -H 'Authorization: Bearer abc.def.ghi' https://api.example.com
+curl -H 'Authorization: Bearer abc.def.ghi' https://api.example.com
+curl -H 'Authorization: Bearer abc.def.ghi' https://api.example.com
+curl -H 'Authorization: Bearer abc.def.ghi' https://api.example.com
+curl -H 'Authorization: Bearer abc.def.ghi' https://api.example.com
+curl -H 'Authorization: Bearer abc.def.ghi' https://api.example.com
+git status
+git status
+git status
+git status
+git status
+""")
+let secretSuggestions = SuggestionEngine.suggest(history: secretFile, existingEntries: [],
+                                                 ignores: [], pathLookup: { _ in false })
+check("a secret-shaped command is never suggested even repeated 6 times",
+      !secretSuggestions.contains { $0.command.contains("Authorization") },
+      secretSuggestions.map(\.command).joined(separator: " | "))
+check("an ordinary command alongside a filtered one is still suggested",
+      secretSuggestions.contains { $0.command == "git status" })
+
+// --- Coverage: an existing alias, exact or with a trailing-args suffix -------
+
+let coverageFile = scratch("""
+git status
+git status
+git status
+git status
+git status
+git log --oneline
+git log --oneline
+git log --oneline
+git log --oneline
+git log --oneline
+git log
+git log
+git log
+git log
+git log
+""")
+let coverageAliases = [
+    ShellEntry(kind: .alias, name: "gs", command: "git status", comment: nil,
+              sourceFile: "fixture-rc", line: 1, managed: true),
+    ShellEntry(kind: .alias, name: "gl", command: "git log", comment: nil,
+              sourceFile: "fixture-rc", line: 2, managed: true),
+]
+let coverageSuggestions = SuggestionEngine.suggest(history: coverageFile, existingEntries: coverageAliases,
+                                                   ignores: [], pathLookup: { _ in false })
+check("an exact alias command match is excluded from suggestions",
+      !coverageSuggestions.contains { $0.command == "git status" })
+check("an existing alias's command plus a trailing-args suffix is excluded",
+      !coverageSuggestions.contains { $0.command == "git log --oneline" })
+check("both covered commands leave nothing left to suggest",
+      coverageSuggestions.isEmpty, coverageSuggestions.map(\.command).joined(separator: " | "))
+
+// --- Ignore exclusion, and un-ignoring restores the candidate ----------------
+
+let ignoreCandidateFile = scratch("""
+docker ps -a
+docker ps -a
+docker ps -a
+docker ps -a
+docker ps -a
+""")
+let ignoredSuggestions = SuggestionEngine.suggest(history: ignoreCandidateFile, existingEntries: [],
+                                                  ignores: ["docker ps -a"], pathLookup: { _ in false })
+check("an ignored command is excluded from suggestions",
+      !ignoredSuggestions.contains { $0.command == "docker ps -a" })
+let unignoredSuggestions = SuggestionEngine.suggest(history: ignoreCandidateFile, existingEntries: [],
+                                                    ignores: [], pathLookup: { _ in false })
+check("the same command is offered again once it's no longer ignored",
+      unignoredSuggestions.contains { $0.command == "docker ps -a" })
+
+// --- Thresholds: single words and under-frequent commands are never offered --
+
+let thresholdFile = scratch("""
+status
+status
+status
+status
+status
+status
+git status
+git status
+git status
+git status
+""")
+let thresholdSuggestions = SuggestionEngine.suggest(history: thresholdFile, existingEntries: [],
+                                                    ignores: [], pathLookup: { _ in false })
+check("a single-word command is never suggested no matter how often it recurs",
+      !thresholdSuggestions.contains { $0.command == "status" })
+check("a multi-word command below the occurrence threshold is not suggested",
+      !thresholdSuggestions.contains { $0.command == "git status" })
+check("both thresholds together leave nothing to suggest",
+      thresholdSuggestions.isEmpty, thresholdSuggestions.map(\.command).joined(separator: " | "))
+
+// --- Name dedupe against existing names and PATH binaries --------------------
+
+let nameDedupPathDir = sandbox + "/suggestion-path-case1"
+try! FileManager.default.createDirectory(atPath: nameDedupPathDir, withIntermediateDirectories: true)
+let shadowedBinaryPath = nameDedupPathDir + "/gis"
+FileManager.default.createFile(atPath: shadowedBinaryPath, contents: Data())
+try! FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: shadowedBinaryPath)
+
+let nameDedupHistory = scratch("""
+git status
+git status
+git status
+git status
+git status
+git status
+""")
+let nameDedupExisting = [
+    ShellEntry(kind: .alias, name: "gs", command: "totally unrelated command", comment: nil,
+              sourceFile: "fixture-rc", line: 1, managed: true),
+]
+let nameDedupSuggestions = SuggestionEngine.suggest(
+    history: nameDedupHistory, existingEntries: nameDedupExisting, ignores: [],
+    pathLookup: { ConflictDetector.isShadowed($0, searchPaths: [nameDedupPathDir]) })
+check("exactly one suggestion comes back for the one repeated command",
+      nameDedupSuggestions.count == 1, "\(nameDedupSuggestions)")
+check("the proposed name skips a name an existing alias already uses ('gs')",
+      nameDedupSuggestions.first?.proposedName != "gs")
+check("the proposed name skips a name shadowed by a PATH binary ('gis')",
+      nameDedupSuggestions.first?.proposedName != "gis")
+check("the proposed name settles on the next candidate that's neither taken nor shadowed",
+      nameDedupSuggestions.first?.proposedName == "gist",
+      nameDedupSuggestions.first?.proposedName ?? "<none>")
+
+// The default (no-pathLookup-argument) overload wires PATH lookups through
+// ConflictDetector.isShadowed against the real machine's PATH. Exercised only
+// against a fixture with nothing anywhere near the occurrence threshold, so the
+// assertion never depends on what's actually installed.
+let convenienceFile = scratch("echo hi\n")
+check("the PATH-lookup convenience overload runs without a caller-supplied closure",
+      SuggestionEngine.suggest(history: convenienceFile, existingEntries: [], ignores: []).isEmpty)
+
+// --- Determinism, including name dedup *within* one suggest() call -----------
+
+let batchDedupHistory = scratch("""
+git status
+git status
+git status
+git status
+git status
+git status
+git stash
+git stash
+git stash
+git stash
+git stash
+""")
+let batchSuggestions = SuggestionEngine.suggest(history: batchDedupHistory, existingEntries: [],
+                                                ignores: [], pathLookup: { _ in false })
+check("two candidates that would naturally get the same first-choice name both appear",
+      batchSuggestions.count == 2, "\(batchSuggestions)")
+check("deterministic order: the higher-count candidate (git status, 6) comes first",
+      batchSuggestions.first?.command == "git status")
+check("the first candidate claims the name both would naturally propose first ('gs')",
+      batchSuggestions.first?.proposedName == "gs")
+check("the second candidate does not reuse the name just claimed within the same batch",
+      batchSuggestions.last?.proposedName != "gs" && batchSuggestions.last?.proposedName == "gis")
+
+let determinismRunA = SuggestionEngine.suggest(history: batchDedupHistory, existingEntries: [],
+                                               ignores: [], pathLookup: { _ in false })
+let determinismRunB = SuggestionEngine.suggest(history: batchDedupHistory, existingEntries: [],
+                                               ignores: [], pathLookup: { _ in false })
+check("suggest() is byte-for-byte deterministic across repeated runs on identical input",
+      determinismRunA == determinismRunB)
+
+// --- SuggestionIgnoreStore: round-trip, corrupt tolerance, atomicity ---------
+
+let ignoresPath1 = suggestionIgnoresFixturePath()
+check("a missing ignores file reads as empty", SuggestionIgnoreStore.all(path: ignoresPath1).isEmpty)
+
+SuggestionIgnoreStore.ignore("git status", path: ignoresPath1)
+SuggestionIgnoreStore.ignore("docker ps -a", path: ignoresPath1)
+check("ignoring two commands round-trips both",
+      SuggestionIgnoreStore.all(path: ignoresPath1) == Set(["git status", "docker ps -a"]))
+
+SuggestionIgnoreStore.unignore("git status", path: ignoresPath1)
+check("unignoring removes only that command",
+      SuggestionIgnoreStore.all(path: ignoresPath1) == Set(["docker ps -a"]))
+
+let ignoresPath2 = suggestionIgnoresFixturePath()
+try! "not json at all".write(toFile: ignoresPath2, atomically: true, encoding: .utf8)
+check("a corrupt ignores file reads as empty rather than crashing",
+      SuggestionIgnoreStore.all(path: ignoresPath2).isEmpty)
+SuggestionIgnoreStore.ignore("git status", path: ignoresPath2)
+check("writing after a corrupt read replaces the file with valid content",
+      SuggestionIgnoreStore.all(path: ignoresPath2) == Set(["git status"]))
+
+let ignoresPath3 = suggestionIgnoresFixturePath()
+SuggestionIgnoreStore.ignore("npm run build", path: ignoresPath3)
+let ignoresDir3 = (ignoresPath3 as NSString).deletingLastPathComponent
+let strayIgnoreTemps = (try? FileManager.default.contentsOfDirectory(atPath: ignoresDir3))?
+    .filter { $0.hasPrefix(".aliasbar-suggestion-ignores-") } ?? []
+check("no stray temp files survive an ignore-store write", strayIgnoreTemps.isEmpty)
+
+// ---------------------------------------------------------------------------
 print("\n" + String(repeating: "-", count: 60))
 print("\(passes) passed, \(failures) failed")
 exit(failures == 0 ? 0 : 1)
