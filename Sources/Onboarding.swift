@@ -3,7 +3,12 @@ import AppKit
 
 // MARK: - First-run flow
 
-/// The five questions worth answering before first use, and nothing else.
+/// Detect, show value, then ask — and nothing else.
+///
+/// PRE-239 shipped this as four questions up front; PRE-277 added a fifth for updates.
+/// The questions themselves are unchanged, only their place in line: `found` runs a
+/// silent local scan and leads with what it turned up — counts, a top-5, the
+/// graveyard — before the flow asks for a single decision. The rest keeps its order.
 ///
 /// This app exists to save seconds, so the flow is built to be left: every step has a
 /// working default, every step can be skipped, and closing the window at any point is a
@@ -22,11 +27,21 @@ struct OnboardingView: View {
     @ObservedObject private var updater = Updater.shared
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var step = 0
+    @State private var step: OnboardingStep = .found
+
+    // Step 0: found — the silent scan, run once when the window is built, and the
+    // three opt-in decisions its screen presents alongside the counts.
+    @State private var scan: OnboardingScanResult
+    @State private var decisions: OnboardingDecisions
 
     // Step 1: shortcut
     @State private var recordingHotkey = false
     @State private var hotkeyError: String?
+    /// Whether `.aliasBarHotkeyFired` has been observed while this step is showing —
+    /// the practice field's confirmation that the combination actually works, not
+    /// just that it was accepted when set.
+    @State private var hotkeyRehearsed = false
+    @State private var hotkeyRehearsalToken: NSObjectProtocol?
 
     // Step 2: Enter — the callout is shown, not the system dialog, when a paste action
     // is picked. `axPrompted` remembers that the user pressed the button this session,
@@ -39,7 +54,19 @@ struct OnboardingView: View {
     @State private var newPresetName = ""
     @State private var presetNotice: String?
 
-    private static let stepCount = 5
+    /// Runs the silent local scan once, when the window is built — never again for the
+    /// life of this view — and seeds the found-treasure checkboxes from it.
+    init(settings: AppSettings, onDone: @escaping () -> Void) {
+        self.settings = settings
+        self.onDone = onDone
+        let result = OnboardingScanner.scan(rcPath: AppPaths.rcPath,
+                                            historyPath: AppPaths.historyPath,
+                                            claudeDirectoryPath: AppPaths.claudeDirectory)
+        _scan = State(initialValue: result)
+        _decisions = State(initialValue: .defaults(for: result))
+    }
+
+    private static var stepCount: Int { OnboardingStep.allCases.count }
 
     private var theme: Theme { settings.theme(systemIsDark: settings.systemIsDark) }
     private var motion: MotionPlan {
@@ -53,11 +80,12 @@ struct OnboardingView: View {
                     header
                     Group {
                         switch step {
-                        case 0: shortcutStep
-                        case 1: enterStep
-                        case 2: fileStep
-                        case 3: updatesStep
-                        default: lookStep
+                        case .found: foundStep
+                        case .shortcut: shortcutStep
+                        case .enter: enterStep
+                        case .file: fileStep
+                        case .updates: updatesStep
+                        case .look: lookStep
                         }
                     }
                     .transition(.opacity)
@@ -75,19 +103,26 @@ struct OnboardingView: View {
         .preferredColorScheme(theme.isLight ? .light : .dark)
         .environment(\.theme, theme)
         .environment(\.motion, motion)
+        // Esc is a skip from anywhere in the flow, exactly like the Skip button —
+        // `onDone` is the one place completion gets recorded, so this cannot diverge
+        // from what clicking Skip or closing the window already do.
+        .onExitCommand { onDone() }
     }
 
     // MARK: Chrome
 
     private var stepTitle: String {
         switch step {
-        case 0: return "One keystroke, from anywhere"
-        case 1: return "What Enter does"
-        case 2: return "Where your aliases live"
-        case 3: return "Staying up to date"
-        default: return "Pick a look"
+        case .found: return "What's already there"
+        case .shortcut: return "One keystroke, from anywhere"
+        case .enter: return "What Enter does"
+        case .file: return "Where your aliases live"
+        case .updates: return "Staying up to date"
+        case .look: return "Pick a look"
         }
     }
+
+    private var stepIndex: Int { OnboardingStep.allCases.firstIndex(of: step) ?? 0 }
 
     private var header: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -97,7 +132,7 @@ struct OnboardingView: View {
                     .font(.system(size: 12, weight: .semibold, design: theme.bodyDesign))
                     .foregroundStyle(theme.dim)
                 Spacer()
-                Text("\(step + 1) of \(Self.stepCount)")
+                Text("\(stepIndex + 1) of \(Self.stepCount)")
                     .font(.system(size: 11, design: .monospaced))
                     .foregroundStyle(theme.faint)
             }
@@ -119,9 +154,9 @@ struct OnboardingView: View {
             Spacer()
 
             HStack(spacing: 5) {
-                ForEach(0..<Self.stepCount, id: \.self) { index in
+                ForEach(OnboardingStep.allCases, id: \.self) { candidate in
                     Circle()
-                        .fill(index == step ? theme.accent : theme.rule)
+                        .fill(candidate == step ? theme.accent : theme.rule)
                         .frame(width: 6, height: 6)
                 }
             }
@@ -132,11 +167,11 @@ struct OnboardingView: View {
                 .buttonStyle(.plain)
                 .font(.system(size: 11.5))
                 .foregroundStyle(theme.dim)
-                .opacity(step == Self.stepCount - 1 ? 0 : 1)
+                .opacity(step == .look ? 0 : 1)
                 .accessibilityLabel("Skip this setup step")
 
             Button(action: advance) {
-                Text(step == Self.stepCount - 1 ? "Finish" : "Continue")
+                Text(step == .look ? "Finish" : "Continue")
                     .font(.system(size: 12.5, weight: .semibold))
                     .foregroundStyle(theme.onAccent)
                     .padding(.horizontal, 18)
@@ -146,7 +181,7 @@ struct OnboardingView: View {
             }
             .liveButton()
             .keyboardShortcut(.defaultAction)
-            .accessibilityLabel(step == Self.stepCount - 1
+            .accessibilityLabel(step == .look
                                 ? "Finish setup"
                                 : "Continue to next setup step")
         }
@@ -155,11 +190,136 @@ struct OnboardingView: View {
     }
 
     private func advance() {
-        if step >= Self.stepCount - 1 {
+        let all = OnboardingStep.allCases
+        guard let idx = all.firstIndex(of: step), idx < all.count - 1 else {
             onDone()
-        } else {
-            step += 1
+            return
         }
+        step = all[idx + 1]
+    }
+
+    // MARK: Step 0 — found
+
+    /// Bindings into `decisions`, each writing straight through to `settings` on
+    /// change — the same write-through-immediately idiom every other step in this
+    /// flow already uses (the hotkey commits on capture, Enter's choice commits on
+    /// tap), so leaving this screen early loses nothing already ticked.
+    private var historyRankingBinding: Binding<Bool> {
+        Binding(get: { decisions.historyUsageRanking }, set: {
+            decisions.historyUsageRanking = $0
+            decisions.apply(to: settings)
+        })
+    }
+    private var claudeFeaturesBinding: Binding<Bool> {
+        Binding(get: { decisions.claudeCodePromptFeatures }, set: {
+            decisions.claudeCodePromptFeatures = $0
+            decisions.apply(to: settings)
+        })
+    }
+    private var clipboardWatchingBinding: Binding<Bool> {
+        Binding(get: { decisions.clipboardWatching }, set: {
+            decisions.clipboardWatching = $0
+            decisions.apply(to: settings)
+        })
+    }
+
+    private var scanIntroLine: String {
+        scan.aliasCount == 0 && scan.functionCount == 0
+            ? "AliasBar checked your shell config once, locally — nothing there yet. It'll show up here the moment you add something."
+            : "AliasBar checked your shell config and history once, locally, before asking you anything."
+    }
+
+    /// The found-treasure screen: counts, the top-5 "first aha", and the three
+    /// opt-in decisions those sources unlock. Everything above the checkboxes is
+    /// read-only value — nothing on it is a question.
+    private var foundStep: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text(scanIntroLine)
+                .font(.system(size: 13, design: theme.bodyDesign))
+                .foregroundStyle(theme.dim)
+                .fixedSize(horizontal: false, vertical: true)
+
+            HStack(spacing: 22) {
+                statTile(value: "\(scan.aliasCount)", label: scan.aliasCount == 1 ? "alias" : "aliases")
+                statTile(value: "\(scan.functionCount)",
+                        label: scan.functionCount == 1 ? "function" : "functions")
+                if scan.neverRunCount > 0 {
+                    statTile(value: "\(scan.neverRunCount)", label: "never run", symbol: "moon.zzz")
+                }
+            }
+
+            if !scan.topUsed.isEmpty {
+                SettingsGroup("What you actually reach for") {
+                    VStack(spacing: 6) {
+                        ForEach(Array(scan.topUsed.enumerated()), id: \.element.id) { index, ranked in
+                            topUsedRow(ranked, rank: index + 1)
+                        }
+                    }
+                }
+            } else {
+                NoticeText("No usage history yet — once you run a few, the most-used ones will show up here.",
+                          tone: .info)
+            }
+
+            SettingsGroup("Turn any of this off") {
+                SettingsRow("Usage ranking",
+                            hint: "Off falls back to the file's own order instead of how often you use things.") {
+                    ThemedToggle(isOn: historyRankingBinding, label: "Rank by how often you actually use things")
+                }
+                SettingsRow("Claude Code prompt features",
+                            hint: scan.claudeCodeDetected
+                                ? "Detected on this Mac — dialects, delivery, and the ⌘I audit prompt stay available."
+                                : "Not detected on this Mac, but you can turn these on anyway.") {
+                    ThemedToggle(isOn: claudeFeaturesBinding, label: "Claude Code prompt features")
+                }
+                SettingsRow("Clipboard watching",
+                            hint: "Off until you turn it on. Secret-shaped clips are quarantined in memory only — never written to disk — and gone in about 90 seconds.") {
+                    ThemedToggle(isOn: clipboardWatchingBinding, label: "Watch the clipboard for useful transforms")
+                }
+            }
+        }
+    }
+
+    private func statTile(value: String, label: String, symbol: String? = nil) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 4) {
+                if let symbol {
+                    Image(systemName: symbol)
+                        .font(.system(size: 11))
+                        .foregroundStyle(theme.faint)
+                }
+                Text(value)
+                    .font(.system(size: 22, weight: .bold, design: .monospaced))
+                    .foregroundStyle(theme.text)
+            }
+            Text(label)
+                .font(.system(size: 11))
+                .foregroundStyle(theme.faint)
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(value) \(label)")
+    }
+
+    private func topUsedRow(_ ranked: RankedEntry, rank: Int) -> some View {
+        HStack(spacing: 8) {
+            Text("\(rank)")
+                .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                .foregroundStyle(theme.faint)
+                .frame(width: 14, alignment: .trailing)
+            Text(ranked.name)
+                .font(.system(size: 12.5, weight: .semibold, design: theme.nameDesign))
+                .foregroundStyle(theme.text)
+            Text(ranked.entry.command)
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundStyle(theme.dim)
+                .lineLimit(1)
+            Spacer(minLength: 0)
+            Text("×\(ranked.uses)")
+                .font(.system(size: 10.5, design: .monospaced))
+                .foregroundStyle(theme.faint)
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Rank \(rank), \(ranked.name), used \(ranked.uses) times")
     }
 
     // MARK: Step 1 — shortcut
@@ -208,8 +368,37 @@ struct OnboardingView: View {
                 NoticeText(hotkeyError, tone: .warning)
             }
 
+            // The practice field: proof the combination works, not just that macOS
+            // accepted it. `.aliasBarHotkeyFired` is the same notification the real
+            // summon path listens for, so this confirms the exact thing that will
+            // happen every other time this shortcut is pressed.
+            HStack(spacing: 7) {
+                Image(systemName: hotkeyRehearsed ? "checkmark.circle.fill" : "circle.dashed")
+                    .font(.system(size: 12))
+                    .foregroundStyle(hotkeyRehearsed ? .green : theme.faint)
+                Text(hotkeyRehearsed
+                    ? "Nice — that's it, working right now."
+                    : "Try it: press \(settings.hotkey.displayString) now, from anywhere.")
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(theme.dim)
+            }
+            .accessibilityLabel(hotkeyRehearsed
+                                ? "Shortcut confirmed working"
+                                : "Practice: press \(settings.hotkey.displayString) now to confirm it works")
+
             NoticeText("The shortcut uses the system hotkey API: macOS tells AliasBar that this one combination fired and nothing else. It never sees any other keystroke, and needs no permission.",
                        tone: .info)
+        }
+        .onAppear {
+            hotkeyRehearsalToken = NotificationCenter.default.addObserver(
+                forName: .aliasBarHotkeyFired, object: nil, queue: .main
+            ) { _ in hotkeyRehearsed = true }
+        }
+        .onDisappear {
+            if let token = hotkeyRehearsalToken {
+                NotificationCenter.default.removeObserver(token)
+                hotkeyRehearsalToken = nil
+            }
         }
     }
 
