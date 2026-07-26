@@ -82,6 +82,11 @@ final class AppState: ObservableObject {
     /// app, so `onAppear` fires exactly once and cannot be used to restore focus to the
     /// search field on the second and every subsequent open.
     @Published var showCount = 0
+    /// Bumped on every keystroke the window sees, handled or not. Exists for exactly one
+    /// consumer: the footer's idle-revealed hints, which hide the moment this moves and
+    /// come back after a beat of stillness. A count rather than a timestamp so the view
+    /// can watch it with `onChange` and never needs to poll.
+    @Published private(set) var keystrokeCount = 0
 
     let store: EntryStore
     let settings: AppSettings
@@ -328,6 +333,10 @@ final class AppState: ObservableObject {
     /// This runs from a *local* event monitor, which sees only events destined for this
     /// app and therefore needs no permission. A global monitor would need Accessibility.
     func handleKey(_ event: NSEvent) -> Bool {
+        // Counted before any routing: "the user is typing" includes keys the search
+        // field will consume and keys nothing consumes.
+        keystrokeCount += 1
+
         // The editor sheet owns the keyboard while it is up, apart from escape.
         if editor != nil {
             if event.keyCode == UInt16(kVK_Escape) {

@@ -11,6 +11,14 @@ struct RootView: View {
     /// handling do not wait on it, so ⌥⌘A then `gs⏎` lands the paste with the window
     /// still growing.
     @State private var arrived = false
+    /// Whether the footer's keyboard hints are showing. They hide the instant a key goes
+    /// down and return after a beat of stillness — present when someone is wondering
+    /// what to press, invisible while they already know.
+    @State private var hintsShown = false
+    /// Invalidates any reveal already scheduled. A counter instead of a cancellable
+    /// because the codebase schedules with `asyncAfter`, and a stale closure comparing
+    /// generations is simpler than a task handle it would only ever cancel.
+    @State private var hintGeneration = 0
 
     private var motion: MotionPlan {
         MotionPlan.resolve(settings.motionLevel, reduceMotion: reduceMotion)
@@ -83,6 +91,34 @@ struct RootView: View {
             DispatchQueue.main.async { searchFocused = true }
             arrived = false
             enter()
+            restartHintClock(hideFirst: false)
+        }
+        .onAppear { restartHintClock(hideFirst: false) }
+        .onChange(of: state.keystrokeCount) { _ in restartHintClock(hideFirst: true) }
+    }
+
+    /// Hides the hints (when asked) and books their return after 600ms of stillness.
+    ///
+    /// Hiding is immediate and fast — a hint still fading while its reader is already
+    /// typing is noise. The return uses the entrance curve for the same reason rows do:
+    /// nothing is waiting on it.
+    private func restartHintClock(hideFirst: Bool) {
+        if hideFirst && hintsShown {
+            if let animation = motion(Motion.hover) {
+                withAnimation(animation) { hintsShown = false }
+            } else {
+                hintsShown = false
+            }
+        }
+        hintGeneration += 1
+        let generation = hintGeneration
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+            guard generation == hintGeneration, !hintsShown else { return }
+            if let animation = motion(Motion.entrance) {
+                withAnimation(animation) { hintsShown = true }
+            } else {
+                hintsShown = true
+            }
         }
     }
 
@@ -254,7 +290,7 @@ struct RootView: View {
         HStack(spacing: 10) {
             if let error = state.errorMessage {
                 Image(systemName: "exclamationmark.triangle.fill")
-                    .font(.system(size: 10))
+                    .font(.system(size: 10, weight: .semibold))
                     .foregroundStyle(.orange)
                 // One line, not two. An error arriving must not make the footer taller,
                 // because the footer's height is part of the window's.
@@ -264,20 +300,29 @@ struct RootView: View {
                     .lineLimit(1)
                     .truncationMode(.tail)
                     .help(error)
-            } else if state.historyMode {
-                KeyHint(keys: "⏎", label: "run it")
-                KeyHint(keys: "⌘⏎", label: "make an alias")
-                KeyHint(keys: "⌘H", label: "back")
             } else {
-                KeyHint(keys: "⏎", label: settings.enterAction.short)
-                KeyHint(keys: "⌘⏎", label: settings.enterAction.secondary.short)
-                // The new movement keys earn their place here over ⌘N: a shortcut nobody
-                // can discover is one nobody uses, and ⌘N is already on the sidebar
-                // button in MANAGE.
-                KeyHint(keys: "⌥←→", label: "views")
-                KeyHint(keys: "⌘↑↓", label: "buckets")
-                KeyHint(keys: "⌘N", label: "new")
-                KeyHint(keys: "⌘H", label: "history")
+                // Idle-revealed: opacity, not presence. The hints keep their layout
+                // whether or not they are visible, because the footer's height and the
+                // gear's position must not move with the user's typing rhythm.
+                Group {
+                    if state.historyMode {
+                        KeyHint(keys: "⏎", label: "run it")
+                        KeyHint(keys: "⌘⏎", label: "make an alias")
+                        KeyHint(keys: "⌘H", label: "back")
+                    } else {
+                        KeyHint(keys: "⏎", label: settings.enterAction.short)
+                        KeyHint(keys: "⌘⏎", label: settings.enterAction.secondary.short)
+                        // The new movement keys earn their place here over ⌘N: a
+                        // shortcut nobody can discover is one nobody uses, and ⌘N is
+                        // already on the sidebar button in MANAGE.
+                        KeyHint(keys: "⌥←→", label: "views")
+                        KeyHint(keys: "⌘↑↓", label: "buckets")
+                        KeyHint(keys: "⌘N", label: "new")
+                        KeyHint(keys: "⌘H", label: "history")
+                    }
+                }
+                .opacity(hintsShown ? 1 : 0)
+                .accessibilityHidden(!hintsShown)
             }
 
             Spacer()
@@ -287,7 +332,7 @@ struct RootView: View {
                 .foregroundStyle(theme.faint)
 
             Button { state.onOpenSettings?() } label: {
-                Image(systemName: "gearshape.fill").font(.system(size: 10.5))
+                Image(systemName: "gearshape.fill").font(.system(size: 10.5, weight: .semibold))
             }
             .liveButton()
             .foregroundStyle(theme.dim)
@@ -565,7 +610,7 @@ private struct PrimaryResult: View {
                     .foregroundStyle(theme.text)
                 if !conflicts.isEmpty {
                     Image(systemName: "exclamationmark.triangle.fill")
-                        .font(.system(size: 10))
+                        .font(.system(size: 10, weight: .semibold))
                         .foregroundStyle(.orange)
                         .help(conflicts.map(\.reason.headline).joined(separator: " · "))
                 }
@@ -941,7 +986,7 @@ struct ManageView: View {
         let count = countFor(bucket)
         return HStack(spacing: 6) {
             Image(systemName: bucket.symbol)
-                .font(.system(size: 10))
+                .font(.system(size: 10, weight: .semibold))
                 .frame(width: 14)
                 .foregroundStyle(active ? theme.accent : theme.dim)
             Text(bucket.label)
@@ -1003,7 +1048,7 @@ struct ManageView: View {
             Spacer(minLength: 2)
             if entry.entry.managed {
                 Image(systemName: "pencil.circle.fill")
-                    .font(.system(size: 9))
+                    .font(.system(size: 9, weight: .semibold))
                     .foregroundStyle(theme.accent.opacity(0.7))
                     .help("Written by AliasBar, so it can be edited here")
             }
@@ -1051,7 +1096,7 @@ struct ManageView: View {
                         VStack(alignment: .leading, spacing: 2) {
                             HStack(spacing: 5) {
                                 Image(systemName: "exclamationmark.triangle.fill")
-                                    .font(.system(size: 9))
+                                    .font(.system(size: 9, weight: .semibold))
                                     .foregroundStyle(.orange)
                                 Text(conflict.reason.headline)
                                     .font(.system(size: 10.5, weight: .semibold))
@@ -1139,7 +1184,7 @@ struct ManageView: View {
                               action: @escaping () -> Void) -> some View {
         Button(action: action) {
             HStack(spacing: 4) {
-                Image(systemName: symbol).font(.system(size: 9))
+                Image(systemName: symbol).font(.system(size: 9, weight: .semibold))
                 Text(title).font(.system(size: 10, weight: .medium))
             }
             .padding(.horizontal, 7)
