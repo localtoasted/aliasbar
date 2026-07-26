@@ -275,6 +275,8 @@ final class AppSettings: ObservableObject {
         static let hotkeyModifiers = "hotkeyModifiers"
         static let hotkeyEnabled = "hotkeyEnabled"
         static let resultLimit = "resultLimit"
+        static let onboardingComplete = "onboardingComplete"
+        static let hasEverPasted = "hasEverPasted"
     }
 
     // MARK: Behaviour
@@ -372,6 +374,22 @@ final class AppSettings: ObservableObject {
         didSet { defaults.set(resultLimit, forKey: Key.resultLimit) }
     }
 
+    // MARK: First run
+
+    /// Whether the first-run flow has been finished *or* dismissed. Either counts:
+    /// it is shown once, and closing it halfway is a decision, not an accident to
+    /// be corrected by showing it again.
+    @Published var onboardingComplete: Bool {
+        didSet { defaults.set(onboardingComplete, forKey: Key.onboardingComplete) }
+    }
+
+    /// Whether a paste has ever actually been delivered. This is what separates
+    /// "never granted Accessibility" from "the grant was silently voided by a
+    /// rebuild" — only the second deserves a warning banner.
+    @Published var hasEverPasted: Bool {
+        didSet { defaults.set(hasEverPasted, forKey: Key.hasEverPasted) }
+    }
+
     // MARK: Hotkey
 
     @Published var hotkey: HotkeyCombo {
@@ -433,6 +451,8 @@ final class AppSettings: ObservableObject {
         showFunctions = store.object(forKey: Key.showFunctions) as? Bool ?? true
         showAliases = store.object(forKey: Key.showAliases) as? Bool ?? true
         hotkeyEnabled = store.object(forKey: Key.hotkeyEnabled) as? Bool ?? true
+        onboardingComplete = store.object(forKey: Key.onboardingComplete) as? Bool ?? false
+        hasEverPasted = store.object(forKey: Key.hasEverPasted) as? Bool ?? false
         resultLimit = store.object(forKey: Key.resultLimit) as? Int ?? 6
 
         if let code = store.object(forKey: Key.hotkeyKeyCode) as? Int,
