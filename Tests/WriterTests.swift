@@ -1841,6 +1841,84 @@ checkExactSpanDelete(
     removes: ["alias doomed=", "payload )"],
     survives: ["alias mixedHeredocKeeper='16'"])
 
+// 17. Heredoc discovery spans the complete root shell list. Operators before a
+// separator must remain queued, and operators after it must still be discovered.
+let rootHeredocSeparators = [
+    ("pipe", "|"),
+    ("and", "&&"),
+    ("or", "||"),
+    ("semicolon", ";"),
+    ("background", "&"),
+]
+for (position, beforeSeparator) in [("before", true), ("after", false)] {
+    for (index, entry) in rootHeredocSeparators.enumerated() {
+        let (separatorLabel, separator) = entry
+        let delimiter = "HD\(position.uppercased())\(index)"
+        let payload = "\(position) \(separatorLabel) payload"
+        let command = beforeSeparator
+            ? "cat <<\(delimiter) \(separator) cat"
+            : "cat \(separator) cat <<\(delimiter)"
+        checkExactSpanDelete(
+            "root heredoc \(position) \(separatorLabel)",
+            statement: """
+            alias doomed=\(command)
+            \(payload)
+            \(delimiter)
+            alias rootSeparatorKeeper='\(position)-\(index)'
+            """,
+            removes: ["alias doomed=", payload, "\n\(delimiter)\n"],
+            survives: ["alias rootSeparatorKeeper='\(position)-\(index)'"])
+    }
+}
+
+// 18. More than one heredoc may be queued on opposite sides of a separator. The shell
+// consumes bodies in operator order, and the removal span must do the same.
+checkExactSpanDelete(
+    "root heredocs split across separator",
+    statement: """
+    alias doomed=cat <<FIRST | cat <<SECOND
+    first split payload
+    FIRST
+    second split payload
+    SECOND
+    alias splitHeredocKeeper='18'
+    """,
+    removes: ["alias doomed=", "first split payload", "second split payload",
+              "\nFIRST\n", "\nSECOND\n"],
+    survives: ["alias splitHeredocKeeper='18'"])
+
+// 19. Tab-stripping is a property of each queued heredoc, not of the shell list as a
+// whole. Mixing << and <<- across a separator must preserve both delimiter rules.
+checkExactSpanDelete(
+    "mixed root heredoc operators across separator",
+    statement: "alias doomed=cat <<PLAIN | cat <<-TABBED\n"
+        + "plain mixed payload\n"
+        + "PLAIN\n"
+        + "\ttabbed mixed payload\n"
+        + "\tTABBED\n"
+        + "alias mixedOperatorKeeper='19'",
+    removes: ["alias doomed=", "plain mixed payload", "tabbed mixed payload",
+              "\nPLAIN\n", "\tTABBED\n"],
+    survives: ["alias mixedOperatorKeeper='19'"])
+
+// 20. The unresolved-heredoc invariant is independent of ordinary continuation state.
+// Even if future lexer work accidentally loses a frame, a recognized delimiter that
+// was never consumed must make the edit fail without touching the file.
+let unconsumedRootHeredoc = scratch("""
+\(ManagedBlock.begin)
+alias doomed=cat <<NEVER | cat
+payload without a terminator
+\(ManagedBlock.end)
+""")
+let unconsumedRootHeredocBefore = read(unconsumedRootHeredoc)
+expectThrow("an unconsumed root heredoc refuses the edit") {
+    _ = try AliasWriter.apply(.delete(name: "doomed"), path: unconsumedRootHeredoc,
+                              allEntries: [], confirmedCollateral: true)
+}
+check("an unconsumed root heredoc leaves the file byte-for-byte untouched",
+      read(unconsumedRootHeredoc) == unconsumedRootHeredocBefore,
+      read(unconsumedRootHeredoc))
+
 
 // ===========================================================================
 // HISTORY

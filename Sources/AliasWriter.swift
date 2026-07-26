@@ -826,6 +826,14 @@ enum AliasWriter {
                     last += 1
                     state = scan(lines[last], from: state)
                 }
+                // This guard is intentionally independent of `continues`. If a future
+                // scanner change drops a frame or forgets to propagate continuation,
+                // unresolved heredoc input must turn into a refused edit, never a
+                // successful under-span that exposes the payload as shell commands.
+                if state.hasUnconsumedHeredoc {
+                    throw WriteError.wouldBreakSyntax(
+                        "the definition of \"\(name)\" has unconsumed heredoc input")
+                }
                 // Still incomplete at the end marker means the block is already
                 // malformed. Consuming to the end would delete everything after it, so
                 // refuse and let the user look at their own file.
@@ -893,8 +901,20 @@ enum AliasWriter {
         /// Everything the lexer needs to carry from one line to the next.
         struct LexState {
             var frames = [LexFrame(kind: .root, delimiterDepth: 0)]
+            /// Independent accounting for every heredoc delimiter the scanner has
+            /// recognized but not yet consumed. Frames own the parsing details, while
+            /// this count is the fail-safe invariant: resetting or popping a frame can
+            /// never make an unresolved heredoc disappear from span completion.
+            var unresolvedHeredocs = 0
+            var heredocStateInvalid = false
             /// Whether the statement continues onto the following line.
             var continues = false
+
+            var hasUnconsumedHeredoc: Bool {
+                heredocStateInvalid || unresolvedHeredocs > 0 || frames.contains {
+                    $0.activeHeredoc != nil || !$0.pendingHeredocs.isEmpty
+                }
+            }
         }
 
         /// Advances the lexer across one line.
@@ -906,6 +926,7 @@ enum AliasWriter {
             var index = line.startIndex
             var trailingEscape = false
             var endedInComment = false
+            var crossedRootSeparator = false
 
             func character(after position: String.Index) -> Character? {
                 let next = line.index(after: position)
@@ -1058,6 +1079,11 @@ enum AliasWriter {
                     : line
                 if candidate == active.delimiter {
                     state.frames[frameIndex].activeHeredoc = nil
+                    if state.unresolvedHeredocs > 0 {
+                        state.unresolvedHeredocs -= 1
+                    } else {
+                        state.heredocStateInvalid = true
+                    }
                     if !state.frames[frameIndex].pendingHeredocs.isEmpty {
                         state.frames[frameIndex].activeHeredoc =
                             state.frames[frameIndex].pendingHeredocs.removeFirst()
@@ -1066,7 +1092,7 @@ enum AliasWriter {
                     state.frames[frameIndex].atCommandStart = true
                 }
                 state.continues =
-                    state.frames.count > 1 || state.frames[frameIndex].activeHeredoc != nil
+                    state.frames.count > 1 || state.hasUnconsumedHeredoc
                 return state
             }
 
@@ -1124,6 +1150,7 @@ enum AliasWriter {
                               let parsed = heredoc(after: advance(index, by: 2)) {
                         finishToken(in: frameIndex)
                         state.frames[frameIndex].pendingHeredocs.append(parsed.0)
+                        state.unresolvedHeredocs += 1
                         index = parsed.1
                         continue
                     } else if ch == " " || ch == "\t" {
@@ -1131,11 +1158,14 @@ enum AliasWriter {
                         state.frames[frameIndex].atWordStart = true
                     } else if state.frames[frameIndex].kind == .root,
                               ch == ";" || ch == "|" || ch == "&" {
-                        // At depth zero these begin another shell statement. The span
-                        // ends here even if a later comment contains a backslash.
-                        state.frames = [LexFrame(kind: .root, delimiterDepth: 0)]
-                        state.continues = false
-                        return state
+                        // A root separator ends the alias command, but heredocs anywhere
+                        // on this physical shell list are read only after its newline.
+                        // Keep scanning the complete line so delimiters both before and
+                        // after the separator remain owned by this removal span.
+                        finishToken(in: frameIndex)
+                        state.frames[frameIndex].atWordStart = true
+                        state.frames[frameIndex].atCommandStart = true
+                        crossedRootSeparator = true
                     } else if state.frames[frameIndex].kind == .arithmetic, ch == "(" {
                         state.frames[frameIndex].delimiterDepth += 1
                         state.frames[frameIndex].atWordStart = false
@@ -1225,8 +1255,14 @@ enum AliasWriter {
             let heredocOpen = state.frames.contains {
                 $0.activeHeredoc != nil || !$0.pendingHeredocs.isEmpty
             }
-            state.continues = state.frames.count > 1 || rootQuoteOpen || heredocOpen
-                || (!endedInComment && trailingEscape)
+            // Once a root separator has ended the alias command, later syntax on that
+            // physical line must not extend its span. Heredoc bodies are the exception:
+            // the shell consumes them after the newline, and leaving them behind would
+            // turn their payload into executable input.
+            state.continues = state.hasUnconsumedHeredoc
+                || (!crossedRootSeparator
+                    && (state.frames.count > 1 || rootQuoteOpen || heredocOpen
+                        || (!endedInComment && trailingEscape)))
             return state
         }
 
