@@ -2605,6 +2605,286 @@ check("name suggester preserves the exhausted fallback",
 check("name suggester returns empty when no usable word remains",
       AliasNameSuggester.suggest(for: "sudo --help FOO=bar", takenNames: []) == "")
 
+// ---------------------------------------------------------------------------
+print("\n30. Sensitive content classifier")
+
+typealias QuarantineReason = SensitiveContentClassifier.QuarantineReason
+
+func classifierReason(_ content: String) -> QuarantineReason? {
+    SensitiveContentClassifier.quarantineReason(in: content)
+}
+
+func classifierBase64URL(_ value: String) -> String {
+    Data(value.utf8).base64EncodedString()
+        .replacingOccurrences(of: "+", with: "-")
+        .replacingOccurrences(of: "/", with: "_")
+        .replacingOccurrences(of: "=", with: "")
+}
+
+func syntheticJWT(
+    header: String = #"{"typ":"JWT","alg":"HS256"}"#,
+    claims: String = #"{"sub":"synthetic-user","iat":123}"#,
+    signatureBytes: Int = 32
+) -> String {
+    let signature = Data((0..<signatureBytes).map {
+        UInt8(($0 * 17 + 3) % 251)
+    }).base64EncodedString()
+        .replacingOccurrences(of: "+", with: "-")
+        .replacingOccurrences(of: "/", with: "_")
+        .replacingOccurrences(of: "=", with: "")
+    return [
+        classifierBase64URL(header),
+        classifierBase64URL(claims),
+        signature,
+    ].joined(separator: ".")
+}
+
+// Stable reasons never carry the matched bytes in an associated value, description,
+// raw value, log, or error. These checks use a canary that is not a token shape.
+let classifierLeakageCanary = "fixture-payload-must-never-appear"
+let reasonRawValues = QuarantineReason.allCases.map(\.rawValue)
+check("quarantine reason raw values are unique",
+      Set(reasonRawValues).count == reasonRawValues.count)
+for reason in QuarantineReason.allCases {
+    check("quarantine reason \(reason.rawValue) has a payload-free description",
+          !reason.description.contains(classifierLeakageCanary)
+              && !reason.rawValue.contains(classifierLeakageCanary))
+}
+
+// AWS publishes AKIA for long-term IDs and ASIA for temporary STS IDs. Secret access
+// keys have no unique prefix, so the AWS-specific secret reason requires its assignment.
+let awsIDBody = "A1B2C3D4E5F6G7H8"
+check("AKIA access ID is quarantined",
+      classifierReason("AKIA\(awsIDBody)") == .awsAccessKeyID)
+check("ASIA access ID is quarantined",
+      classifierReason("value=ASIA\(awsIDBody)") == .awsAccessKeyID)
+check("embedded AWS-looking ID is not a token",
+      classifierReason("xAKIA\(awsIDBody)") == nil)
+check("short AWS-looking ID stays safe",
+      classifierReason("AKIA\(awsIDBody.dropLast())") == nil)
+check("long AWS-looking ID stays safe",
+      classifierReason("AKIA\(awsIDBody)Z") == nil)
+check("lowercase AWS-looking prefix stays safe",
+      classifierReason("akia\(awsIDBody)") == nil)
+
+let syntheticAWSSecret = String(repeating: "Ab3/", count: 10)
+check("AWS secret assignment is quarantined with its specific reason",
+      classifierReason("AWS_SECRET_ACCESS_KEY=\(syntheticAWSSecret)")
+          == .awsSecretAccessKey)
+check("malformed AWS ID assignment stays safe",
+      classifierReason("AWS_ACCESS_KEY_ID=AKIA\(awsIDBody.dropLast())") == nil)
+check("AWS placeholder assignment stays safe",
+      classifierReason("AWS_SECRET_ACCESS_KEY=example") == nil)
+
+let providerTokenBody = String(repeating: "Ab3_Z9-y", count: 3)
+let shortProviderBody = String(
+    repeating: "a",
+    count: SensitiveContentClassifier.Thresholds.minimumVendorTokenBodyBytes - 1
+)
+
+for prefix in ["ghp_", "github_pat_", "gho_", "ghu_", "ghs_", "ghr_"] {
+    check("GitHub token prefix \(prefix) is quarantined",
+          classifierReason("\(prefix)\(providerTokenBody)") == .githubToken)
+}
+let matchedProviderReason = classifierReason("ghp_\(providerTokenBody)")
+check("matched reason does not echo provider fixture bytes",
+      matchedProviderReason.map {
+          !$0.description.contains(providerTokenBody)
+              && !$0.rawValue.contains(providerTokenBody)
+      } == true)
+check("current long-form GitHub installation token is quarantined",
+      classifierReason("ghs_123456789_\(syntheticJWT())") == .githubToken)
+check("short GitHub-looking token stays safe",
+      classifierReason("ghp_\(shortProviderBody)") == nil)
+check("embedded GitHub-looking token stays safe",
+      classifierReason("xghp_\(providerTokenBody)") == nil)
+let maximumGitHubBody = String(
+    repeating: "a",
+    count: SensitiveContentClassifier.Thresholds.maximumVendorTokenBytes
+        - "ghp_".utf8.count
+)
+check("vendor token maximum is inclusive",
+      classifierReason("ghp_\(maximumGitHubBody)") == .githubToken)
+check("vendor token over the maximum stays safe",
+      classifierReason("ghp_\(maximumGitHubBody)a") == nil)
+
+for prefix in [
+    "glpat-", "gloas-", "gldt-", "glrt-", "glrtr-", "glcbt-", "glptt-",
+    "glft-", "glimt-", "glagent-", "glwt-", "glsoat-", "glffct-",
+    "_gitlab_session=",
+] {
+    check("GitLab token prefix \(prefix) is quarantined",
+          classifierReason("\(prefix)\(providerTokenBody)") == .gitlabToken)
+}
+check("short GitLab-looking token stays safe",
+      classifierReason("glpat-\(shortProviderBody)") == nil)
+check("unknown GitLab custom prefix is not mislabeled as GitLab",
+      classifierReason("custompat-\(shortProviderBody)") == nil)
+
+for prefix in [
+    "xoxb-", "xoxp-", "xwfp-", "xapp-", "xoxe.xoxb-", "xoxe.xoxp-", "xoxe-",
+] {
+    check("Slack token prefix \(prefix) is quarantined",
+          classifierReason("\(prefix)\(providerTokenBody)") == .slackToken)
+}
+check("short Slack-looking token stays safe",
+      classifierReason("xoxb-\(shortProviderBody)") == nil)
+
+for label in [
+    "PRIVATE KEY",
+    "ENCRYPTED PRIVATE KEY",
+    "RSA PRIVATE KEY",
+    "EC PRIVATE KEY",
+    "OPENSSH PRIVATE KEY",
+    "PGP PRIVATE KEY BLOCK",
+] {
+    let block = """
+    -----BEGIN \(label)-----
+    U3ludGhldGljIGZpeHR1cmUgb25seQ==
+    -----END \(label)-----
+    """
+    check("\(label) boundary is quarantined",
+          classifierReason(block) == .privateKey)
+}
+check("public-key block stays safe",
+      classifierReason("-----BEGIN PUBLIC KEY-----\nU3ludGhldGlj\n-----END PUBLIC KEY-----")
+          == nil)
+check("certificate block stays safe",
+      classifierReason("-----BEGIN CERTIFICATE-----\nU3ludGhldGlj\n-----END CERTIFICATE-----")
+          == nil)
+check("private-looking plural label stays safe",
+      classifierReason("-----BEGIN PRIVATE KEYS-----") == nil)
+
+check("generic token assignment is quarantined",
+      classifierReason("API_TOKEN=abcdefgh") == .environmentSecret)
+check("exported quoted password is quarantined",
+      classifierReason(#"export DATABASE_PASSWORD="correct horse battery staple""#)
+          == .environmentSecret)
+check("Unicode secret assignment is quarantined",
+      classifierReason("CLIENT_SECRET=秘密の合言葉") == .environmentSecret)
+check("environment value floor is inclusive",
+      classifierReason("API_TOKEN=\(String(repeating: "z", count: 8))")
+          == .environmentSecret)
+check("short environment value stays safe",
+      classifierReason("API_TOKEN=\(String(repeating: "z", count: 7))") == nil)
+check("placeholder expansion stays safe",
+      classifierReason(#"API_TOKEN=${TOKEN}"#) == nil)
+check("unbraced placeholder expansion stays safe",
+      classifierReason(#"API_TOKEN=$LONG_TOKEN_NAME"#) == nil)
+check("placeholder words stay safe",
+      classifierReason("API_TOKEN=change-me") == nil)
+check("non-secret token-count variable stays safe",
+      classifierReason("TOKEN_COUNT=12345678") == nil)
+check("password hint variable stays safe",
+      classifierReason("PASSWORD_HINT=remember-this") == nil)
+check("public-key variable stays safe",
+      classifierReason("PUBLIC_KEY=abcdefghijk") == nil)
+
+for credentialURL in [
+    "postgres://user:synthetic@db.example/app",
+    "postgresql://user:p%40ss@db.example/app",
+    "mysql://user:synthetic@db.example/app",
+    "mysqlx://user:synthetic@db.example/app",
+    "postgresql://db.example/app?password=synthetic",
+    "POSTGRES://user:synthetic@db.example/app",
+] {
+    check("structured database credential URL is quarantined",
+          classifierReason("connect \(credentialURL)") == .databaseCredentialURL)
+}
+for safeURL in [
+    "postgres://user@db.example/app",
+    "postgres://user:@db.example/app",
+    "postgres://user:synthetic@",
+    "https://user:synthetic@db.example/app",
+    "notpostgres://user:synthetic@db.example/app",
+    "postgresql://db.example/app?password=",
+] {
+    check("database URL near-miss stays safe",
+          classifierReason(safeURL) == nil)
+}
+
+let signedJWT = syntheticJWT()
+check("structurally signed JWT is quarantined",
+      classifierReason(signedJWT) == .signedJWT)
+check("JWT surrounded by punctuation is still recognized",
+      classifierReason("(\(signedJWT))") == .signedJWT)
+check("unsigned alg-none JWT stays safe",
+      classifierReason(syntheticJWT(header: #"{"typ":"JWT","alg":"none"}"#)) == nil)
+check("JWT with malformed header JSON stays safe",
+      classifierReason(syntheticJWT(header: "not-json")) == nil)
+check("JWT with non-object claims stays safe",
+      classifierReason(syntheticJWT(claims: #"["synthetic"]"#)) == nil)
+check("JWT with a short signature stays safe",
+      classifierReason(syntheticJWT(signatureBytes: 15)) == nil)
+check("two-part JWT-looking text stays safe",
+      classifierReason(signedJWT.split(separator: ".").prefix(2).joined(separator: "."))
+          == nil)
+check("four-part JWT-looking text stays safe",
+      classifierReason("\(signedJWT).extra") == nil)
+check("invalid base64url JWT-looking text stays safe",
+      classifierReason("abc%.\(classifierBase64URL(#"{"sub":"x"}"#)).abcdef")
+          == nil)
+
+let entropyAlphabet = Array(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+)
+let highEntropyAtFloor = String(
+    (0..<SensitiveContentClassifier.Thresholds.minimumHighEntropyBytes).map {
+        entropyAlphabet[($0 * 17) % entropyAlphabet.count]
+    }
+)
+check("generic entropy floor is inclusive",
+      classifierReason(highEntropyAtFloor) == .highEntropyString)
+check("generic entropy below the byte floor stays safe",
+      classifierReason(String(highEntropyAtFloor.dropLast())) == nil)
+check("long low-entropy run stays safe",
+      classifierReason(String(repeating: "A", count: 513)) == nil)
+check("high-entropy hex is quarantined",
+      classifierReason(String(repeating: "0123456789abcdef", count: 4))
+          == .highEntropyString)
+check("short hex near-miss stays safe",
+      classifierReason(String(String(repeating: "0123456789abcdef", count: 4).dropLast()))
+          == nil)
+check("ordinary UUID stays safe",
+      classifierReason("123e4567-e89b-12d3-a456-426614174000") == nil)
+check("entropy scanning remains bounded across a long candidate",
+      classifierReason(String(repeating: String(entropyAlphabet), count: 9))
+          == .highEntropyString)
+
+check("ordinary Unicode text stays safe",
+      classifierReason("こんにちは、AliasBar。これは普通のメモです。") == nil)
+check("Unicode adjacency cannot hide a provider token",
+      classifierReason("🔐ghp_\(providerTokenBody)🔐") == .githubToken)
+check("full-width lookalike prefix stays safe",
+      classifierReason("ｇｈｐ_\(shortProviderBody)") == nil)
+
+let maximumClassifierBytes =
+    SensitiveContentClassifier.Thresholds.maximumInputBytes
+check("input exactly at the inspection limit is classified normally",
+      classifierReason(String(repeating: "a", count: maximumClassifierBytes)) == nil)
+check("input over the inspection limit fails closed",
+      classifierReason(String(repeating: "a", count: maximumClassifierBytes + 1))
+          == .oversizedContent)
+let tokenAtLimit = "ghp_\(providerTokenBody)"
+let paddedTokenAtLimit =
+    String(repeating: " ", count: maximumClassifierBytes - tokenAtLimit.utf8.count)
+    + tokenAtLimit
+check("provider token at the bounded input tail is still found",
+      classifierReason(paddedTokenAtLimit) == .githubToken)
+
+let classifierSource = read(
+    projectRoot.appendingPathComponent("Sources/SensitiveContentClassifier.swift").path
+)
+check("classifier source is readable",
+      classifierSource != "<unreadable>")
+for forbiddenAPI in [
+    "AppKit", "SwiftUI", "UserDefaults", "NSPasteboard", "FileManager",
+    "URLSession", "Process(", "print(", "NSLog", "os_log",
+] {
+    check("classifier has no \(forbiddenAPI) dependency",
+          !classifierSource.contains(forbiddenAPI))
+}
+
 
 // ---------------------------------------------------------------------------
 print("\n" + String(repeating: "-", count: 60))
