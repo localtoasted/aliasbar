@@ -14,6 +14,7 @@ import UniformTypeIdentifiers
 struct SettingsView: View {
     @ObservedObject var settings: AppSettings
     @ObservedObject private var updater = Updater.shared
+    @ObservedObject private var expansionMonitor = ExpansionMonitor.shared
     // Behaviour, unless a harness asked for another section. The appearance section is
     // otherwise four clicks and a keystroke away from a cold launch, which is four clicks
     // more than a screenshot script can manage without Accessibility permission.
@@ -125,7 +126,7 @@ struct SettingsView: View {
     }
 
     enum SettingsSection: String, CaseIterable, Identifiable {
-        case behaviour, appearance, content, clipboard, sync, about
+        case behaviour, appearance, content, clipboard, sync, expansion, about
         var id: String { rawValue }
         var label: String {
             switch self {
@@ -134,6 +135,7 @@ struct SettingsView: View {
             case .content: return "Content"
             case .clipboard: return "Clipboard"
             case .sync: return "Sync"
+            case .expansion: return "Expansion"
             case .about: return "About"
             }
         }
@@ -144,6 +146,7 @@ struct SettingsView: View {
             case .content: return "doc.text"
             case .clipboard: return "doc.on.clipboard"
             case .sync: return "arrow.triangle.2.circlepath"
+            case .expansion: return "wand.and.stars"
             case .about: return "info.circle"
             }
         }
@@ -161,6 +164,7 @@ struct SettingsView: View {
                     case .content: contentSection
                     case .clipboard: clipboardSection
                     case .sync: syncSection
+                    case .expansion: expansionSection
                     case .about: aboutSection
                     }
                 }
@@ -634,6 +638,85 @@ struct SettingsView: View {
                 NoticeText("The sync file's own location, your shell config path, hotkey, launch-at-login, onboarding state, Accessibility permission, window placement, all three clipboard toggles, and usage counts. Clipboard history and snippets only ever enter this file through their own separate opt-in — turning this on does not turn either of those on.",
                            tone: .info)
             }
+        }
+    }
+
+    // MARK: Expansion
+
+    private var expansionSection: some View {
+        VStack(alignment: .leading, spacing: 22) {
+            SettingsGroup("Inline expansion") {
+                SettingsRow("Enable",
+                            hint: "Off by default. When on, a rolling buffer no longer than your longest snippet trigger is compared against your snippets in memory as you type — anywhere on the Mac, in any app. It is never written to disk, and while this is off, AliasBar isn't watching your typing at all.") {
+                    ThemedToggle(isOn: $settings.inlineExpansionEnabled,
+                                 label: settings.inlineExpansionEnabled ? "On" : "Off")
+                        .onChange(of: settings.inlineExpansionEnabled) { enabled in
+                            if enabled {
+                                ExpansionMonitor.shared.start()
+                            } else {
+                                ExpansionMonitor.shared.stop()
+                            }
+                        }
+                }
+                if expansionMonitor.status != .off {
+                    expansionStatusNotice
+                }
+                NoticeText("Never watched, even while this is on: any secure field — a password prompt, or anything else macOS itself marks as secure input. That's checked before every single keystroke and excluded automatically, with no setting of its own.",
+                           tone: .info)
+            }
+
+            SettingsGroup("Snippets") {
+                NoticeText("Triggers and templates live in Manage → Snippets — create, edit, and delete them there. A snippet can hold {{holes}} for the parts that change; typing the trigger with expansion on opens a small fill-in prompt for those before pasting.",
+                           tone: .info)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var expansionStatusNotice: some View {
+        HStack(spacing: 7) {
+            Image(systemName: expansionStatusSymbol)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(expansionStatusColor)
+            Text(expansionStatusText)
+                .font(.system(size: 10.5))
+                .foregroundStyle(theme.dim)
+                .fixedSize(horizontal: false, vertical: true)
+            if expansionMonitor.status == .needsAccessibility {
+                ThemedButton("Grant") { Typist.requestTrust() }
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(9)
+        .background(expansionStatusColor.opacity(0.10), in: RoundedRectangle(cornerRadius: theme.cornerRadius))
+    }
+
+    private var expansionStatusSymbol: String {
+        switch expansionMonitor.status {
+        case .active: return "checkmark.circle.fill"
+        case .needsAccessibility, .tapFailed: return "exclamationmark.triangle.fill"
+        case .off: return "circle"
+        }
+    }
+
+    private var expansionStatusColor: Color {
+        switch expansionMonitor.status {
+        case .active: return .green
+        case .needsAccessibility, .tapFailed: return .orange
+        case .off: return .gray
+        }
+    }
+
+    private var expansionStatusText: String {
+        switch expansionMonitor.status {
+        case .active:
+            return "Watching for triggers. Accessibility is granted."
+        case .needsAccessibility:
+            return "Needs Accessibility to watch for triggers — until it's granted, nothing expands."
+        case .tapFailed:
+            return "macOS stopped the watcher (this can happen after sleep, or a revoked permission). Turned back off — flip the toggle to try again."
+        case .off:
+            return ""
         }
     }
 

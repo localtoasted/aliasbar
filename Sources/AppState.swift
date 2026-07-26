@@ -3,7 +3,7 @@ import Carbon.HIToolbox
 
 /// Sidebar buckets in MANAGE's shell dialect.
 enum Bucket: String, CaseIterable, Identifiable {
-    case all, functions, aliases, mostUsed, neverRun, byFile, conflicts, suggested
+    case all, functions, aliases, mostUsed, neverRun, byFile, conflicts, suggested, snippets
     var id: String { rawValue }
 
     var label: String {
@@ -16,6 +16,7 @@ enum Bucket: String, CaseIterable, Identifiable {
         case .byFile: return "By file"
         case .conflicts: return "Conflicts"
         case .suggested: return "Suggested"
+        case .snippets: return "Snippets"
         }
     }
 
@@ -29,6 +30,7 @@ enum Bucket: String, CaseIterable, Identifiable {
         case .byFile: return "doc.text"
         case .conflicts: return "exclamationmark.triangle"
         case .suggested: return "sparkles"
+        case .snippets: return "wand.and.stars"
         }
     }
 
@@ -36,11 +38,12 @@ enum Bucket: String, CaseIterable, Identifiable {
     /// MANAGE names every bucket in its sidebar, while `byFile` changes order without
     /// narrowing the pool.
     ///
-    /// `suggested` never actually reaches FIND or BOARD's header in practice — its
-    /// pool is `[AliasSuggestion]`, not `[RankedEntry]`, so nothing outside MANAGE's
-    /// own sidebar ever sets `bucket` to it — but it still answers this the same way
-    /// `conflicts` or `neverRun` would, rather than carve out an exception for a case
-    /// that can't currently reach here.
+    /// `suggested` and `snippets` never actually reach FIND or BOARD's header in
+    /// practice — their pools are `[AliasSuggestion]` and `[Snippet]`, not
+    /// `[RankedEntry]`, so nothing outside MANAGE's own sidebar ever sets `bucket` to
+    /// either — but they still answer this the same way `conflicts` or `neverRun`
+    /// would, rather than carve out an exception for a case that can't currently
+    /// reach here.
     func showsHeaderFilter(in mode: ViewMode) -> Bool {
         mode != .manage && self != .all && self != .byFile
     }
@@ -154,6 +157,33 @@ struct ComposerPrefill {
     var source: String? = nil
 }
 
+/// What the Snippets sheet is currently doing — deliberately its own small type
+/// rather than another `EditTarget.Kind` case. The packet is explicit that the
+/// Composer is not extended for snippets in v1 (one less kind in ⌘N, and a snippet
+/// has no shell/prompt duality to switch between), so it gets its own tiny sheet
+/// with its own tiny target instead of growing the Composer's already-two-shaped
+/// state a third way.
+struct SnippetEditTarget: Identifiable {
+    enum Mode { case create, edit }
+    let mode: Mode
+    var trigger: String
+    var template: String
+    /// `nil` for a new snippet; the snippet's own id while editing one, so a save
+    /// knows which stored record to replace and validation can exclude it from its
+    /// own duplicate-trigger check.
+    let originalID: UUID?
+
+    var id: String { originalID?.uuidString ?? "new" }
+
+    static func create() -> SnippetEditTarget {
+        SnippetEditTarget(mode: .create, trigger: "", template: "", originalID: nil)
+    }
+    static func edit(_ snippet: Snippet) -> SnippetEditTarget {
+        SnippetEditTarget(mode: .edit, trigger: snippet.trigger, template: snippet.template,
+                          originalID: snippet.id)
+    }
+}
+
 /// What FIND is currently searching: your defined aliases and functions, your shell
 /// history, or your clipboard. Three sources sharing one surface, not three views —
 /// see `AppState.findSource`'s own doc comment for why this replaced a plain
@@ -214,6 +244,11 @@ final class AppState: ObservableObject {
     /// has to.
     @Published var fillIn: PromptFillTarget?
 
+    /// The Snippets bucket's own sheet, parallel to `editor` — its own `Esc`/⌘⏎
+    /// handling lives alongside `editor`'s and `fillIn`'s in `handleKey`, at the same
+    /// "the sheet owns the keyboard while it's up" layer both of those already use.
+    @Published var snippetEditor: SnippetEditTarget?
+
     struct PromptFillTarget: Identifiable {
         let shortcut: Shortcut
         var fill: SlotFillState
@@ -254,6 +289,16 @@ final class AppState: ObservableObject {
     private var promptCache: [Prompt] = []
     /// Usage counts for those prompts, loaded alongside them for the same reason.
     private var promptUsageCache: [String: PromptUsageCounter.Entry] = [:]
+
+    /// The local snippet file, source of truth for MANAGE's Snippets bucket and for
+    /// `ExpansionMonitor`'s live matcher alike — both read the same path, so there is
+    /// never a moment where the UI shows a snippet the running expansion tap doesn't
+    /// know about, or vice versa.
+    let snippetStore = SnippetStore(localPath: AppPaths.snippetsPath)
+    /// Every snippet on this machine, read once per summon like `promptCache` — and
+    /// re-read immediately after any CRUD action, so the list never shows stale data
+    /// while the popover is still open.
+    private var snippetCache: [Snippet] = []
 
     /// MANAGE's Suggested bucket, read once per summon like `promptCache` — mining
     /// history for repeated commands on every keystroke would be exactly the kind of
@@ -310,11 +355,12 @@ final class AppState: ObservableObject {
         case .conflicts:
             let names = Set(store.conflicts.map(\.name))
             return entries.filter { names.contains($0.name) }
-        case .suggested:
-            // Suggested's pool is `[AliasSuggestion]`, not `[RankedEntry]` — see
-            // `suggestedEntries` below. `ManageView` routes to its own view entirely
-            // for this bucket rather than ever reading `bucketEntries`/`activeList`
-            // for it, so this branch exists only to keep the switch exhaustive.
+        case .suggested, .snippets:
+            // Suggested's pool is `[AliasSuggestion]` and Snippets' is `[Snippet]` —
+            // neither is `[RankedEntry]` — see `suggestedEntries`/`snippetManageResults`
+            // below. `ManageView` routes to its own view entirely for either bucket
+            // rather than ever reading `bucketEntries`/`activeList` for it, so this
+            // branch exists only to keep the switch exhaustive.
             return []
         }
     }
@@ -783,6 +829,92 @@ final class AppState: ObservableObject {
     func ignoreSuggestion(_ suggestion: AliasSuggestion) {
         _ = SuggestionIgnoreStore.ignore(suggestion.command, path: AppPaths.suggestionIgnoresPath)
         refreshSuggestions()
+        clampSelection()
+    }
+
+    // MARK: - Manage: Snippets
+
+    /// Re-reads `snippetCache` from `snippetStore` and pushes the fresh set into
+    /// `ExpansionMonitor`'s live trigger matcher, so a snippet just saved or deleted
+    /// from the UI is immediately what a keystroke can expand — not just what the
+    /// next popover summon happens to show. Called at `prepareForShow` and again
+    /// after every create/edit/delete.
+    private func refreshSnippetCache() {
+        snippetCache = snippetStore.all()
+        ExpansionMonitor.shared.refreshSnippets()
+    }
+
+    /// MANAGE's Snippets bucket: `snippetCache`, narrowed by `query` against the two
+    /// things worth searching — the trigger itself and the template it expands to —
+    /// then ordered by trigger. No usage-based ranking exists for a snippet (there is
+    /// no usage counter for one, unlike a prompt or an alias), so alphabetical is the
+    /// whole ordering rule, not a tiebreak under something else.
+    var snippetManageResults: [Snippet] {
+        let q = query.lowercased().trimmingCharacters(in: .whitespaces)
+        let filtered = q.isEmpty ? snippetCache : snippetCache.filter {
+            $0.trigger.lowercased().contains(q) || $0.template.lowercased().contains(q)
+        }
+        return filtered.sorted {
+            $0.trigger.localizedCaseInsensitiveCompare($1.trigger) == .orderedAscending
+        }
+    }
+
+    /// MANAGE's Snippets counterpart to `selectedSuggestion`/`selectedPromptManageShortcut`
+    /// — no fallback to the first row, for the same "an index that has drifted off
+    /// the end of a reranked list should point at nothing" reason neither of those
+    /// falls back either.
+    var selectedSnippet: Snippet? {
+        let list = snippetManageResults
+        guard list.indices.contains(selection) else { return nil }
+        return list[selection]
+    }
+
+    func beginCreateSnippet() {
+        snippetEditor = .create()
+    }
+
+    func beginEditSnippet(_ snippet: Snippet) {
+        snippetEditor = .edit(snippet)
+    }
+
+    /// The Snippets sheet's live validation — read by `SnippetEditorSheet` on every
+    /// keystroke, exactly the way `composerAliasValidation`/`composerPromptValidation`
+    /// drive the Composer's own live feedback.
+    func snippetTriggerValidation(trigger: String, excluding id: UUID?) -> SnippetTriggerValidation.TriggerError? {
+        if case .failure(let error) = SnippetTriggerValidation.validate(trigger, against: snippetCache, excluding: id) {
+            return error
+        }
+        return nil
+    }
+
+    /// Whether `target` is currently save-able: a valid, non-colliding trigger and a
+    /// non-empty template. The Save button's `disabled` state reads this directly,
+    /// same pattern as the Composer's `canSave`.
+    func canSaveSnippet(_ target: SnippetEditTarget) -> Bool {
+        guard !target.template.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
+        return snippetTriggerValidation(trigger: target.trigger, excluding: target.originalID) == nil
+    }
+
+    /// Saves whatever `snippetEditor` currently holds. A no-op (rather than a crash
+    /// or a silently-wrong write) if the target somehow fails validation by the time
+    /// this runs — the Save button is disabled in that state, but ⌘⏎ reaches this
+    /// too, and a keyboard shortcut racing ahead of a disabled button is not a reason
+    /// to write anyway.
+    func commitSnippetEditor() {
+        guard let target = snippetEditor, canSaveSnippet(target) else { return }
+        let snippet = Snippet(id: target.originalID ?? UUID(), trigger: target.trigger, template: target.template)
+        _ = snippetStore.upsert(snippet)
+        refreshSnippetCache()
+        snippetEditor = nil
+        show(toast: "Saved \(snippet.trigger)")
+    }
+
+    /// Deletes a snippet outright — no collateral-removal confirmation the way an
+    /// alias delete needs, since a snippet is one JSON record with nothing else
+    /// riding along with it (unlike a line in a hand-edited `.zshrc`).
+    func deleteSnippet(_ snippet: Snippet) {
+        snippetStore.delete(id: snippet.id)
+        refreshSnippetCache()
         clampSelection()
     }
 
@@ -1330,6 +1462,7 @@ final class AppState: ObservableObject {
             return promptManageResults.count
         }
         if bucket == .suggested { return suggestedEntries.count }
+        if bucket == .snippets { return snippetManageResults.count }
         return activeList.count
     }
 
@@ -1400,6 +1533,7 @@ final class AppState: ObservableObject {
         query = ""
         selection = 0
         editor = nil
+        snippetEditor = nil
 
         // The one place dialect is ever guessed: from the app that was frontmost right
         // before this summon, which `PreviousApp.remember()` already captured on the
@@ -1412,6 +1546,7 @@ final class AppState: ObservableObject {
         promptCache = PromptStore.scan(directory: promptsDirectory).prompts
         promptUsageCache = PromptUsageCounter.all(path: AppPaths.promptUsagePath)
         refreshSuggestions()
+        refreshSnippetCache()
         refreshInbox()
 
         if let hint = pendingPromptHint {
@@ -1462,6 +1597,19 @@ final class AppState: ObservableObject {
         if fillIn != nil {
             if event.keyCode == UInt16(kVK_Escape) {
                 cancelFillIn()
+                return true
+            }
+            return false
+        }
+
+        // Same shape again: the Snippets sheet owns the keyboard while it is up.
+        if snippetEditor != nil {
+            if event.keyCode == UInt16(kVK_Escape) {
+                snippetEditor = nil
+                return true
+            }
+            if event.keyCode == UInt16(kVK_Return) && event.modifierFlags.contains(.command) {
+                commitSnippetEditor()
                 return true
             }
             return false
@@ -1638,6 +1786,15 @@ final class AppState: ObservableObject {
         case kVK_ANSI_3 where command:
             switchTo(.manage); return true
 
+        // The Snippets bucket has no Composer kind to speak of (it isn't extended
+        // there by design) — ⌘N inside it opens the dedicated Snippets sheet instead,
+        // so ⌘N does *something* useful no matter which MANAGE bucket you're in.
+        // Checked ahead of the generic ⌘N case below, which would otherwise open the
+        // (shell-dialect) Composer for a new alias while looking at Snippets.
+        case kVK_ANSI_N where command && mode == .manage && dialect == .shell && bucket == .snippets:
+            beginCreateSnippet()
+            return true
+
         // Default kind follows `dialect` — the same field FIND/BOARD already use for
         // "which kind is this session favoring" — and the Composer's own Kind control
         // stays switchable from there regardless of which one this opened on.
@@ -1666,6 +1823,8 @@ final class AppState: ObservableObject {
             case .manage:
                 if dialect == .prompt {
                     if let shortcut = selectedPromptManageShortcut { beginEditPrompt(shortcut) }
+                } else if bucket == .snippets {
+                    if let snippet = selectedSnippet { beginEditSnippet(snippet) }
                 } else if let entry = selectedEntry {
                     beginEdit(entry.entry)
                 }

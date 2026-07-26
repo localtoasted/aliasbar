@@ -65,6 +65,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                 }
             }
 
+        // Same posture, same reason: off means no CGEventTap is ever created, not
+        // merely a disabled one. `ExpansionMonitor.shared` is a singleton (its
+        // Settings section observes it live), but `start()` itself is the one
+        // place the real tap comes into existence — never called at all here
+        // while the setting is off.
+        if settings.inlineExpansionEnabled {
+            ExpansionMonitor.shared.start()
+        }
+
         NotificationCenter.default.addObserver(
             forName: .aliasBarHotkeyFired, object: nil, queue: .main
         ) { [weak self] _ in self?.summon() }

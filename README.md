@@ -38,7 +38,7 @@ That's the actual problem: an alias is a compression artifact, and the key to re
 | `⌘,` | settings |
 | `esc` | dismiss **and hand focus back to the app you came from** |
 
-**No permission prompts for any of that.** The global hotkey uses the system hotkey API, so AliasBar is told only that one specific combination fired and never observes any other keystroke. (Auto-paste is the one exception, and it asks.)
+**No permission prompts for any of that.** The global hotkey uses the system hotkey API, so AliasBar is told only that one specific combination fired — never any other keystroke. Auto-paste and inline expansion (below) are the two features that do need a permission; both ask for it, and both stay off — actually off, nothing constructed — until you grant it.
 
 ## Enter does what you tell it to
 
@@ -73,6 +73,14 @@ This is the only code in AliasBar that modifies anything, so it's the part that'
 - Validates names and quotes commands correctly, including embedded single quotes.
 
 61 tests cover it, including round-trips through the real `zsh` binary. Run them with `./test.sh`.
+
+## Snippets & inline expansion
+
+Manage → Snippets holds short triggers (`;sig`, `;addr`, whatever you like) that expand into a saved template, with `{{holes}}` for the parts that change — the same double-brace grammar the prompt side of the app uses for its own `{{slots}}`.
+
+By itself, a snippet is just something stored. **Inline expansion** — typing a trigger anywhere on the Mac and having it expand automatically, in whatever app has focus — is a separate, off-by-default toggle in Settings → Expansion. Turn it on and AliasBar watches a rolling buffer no longer than your longest trigger, compared against your snippets in memory as each character arrives. It is never written to disk. It is never watched at all while the toggle is off — not a disabled watcher sitting idle, nothing constructed. And it fails closed: a password field or anything else macOS marks as secure input is always excluded, checked before every keystroke with no setting of its own; if the underlying watcher itself is ever interrupted by the system, expansion turns back off rather than carry on in some half-working state.
+
+Expanding a trigger deletes exactly what you typed and pastes the result the same way an alias delivery does — through the clipboard, with whatever was already there restored right after. A snippet with holes opens a small fill-in prompt first; cancelling it retypes the trigger exactly as written, so you're always left exactly where you were.
 
 ## Themes
 
