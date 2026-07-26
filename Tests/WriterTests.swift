@@ -6630,6 +6630,328 @@ do {
 }
 
 // ---------------------------------------------------------------------------
+print("\n39. Manage: prompt dialect buckets + Suggested (PRE-262)")
+
+// --- Bucket / PromptBucket shapes ---------------------------------------------
+
+check("Bucket gained exactly one new case for the shell sidebar: suggested",
+      Bucket.allCases.contains(.suggested) && Bucket.allCases.count == 8)
+check("PromptBucket is exactly library, delivery, health, in that order",
+      PromptBucket.allCases == [.library, .delivery, .health])
+
+// --- Health: staleness is pure logic, tested with a fake clock ----------------
+
+let healthNow = Date(timeIntervalSince1970: 1_800_000_000)
+
+func healthPrompt(name: String, editedAt: Date? = nil, body: String = "a body") -> Shortcut {
+    var frontmatter: PromptFrontmatter?
+    if let editedAt {
+        frontmatter = PromptFrontmatter.empty().setting("edited", to: ISO8601DateFormatter().string(from: editedAt))
+    }
+    return Shortcut(prompt: Prompt(name: name, frontmatter: frontmatter, body: body))
+}
+
+let neverUsedFresh = healthPrompt(name: "freshnever")
+check("a prompt never used, with no edited date on record, is not flagged stale — a brand-new prompt is new, not neglected",
+      AppState.promptHealthIssues(for: neverUsedFresh, library: [neverUsedFresh], usage: [:], now: healthNow).isEmpty)
+
+let oldEditedNeverUsed = healthPrompt(name: "editedlongago",
+                                      editedAt: healthNow.addingTimeInterval(-91 * 24 * 60 * 60))
+check("a prompt never used but recorded as edited 91+ days ago is flagged stale",
+      AppState.promptHealthIssues(for: oldEditedNeverUsed, library: [oldEditedNeverUsed], usage: [:], now: healthNow)
+          .contains { $0.kind == .stale })
+
+let recentlyEditedNeverUsed = healthPrompt(name: "editedrecently",
+                                           editedAt: healthNow.addingTimeInterval(-5 * 24 * 60 * 60))
+check("a prompt never used but edited only 5 days ago is not stale yet",
+      !AppState.promptHealthIssues(for: recentlyEditedNeverUsed, library: [recentlyEditedNeverUsed], usage: [:], now: healthNow)
+          .contains { $0.kind == .stale })
+
+let boundaryName = "boundaryprompt"
+let boundaryPrompt = healthPrompt(name: boundaryName)
+let justUnderThreshold: [String: PromptUsageCounter.Entry] =
+    [boundaryName: .init(count: 1, lastUsed: healthNow.addingTimeInterval(-89 * 24 * 60 * 60))]
+check("89 days since last use is not yet stale",
+      !AppState.promptHealthIssues(for: boundaryPrompt, library: [boundaryPrompt], usage: justUnderThreshold, now: healthNow)
+          .contains { $0.kind == .stale })
+let justOverThreshold: [String: PromptUsageCounter.Entry] =
+    [boundaryName: .init(count: 1, lastUsed: healthNow.addingTimeInterval(-91 * 24 * 60 * 60))]
+check("91 days since last use is stale",
+      AppState.promptHealthIssues(for: boundaryPrompt, library: [boundaryPrompt], usage: justOverThreshold, now: healthNow)
+          .contains { $0.kind == .stale })
+
+check("the stale diagnosis uses the exact machine-scoped copy from the spec",
+      AppState.PromptHealthIssue(kind: .stale).headline == "not used on this Mac in 90+ days")
+
+// --- Health: collisions, both kinds --------------------------------------------
+
+let reviewPrompt = healthPrompt(name: "review")
+check("a prompt named after a Claude Code builtin collides",
+      AppState.promptHealthIssues(for: reviewPrompt, library: [reviewPrompt], usage: [:], now: healthNow)
+          .contains { $0.kind == .builtinCollision })
+check("a prompt with an ordinary name has no builtin collision",
+      !AppState.promptHealthIssues(for: healthPrompt(name: "ordinaryname"),
+                                   library: [healthPrompt(name: "ordinaryname")], usage: [:], now: healthNow)
+          .contains { $0.kind == .builtinCollision })
+
+let deployUpper = healthPrompt(name: "Deploy")
+let deployLower = healthPrompt(name: "deploy")
+check("two prompts differing only by case collide with each other",
+      AppState.promptHealthIssues(for: deployUpper, library: [deployUpper, deployLower], usage: [:], now: healthNow)
+          .contains { $0.kind == .duplicateName("deploy") })
+check("the case collision is reported symmetrically from the other prompt's side",
+      AppState.promptHealthIssues(for: deployLower, library: [deployUpper, deployLower], usage: [:], now: healthNow)
+          .contains { $0.kind == .duplicateName("Deploy") })
+check("a prompt is never reported as colliding with itself",
+      !AppState.promptHealthIssues(for: deployUpper, library: [deployUpper], usage: [:], now: healthNow)
+          .contains { if case .duplicateName = $0.kind { return true }; return false })
+check("a prompt can carry both diagnoses at once",
+      AppState.promptHealthIssues(for: healthPrompt(name: "review", editedAt: healthNow.addingTimeInterval(-100 * 24 * 60 * 60)),
+                                  library: [healthPrompt(name: "review")], usage: [:], now: healthNow).count == 2)
+
+// --- Fixture: a full MANAGE-flavored AppState, prompts + shell + Claude Code ----
+
+func freshManageFixture() -> (state: AppState, promptsDir: URL, commandsDir: String,
+                              registryPath: String, rcPath: String, historyPath: String, ignoresPath: String) {
+    caseIndex += 1
+    let base = "\(sandbox)/manage-case\(caseIndex)"
+    let promptsDir = URL(fileURLWithPath: "\(base)/prompts")
+    try! FileManager.default.createDirectory(at: promptsDir, withIntermediateDirectories: true)
+    let commandsDir = "\(base)/commands"
+    try! FileManager.default.createDirectory(atPath: commandsDir, withIntermediateDirectories: true)
+    let registryPath = "\(base)/aliasbar/compiled.json"
+    try! FileManager.default.createDirectory(atPath: (registryPath as NSString).deletingLastPathComponent,
+                                             withIntermediateDirectories: true)
+    let ignoresPath = "\(base)/aliasbar/suggestion-ignores.json"
+
+    let rcPath = "\(base)/zshrc"
+    try! """
+    # >>> aliasbar managed block >>>
+    # Edited by AliasBar. Anything outside these markers is never touched.
+    # <<< aliasbar managed block <<<
+    """.write(toFile: rcPath, atomically: true, encoding: .utf8)
+
+    let historyPath = "\(base)/history"
+    try! "".write(toFile: historyPath, atomically: true, encoding: .utf8)
+
+    setenv("ALIASBAR_ZSHRC", rcPath, 1)
+    setenv("ALIASBAR_HISTORY", historyPath, 1)
+    setenv("ALIASBAR_PROMPTS_DIR", promptsDir.path, 1)
+    setenv("ALIASBAR_COMPILED_REGISTRY", registryPath, 1)
+    setenv("ALIASBAR_CLAUDE_COMMANDS_DIR", commandsDir, 1)
+    setenv("ALIASBAR_SUGGESTION_IGNORES", ignoresPath, 1)
+
+    let (settings, _) = freshTestSettings()
+    let state = AppState(store: EntryStore(), settings: settings)
+    return (state, promptsDir, commandsDir, registryPath, rcPath, historyPath, ignoresPath)
+}
+
+// --- Bucket membership: Library is everything, Health narrows to diagnoses -----
+
+do {
+    let (state, promptsDir, _, _, _, _, _) = freshManageFixture()
+    writeRawPromptFile(promptFixture(["---", "schema: 1", "---", "A perfectly clean prompt."]),
+                        name: "healthyone", in: promptsDir)
+    writeRawPromptFile(promptFixture(["---", "schema: 1", "---", "Reviews a diff."]),
+                        name: "review", in: promptsDir)
+    state.prepareForShow()
+    state.mode = .manage
+    state.dialect = .prompt
+
+    state.promptBucket = .library
+    check("Library lists every stored prompt",
+          Set(state.promptManageResults.map(\.name)) == Set(["healthyone", "review"]))
+
+    state.promptBucket = .health
+    check("Health narrows to only the prompt(s) carrying a diagnosis",
+          state.promptManageResults.map(\.name) == ["review"])
+}
+
+// --- Delivery: install/uninstall wiring against a real fixture registry --------
+
+do {
+    let (state, promptsDir, commandsDir, _, _, _, _) = freshManageFixture()
+    writeRawPromptFile(promptFixture(["---", "schema: 1", "description: Ship it", "---", "Ship the release."]),
+                        name: "shipit", in: promptsDir)
+    state.prepareForShow()
+    state.mode = .manage
+    state.dialect = .prompt
+    state.promptBucket = .delivery
+
+    guard let shortcut = state.promptManageResults.first(where: { $0.name == "shipit" }) else {
+        check("shipit is present in Delivery before installing", false)
+        fatalError("unreachable — check() above already failed")
+    }
+    check("a never-compiled prompt reads notInstalled in Delivery",
+          state.promptDeliveryStatus(for: shortcut) == .notInstalled)
+
+    state.installPrompt(shortcut)
+    check("installPrompt writes a real file through PromptCompiler",
+          FileManager.default.fileExists(atPath: commandsDir + "/shipit.md"))
+    check("after installPrompt, Delivery's status reads installed",
+          state.promptDeliveryStatus(for: shortcut) == .installed)
+    check("installPrompt clears any prior error", state.errorMessage == nil)
+
+    state.uninstallPrompt(shortcut)
+    check("uninstallPrompt removes exactly the file it wrote",
+          !FileManager.default.fileExists(atPath: commandsDir + "/shipit.md"))
+    check("after uninstallPrompt, Delivery's status reads notInstalled again",
+          state.promptDeliveryStatus(for: shortcut) == .notInstalled)
+}
+
+// --- Delivery: a real refusal surfaces CompileError verbatim -------------------
+
+do {
+    let (state, promptsDir, commandsDir, _, _, _, _) = freshManageFixture()
+    let collidingPath = commandsDir + "/handwritten.md"
+    try! "# a user's own hand-written command\n".write(toFile: collidingPath, atomically: true, encoding: .utf8)
+    writeRawPromptFile(promptFixture(["---", "schema: 1", "---", "would collide with a hand-written file."]),
+                        name: "handwritten", in: promptsDir)
+    state.prepareForShow()
+    state.mode = .manage
+    state.dialect = .prompt
+    state.promptBucket = .delivery
+
+    guard let colliding = state.promptManageResults.first(where: { $0.name == "handwritten" }) else {
+        check("handwritten is present in Delivery", false)
+        fatalError("unreachable — check() above already failed")
+    }
+    state.installPrompt(colliding)
+    let expectedError = PromptCompiler.CompileError.collision(name: "handwritten", path: collidingPath).errorDescription
+    check("a real collision refusal surfaces CompileError's message verbatim, unreworded",
+          state.errorMessage == expectedError)
+    check("the refused install left the hand-written file's content untouched",
+          (try? String(contentsOfFile: collidingPath)) == "# a user's own hand-written command\n")
+    check("a builtin-name collision is advisory only and never blocks installPrompt",
+          BuiltinSlashCommands.collides(name: "review") != nil)
+}
+
+// --- Suggested: membership, ignore persistence, create prefills the editor -----
+
+do {
+    let (state, _, _, _, rcPath, historyPath, _) = freshManageFixture()
+    try! String(repeating: "npm run build\n", count: 5).write(toFile: historyPath, atomically: true, encoding: .utf8)
+    state.prepareForShow()
+    state.mode = .manage
+    state.dialect = .shell
+    state.bucket = .suggested
+
+    guard let suggestion = state.suggestedEntries.first(where: { $0.command == "npm run build" }) else {
+        check("a command repeated 5+ times at 2+ words appears in Suggested", false)
+        fatalError("unreachable — check() above already failed")
+    }
+
+    state.createFromSuggestion(suggestion)
+    check("createFromSuggestion opens the editor prefilled with the proposed name",
+          state.editor?.name == suggestion.proposedName)
+    check("createFromSuggestion opens the editor prefilled with the full command",
+          state.editor?.command == suggestion.command)
+    check("createFromSuggestion writes nothing on its own — the rc file is untouched",
+          !((try? String(contentsOfFile: rcPath)) ?? "").contains("npm"))
+    check("createFromSuggestion doesn't add the alias to the store until Save commits it",
+          !state.store.ranked.contains { $0.name == suggestion.proposedName })
+
+    state.commitEditor()
+    check("saving the prefilled editor actually writes the alias",
+          state.store.ranked.contains { $0.name == suggestion.proposedName })
+    check("Suggested drops a command once an alias now covers it, without waiting for the next summon",
+          !state.suggestedEntries.contains { $0.command == "npm run build" })
+}
+
+do {
+    let (state, _, _, _, _, historyPath, ignoresPath) = freshManageFixture()
+    try! String(repeating: "docker ps -a\n", count: 6).write(toFile: historyPath, atomically: true, encoding: .utf8)
+    state.prepareForShow()
+    state.mode = .manage
+    state.dialect = .shell
+    state.bucket = .suggested
+
+    guard let suggestion = state.suggestedEntries.first(where: { $0.command == "docker ps -a" }) else {
+        check("the suggestion is present before ignoring it", false)
+        fatalError("unreachable — check() above already failed")
+    }
+    state.ignoreSuggestion(suggestion)
+    check("ignoring a suggestion removes it from Suggested immediately",
+          !state.suggestedEntries.contains { $0.command == "docker ps -a" })
+    check("the ignore is persisted to the real ignore-store path",
+          SuggestionIgnoreStore.all(path: ignoresPath).contains("docker ps -a"))
+
+    // renameFromSuggestion is a distinctly-named entry point for the same editor
+    // call `createFromSuggestion` makes — the editor's name field already receives
+    // initial focus regardless of mode, so "Rename" needs no separate focus-steering
+    // logic of its own; it just reads differently as a button label.
+    let renameCandidate = AliasSuggestion(command: "git log --oneline -20", count: 7, proposedName: "gl20")
+    state.renameFromSuggestion(renameCandidate)
+    check("renameFromSuggestion opens the identical prefilled editor createFromSuggestion does",
+          state.editor?.name == "gl20" && state.editor?.command == "git log --oneline -20")
+}
+
+// --- flipManageDialect + ⌘↑↓ bucket cycling in the prompt dialect ---------------
+
+do {
+    let (state, promptsDir, _, _, _, _, _) = freshManageFixture()
+    writeRawPromptFile(promptFixture(["---", "schema: 1", "---", "hello"]), name: "onlyprompt", in: promptsDir)
+    state.prepareForShow()
+    state.mode = .manage
+    state.dialect = .shell
+    state.bucket = .all
+
+    state.flipManageDialect()
+    check("flipManageDialect flips MANAGE from shell to prompt", state.dialect == .prompt)
+    state.flipManageDialect()
+    check("flipManageDialect flips back to shell", state.dialect == .shell)
+
+    state.mode = .find
+    let dialectBeforeFind = state.dialect
+    state.flipManageDialect()
+    check("flipManageDialect is a no-op outside MANAGE", state.dialect == dialectBeforeFind)
+
+    state.mode = .manage
+    state.dialect = .prompt
+    state.promptBucket = .library
+    state.selection = 0
+    let cmdDownArrow = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [.command],
+                                        timestamp: 0, windowNumber: 0, context: nil,
+                                        characters: "", charactersIgnoringModifiers: "",
+                                        isARepeat: false, keyCode: 125 /* kVK_DownArrow */)!
+    _ = state.handleKey(cmdDownArrow)
+    check("⌘↓ in MANAGE's prompt dialect walks PromptBucket, landing on delivery",
+          state.promptBucket == .delivery)
+    _ = state.handleKey(cmdDownArrow)
+    check("⌘↓ again lands on health", state.promptBucket == .health)
+    _ = state.handleKey(cmdDownArrow)
+    check("⌘↓ wraps back to library", state.promptBucket == .library)
+}
+
+// --- activeCount / selection: the prompt dialect and Suggested each own their
+// --- cursor width and "no fallback to first" behavior --------------------------
+
+do {
+    let (state, promptsDir, _, _, _, _, _) = freshManageFixture()
+    writeRawPromptFile(promptFixture(["---", "schema: 1", "---", "one"]), name: "alpha", in: promptsDir)
+    writeRawPromptFile(promptFixture(["---", "schema: 1", "---", "two"]), name: "beta", in: promptsDir)
+    state.prepareForShow()
+    state.mode = .manage
+    state.dialect = .prompt
+    state.promptBucket = .library
+
+    check("activeCount in MANAGE's prompt dialect matches promptManageResults, not the shell bucketEntries count",
+          state.activeCount == 2 && state.activeCount == state.promptManageResults.count)
+
+    state.selection = 0
+    check("selectedPromptManageShortcut resolves an in-range selection",
+          state.selectedPromptManageShortcut?.name == state.promptManageResults[0].name)
+    state.selection = 99
+    check("an out-of-range selection previews nothing in the prompt dialect, rather than falling back to the first row",
+          state.selectedPromptManageShortcut == nil)
+
+    state.dialect = .shell
+    state.bucket = .suggested
+    check("activeCount in the Suggested bucket matches suggestedEntries",
+          state.activeCount == state.suggestedEntries.count)
+}
+
+// ---------------------------------------------------------------------------
 print("\n" + String(repeating: "-", count: 60))
 print("\(passes) passed, \(failures) failed")
 exit(failures == 0 ? 0 : 1)
