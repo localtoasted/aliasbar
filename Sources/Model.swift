@@ -24,6 +24,27 @@ struct ShellEntry: Identifiable, Hashable {
     }
 }
 
+/// Which entry fields participate in a search.
+enum SearchScope: String, CaseIterable, Identifiable {
+    case name, nameComment, everything
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .name: return "Name only"
+        case .nameComment: return "Name and comment"
+        case .everything: return "Name, comment, and command"
+        }
+    }
+}
+
+/// An entry paired with how often it has actually been run.
+struct RankedEntry: Identifiable, Hashable {
+    let entry: ShellEntry
+    let uses: Int
+    var id: String { entry.id }
+    var name: String { entry.name }
+}
+
 // MARK: - Parse result
 
 /// A missing file and a file with no aliases are completely different problems, and
@@ -56,30 +77,8 @@ enum ManagedBlock {
 // MARK: - Parser
 
 enum ZshrcParser {
-    /// Resolution order: the persisted setting, then the ALIASBAR_ZSHRC environment
-    /// variable, then ~/.zshrc.
-    ///
-    /// The environment variable alone is not enough. A login item launched by
-    /// SMAppService does not inherit the environment of the session that registered
-    /// it, so an env-only override silently reverts to ~/.zshrc after a reboot.
-    static var path: String {
-        if let stored = AppSettings.shared.rcPathOverride, !stored.isEmpty {
-            return (stored as NSString).expandingTildeInPath
-        }
-        if let env = ProcessInfo.processInfo.environment["ALIASBAR_ZSHRC"], !env.isEmpty {
-            return (env as NSString).expandingTildeInPath
-        }
-        return NSHomeDirectory() + "/.zshrc"
-    }
-
-    static var displayPath: String {
-        (path as NSString).abbreviatingWithTildeInPath
-    }
-
-    static func parse() -> ParseOutcome {
-        parse(path: path)
-    }
-
+    /// The core parser receives a concrete path. App and future CLI defaults belong
+    /// in their own adapters.
     static func parse(path: String) -> ParseOutcome {
         let text: String
         do {
@@ -253,20 +252,9 @@ enum ZshrcParser {
 /// Counts how many times each name has actually been run, by reading ~/.zsh_history.
 /// Strictly read-only, strictly local: nothing here writes or transmits anything.
 enum HistoryScanner {
-    /// ALIASBAR_HISTORY points the scanner at a different history file. Exists so the
-    /// test and demo harnesses can run against fixture data instead of the developer's
-    /// real shell history, which must never end up in a screenshot.
-    static var path: String {
-        if let override = ProcessInfo.processInfo.environment["ALIASBAR_HISTORY"],
-           !override.isEmpty {
-            return (override as NSString).expandingTildeInPath
-        }
-        return NSHomeDirectory() + "/.zsh_history"
-    }
-
     /// Command words extracted from history, with their invocation counts.
     /// Keyed by the command word only, so `gs` and `gs --short` both count for `gs`.
-    static func commandWordCounts() -> [String: Int] {
+    static func commandWordCounts(path: String) -> [String: Int] {
         guard let data = FileManager.default.contents(atPath: path) else { return [:] }
 
         // zsh history is frequently not valid UTF-8 (metafied bytes above 0x80), so a
@@ -364,7 +352,7 @@ enum HistoryScanner {
     ///
     /// Unlike `commandWordCounts`, this keeps the whole line: the point is to hand you
     /// back something you can run, not to attribute a count to an alias name.
-    static func commands() -> [Command] {
+    static func commands(path: String) -> [Command] {
         guard let data = FileManager.default.contents(atPath: path) else { return [] }
         let text = String(data: data, encoding: .utf8)
             ?? String(data: data, encoding: .isoLatin1)
@@ -512,10 +500,11 @@ enum ConflictDetector {
         return raw.split(separator: ":").map(String.init).filter { !$0.isEmpty }
     }
 
-    static func detect(in entries: [ShellEntry]) -> [Conflict] {
+    static func detect(in entries: [ShellEntry],
+                       searchPaths: [String]? = nil) -> [Conflict] {
         var conflicts: [Conflict] = []
         let byName = Dictionary(grouping: entries, by: \.name)
-        let dirs = pathDirectories()
+        let dirs = searchPaths ?? pathDirectories()
         let fm = FileManager.default
 
         for (name, group) in byName {
@@ -547,5 +536,103 @@ enum ConflictDetector {
             }
         }
         return conflicts.sorted { $0.name < $1.name }
+    }
+}
+
+// MARK: - Ranking
+
+enum Ranker {
+    /// Tiers, highest first: exact name, name prefix, name substring, comment, command.
+    /// Usage count breaks ties inside a tier, which is why a bare score is not enough.
+    private static func score(_ r: RankedEntry, query: String, scope: SearchScope) -> Int? {
+        let name = r.entry.name.lowercased()
+        let comment = (r.entry.comment ?? "").lowercased()
+        let command = r.entry.command.lowercased()
+
+        if name == query { return 500_000 }
+        if name.hasPrefix(query) { return 400_000 }
+        if name.contains(query) { return 300_000 }
+
+        if scope == .name { return nil }
+        if comment.contains(query) { return 200_000 }
+
+        if scope == .nameComment { return nil }
+        if command.contains(query) { return 100_000 }
+
+        return nil
+    }
+
+    /// Ranked matches for a query. An empty query returns the rest state: whatever the
+    /// user's sort order says, which defaults to most-used first.
+    static func rank(_ entries: [RankedEntry],
+                     query: String,
+                     scope: SearchScope) -> [RankedEntry] {
+        let q = query.lowercased().trimmingCharacters(in: .whitespaces)
+        guard !q.isEmpty else {
+            return entries.sorted {
+                $0.uses != $1.uses ? $0.uses > $1.uses : $0.name < $1.name
+            }
+        }
+        return entries
+            .compactMap { r -> (RankedEntry, Int)? in
+                guard let tier = score(r, query: q, scope: scope) else { return nil }
+                return (r, tier)
+            }
+            .sorted { lhs, rhs in
+                if lhs.1 != rhs.1 { return lhs.1 > rhs.1 }
+                if lhs.0.uses != rhs.0.uses { return lhs.0.uses > rhs.0.uses }
+                // Shorter names win at equal relevance: `gs` beats `gstash` for "gs".
+                if lhs.0.name.count != rhs.0.name.count {
+                    return lhs.0.name.count < rhs.0.name.count
+                }
+                return lhs.0.name < rhs.0.name
+            }
+            .map(\.0)
+    }
+
+    /// Whether an entry matches at all, ignoring order. Used by BOARD, which dims
+    /// non-matches instead of removing them.
+    static func matches(_ r: RankedEntry, query: String, scope: SearchScope) -> Bool {
+        let q = query.lowercased().trimmingCharacters(in: .whitespaces)
+        guard !q.isEmpty else { return true }
+        return score(r, query: q, scope: scope) != nil
+    }
+}
+
+// MARK: - Alias name suggestion
+
+enum AliasNameSuggester {
+    /// Initials of the first few real words: `git status -sb` suggests `gs`.
+    ///
+    /// Flags and environment assignments are skipped — they are the part that varies, so
+    /// they are the part that makes a bad name.
+    static func suggest(for command: String, takenNames: Set<String>) -> String {
+        let words = command.split(separator: " ").map(String.init)
+            .filter { !$0.hasPrefix("-") && !$0.contains("=") && $0 != "sudo" }
+        guard !words.isEmpty else { return "" }
+
+        func clean(_ text: String) -> String {
+            text.lowercased().filter { $0.isLetter || $0.isNumber }
+        }
+
+        // Tried in order, longest-lived first. A collision should push toward a name
+        // that is still readable rather than straight to a numbered one — `gs` taken
+        // should suggest `gis`, not `gs2`.
+        var candidates: [String] = []
+        candidates.append(clean(words.prefix(3).compactMap { $0.first.map(String.init) }.joined()))
+        if words.count >= 2 {
+            candidates.append(clean(String(words[0].prefix(2)) + String(words[1].prefix(1))))
+            candidates.append(clean(String(words[0].prefix(2)) + String(words[1].prefix(2))))
+        }
+        candidates.append(clean(String(words[0].prefix(4))))
+
+        let usable = candidates.filter { $0.count >= 2 }
+        for candidate in usable where !takenNames.contains(candidate) { return candidate }
+
+        guard let base = usable.first else { return "" }
+        for suffix in 2...9 where !takenNames.contains(base + String(suffix)) {
+            return base + String(suffix)
+        }
+        return base
     }
 }

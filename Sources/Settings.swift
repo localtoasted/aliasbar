@@ -80,18 +80,6 @@ enum ViewMode: String, CaseIterable, Identifiable {
     }
 }
 
-enum SearchScope: String, CaseIterable, Identifiable {
-    case name, nameComment, everything
-    var id: String { rawValue }
-    var label: String {
-        switch self {
-        case .name: return "Name only"
-        case .nameComment: return "Name and comment"
-        case .everything: return "Name, comment, and command"
-        }
-    }
-}
-
 enum SortOrder: String, CaseIterable, Identifiable {
     case usage, alphabetical, fileOrder
     var id: String { rawValue }
