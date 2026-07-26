@@ -546,11 +546,14 @@ enum ConflictDetector {
 enum Ranker {
     /// Tiers, highest first: exact name, name prefix, name substring, comment, command.
     /// Usage count breaks ties inside a tier, which is why a bare score is not enough.
-    private static func score(_ r: RankedEntry, query: String, scope: SearchScope) -> Int? {
-        let name = r.entry.name.lowercased()
-        let comment = (r.entry.comment ?? "").lowercased()
-        let command = r.entry.command.lowercased()
-
+    ///
+    /// Takes raw lowercased fields rather than `RankedEntry` so this one ladder can be
+    /// shared with anything else that scores a shell-shaped thing by name/comment/
+    /// command — `ShortcutRanker` (`DialectContext.swift`) scores `Shortcut`, a
+    /// different type with no relationship to `RankedEntry`, and calls this directly
+    /// instead of keeping its own copy of the same five numbers in sync by hand.
+    static func shellFieldScore(name: String, comment: String, command: String,
+                                query: String, scope: SearchScope) -> Int? {
         if name == query { return 500_000 }
         if name.hasPrefix(query) { return 400_000 }
         if name.contains(query) { return 300_000 }
@@ -562,6 +565,13 @@ enum Ranker {
         if command.contains(query) { return 100_000 }
 
         return nil
+    }
+
+    private static func score(_ r: RankedEntry, query: String, scope: SearchScope) -> Int? {
+        shellFieldScore(name: r.entry.name.lowercased(),
+                        comment: (r.entry.comment ?? "").lowercased(),
+                        command: r.entry.command.lowercased(),
+                        query: query, scope: scope)
     }
 
     /// Ranked matches for a query. An empty query returns the rest state: whatever the

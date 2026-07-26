@@ -33,8 +33,11 @@ That's the actual problem: an alias is a compression artifact, and the key to re
 | `⏎` | primary action |
 | `⌘⏎` | the other one |
 | `⌘1` `⌘2` `⌘3` | Find / Board / Manage |
+| `⇥` | flip Find/Board between shell and prompts, or cycle Manage's sidebar |
+| `⌘K` | clipboard, as a Find source |
 | `?` `!` `@` `#` | jump straight to graveyard / conflicts / by file / stats |
-| `⌘N` `⌘E` | new alias, edit alias |
+| `⌘N` `⌘E` | new alias or prompt, edit the selected one |
+| `⌘I` `⌥⌘I` | copy an audit prompt for ChatGPT/Claude (web / local-agent ending) |
 | `⌘,` | settings |
 | `esc` | dismiss **and hand focus back to the app you came from** |
 
@@ -72,7 +75,29 @@ This is the only code in AliasBar that modifies anything, so it's the part that'
 - Won't touch a name defined outside its block. It tells you where that definition is instead.
 - Validates names and quotes commands correctly, including embedded single quotes.
 
-61 tests cover it, including round-trips through the real `zsh` binary. Run them with `./test.sh`.
+Well over 2,000 checks cover this and the rest of the app, including round-trips through the real `zsh` binary. Run them with `./test.sh`.
+
+## The prompt platform
+
+Aliases aren't the only thing you retype. AliasBar has a second side for stored prompts — the ones you paste into ChatGPT, Claude, or wherever — searched, boarded, and managed exactly like aliases are, never a separate mode you have to opt into up front.
+
+**Dialects** — Find and Board each work over two pools: your shell shortcuts, and your prompt library. `⇥` flips which one ranking favors, and a chip explains the guess (a terminal biases toward shell, Claude or ChatGPT biases toward prompts, a browser admits it can't see the tab). Two typed characters override the guess either way — it helps you land faster, it never filters anything out or hides the other kind.
+
+**`⌘N`** opens the same composer for a new alias or a new prompt, a segmented control picking which, with live validation either way — a prompt's `{{slots}}` highlight as you type, and a name that would collide with a built-in Claude Code command warns without blocking. Prompts are plain markdown with light frontmatter at `~/.aliasbar/prompts/<name>.md`, so hand-editing them works too.
+
+**`⌘I`** (`⌥⌘I` for the local-agent variant) copies an audit prompt built from your actual library — hand it to Claude or ChatGPT and ask what's stale, what should merge, what's missing — and whatever comes back lands in Manage → Inbox as a small reviewable queue: approve, edit-before-approving, or discard, one item at a time. Anything that looks like a shell command, a URL, or other sensitive content is flagged, and you have to open the full item before you can approve a flagged one.
+
+**Install as `/name`** in Claude Code, from the composer or from Manage → Delivery. AliasBar only ever touches files it wrote itself — it refuses to overwrite a command it doesn't recognize, and refuses to touch one you've since hand-edited outside the app.
+
+## Typed clipboard
+
+Off by default. Turn on Settings → Clipboard and AliasBar watches for external copies, classifies what it sees, and gives you `⌘K` in Find to search recent clipboard history alongside your aliases and prompts, with one-keystroke actions per kind — decode a JWT, convert an epoch timestamp, pretty-print JSON, strip tracking parameters from a URL, and more.
+
+The trust story is the point, not an afterthought:
+
+- **Nothing is watched until you turn it on.** Not a disabled poller sitting idle — nothing is constructed at all while the setting is off.
+- **Secret-shaped content never touches disk**, and never lives anywhere longer than about 90 seconds. Anything that looks like a password, token, or key — or that the copying app itself marks "concealed" (1Password and friends already do this) — is quarantined in memory instead of added to history, and shows up only as a reason ("2 secret-shaped clips quarantined · gone in ~90s"), never the content, and never selectable to reveal it.
+- **Persistence is a second, separate opt-in.** With monitoring on but persistence off (the default), clipboard history lives in memory for as long as the app is running and nothing under `~/.aliasbar` ever records a byte of it. Turn persistence on and it's capped at 200 entries in `~/.aliasbar/clips.json`. A third toggle, meaningless unless persistence is already on, decides whether that file also rides along in file sync, below.
 
 ## Snippets & inline expansion
 
@@ -82,13 +107,35 @@ By itself, a snippet is just something stored. **Inline expansion** — typing a
 
 Expanding a trigger deletes exactly what you typed and pastes the result the same way an alias delivery does — through the clipboard, with whatever was already there restored right after. A snippet with holes opens a small fill-in prompt first; cancelling it retypes the trigger exactly as written, so you're always left exactly where you were.
 
+## File-based sync
+
+No backend, no account. Settings → Sync points AliasBar at any file — a path inside a folder your cloud drive or dotfiles repo already syncs — and roams a small, deliberately frozen set of settings through it: appearance and saved presets, search scope, sort order, default view, result cap, and the enter/afterwards actions. Everything else — your rc path, hotkey, permission state, window placement, every clipboard toggle, usage counts — stays purely local and never enters the file. Those are facts about this Mac, not preferences worth carrying to a second one.
+
+Clipboard history and snippets only ever enter the sync file through their own separate opt-ins above, never as a side effect of turning sync on by itself. If two machines write to the file before either has seen the other's change, AliasBar merges by last-write-wins per field rather than picking one side outright, and keeps the loser as a sibling `.conflict-<timestamp>` file instead of silently discarding it — Settings shows a non-blocking warning when one turns up.
+
+## `ab` — the command line
+
+A companion CLI built alongside the app (`.build/ab` after `./build.sh`; run `ab help` for the full reference; a Homebrew formula is coming). It reads and writes through the exact same parser and writer the app uses — nothing here re-implements the rules, so anything `ab add` refuses, `⌘N` refuses too, and vice versa. It never prompts: anything the app would ask about interactively is a flag instead, so a script or a cron job never hangs waiting on stdin.
+
+```
+ab list [--json]                                            name<TAB>command, managed marked with *
+ab search <query> [--json]                                  rank by name/comment/command, top 20
+ab add <name> <command> [--comment <t>] [--force-collateral]
+ab last [n] [--json]                                        n most recent distinct history commands
+ab promote [n] [--name <n>] [--force-collateral] [--json]   turn history entry n into an alias
+```
+
+Exit codes are meant to be scripted against: `0` ok, `2` usage error, `3` the writer refused (a collision, a reserved word), `4` nothing to do, `5` the rc file couldn't be read. rc path resolution is `--file` > `$ALIASBAR_ZSHRC` > the app's saved rc-path setting > `~/.zshrc`; `add` and `promote` name which one decided in their output.
+
 ## Themes
 
 Graphite, Clay, or Ultramarine.
 
 ## Why it's small
 
-Swift and SwiftUI hosted in an AppKit `NSStatusItem` popover. Zero dependencies, no Electron, no helper daemons, **no network access at all**. It reads two files on your disk: your rc file, and `~/.zsh_history` for usage counts. Neither is ever written to or sent anywhere.
+Swift and SwiftUI hosted in an AppKit `NSStatusItem` popover. Zero dependencies, no Electron, no helper daemons. **One network call in the whole app**: Sparkle checking the update feed — Settings → Updates has the toggle for automatic checks and a "Check now" button, nothing installs without asking, and switching automatic checks off stops the call entirely.
+
+On disk, it reads your rc file and `~/.zsh_history` for usage counts, and owns a handful of its own files under `~/.aliasbar/`: `prompts/` and `inbox/` for the prompt side of the app, `usage.json` for prompt invocation counts, `clips.json` only if you turn on clipboard persistence, `snippets.json`, and whatever path you point file sync at if you turn that on. It also checks whether `~/.claude` exists, and writes to `~/.claude/commands/<name>.md` only when you explicitly install a prompt there as a slash command. None of it is ever sent anywhere — the update check above is the only thing that ever leaves the machine.
 
 ## It tells you when macOS hides it
 

@@ -31,7 +31,14 @@ struct ComposerSheet: View {
                     .font(.system(size: 14, weight: .bold, design: theme.bodyDesign))
                     .foregroundStyle(theme.text)
 
-                kindPicker(target)
+                // Hidden rather than disabled while `promptFeaturesEnabled` is off:
+                // with no prompt dialect anywhere else in the app, offering a
+                // reachable-but-blocked "Prompt" segment here would be the one place
+                // that still let someone create a prompt file the rest of the app
+                // claims doesn't exist.
+                if state.settings.promptFeaturesEnabled {
+                    kindPicker(target)
+                }
 
                 switch target.kind {
                 case .alias: aliasFields(binding)
