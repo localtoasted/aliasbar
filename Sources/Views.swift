@@ -1057,8 +1057,19 @@ struct BoardView: View {
     }
 
     var body: some View {
+        // The second deck: ⇥ flips `state.dialect`, and BOARD opens on whichever one it
+        // already named at summon (see `AppState.dialect`'s doc comment). Routing only —
+        // the shell deck below is untouched, exactly as it was before prompts existed.
+        if state.dialect == .prompt {
+            PromptBoardView(state: state, settings: settings)
+        } else {
+            shellDeck
+        }
+    }
+
+    private var shellDeck: some View {
         let entries = state.boardEntries
-        VStack(spacing: 0) {
+        return VStack(spacing: 0) {
             if entries.isEmpty {
                 if state.bucket != .all {
                     EmptyStateView(symbol: state.bucket.symbol,
