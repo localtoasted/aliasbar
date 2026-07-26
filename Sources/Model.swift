@@ -491,8 +491,10 @@ struct Conflict: Identifiable, Hashable {
 }
 
 enum ConflictDetector {
-    /// Directories on PATH, resolved once per scan.
-    private static func pathDirectories() -> [String] {
+    /// Directories on PATH, resolved once per scan. Not file-private: `isShadowed`
+    /// (below, reused by `SuggestionEngine`'s name dedup) shares this resolution
+    /// rather than re-implementing PATH lookup.
+    static func pathDirectories() -> [String] {
         let raw = ProcessInfo.processInfo.environment["PATH"]
             // A GUI app launched by Finder or launchd gets a minimal PATH, so fall
             // back to the standard locations rather than reporting no conflicts at all.
@@ -673,5 +675,16 @@ enum CorePaths {
             return (environmentOverride as NSString).expandingTildeInPath
         }
         return homeDirectory + "/.aliasbar/prompts"
+    }
+
+    /// Where `SuggestionIgnoreStore` records suggestions the user has dismissed.
+    /// Same shape as `resolvePromptsDirectory`: no per-app stored setting, just an
+    /// environment override for testability.
+    static func resolveSuggestionIgnoresPath(environmentOverride: String?,
+                                             homeDirectory: String) -> String {
+        if let environmentOverride, !environmentOverride.isEmpty {
+            return (environmentOverride as NSString).expandingTildeInPath
+        }
+        return homeDirectory + "/.aliasbar/suggestion-ignores.json"
     }
 }

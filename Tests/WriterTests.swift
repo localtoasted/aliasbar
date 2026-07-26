@@ -5072,6 +5072,248 @@ func testAppearanceRoundTripsThroughSettingValue() {
 testAppearanceRoundTripsThroughSettingValue()
 
 // ---------------------------------------------------------------------------
+print("\n38. SuggestionEngine: history-mined alias suggestions (PRE-264)")
+
+func suggestionIgnoresFixturePath() -> String {
+    caseIndex += 1
+    let dir = "\(sandbox)/suggestion-ignores-case\(caseIndex)"
+    try! FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+    return dir + "/suggestion-ignores.json"
+}
+
+// --- Path resolution ---------------------------------------------------------
+
+check("CorePaths resolves the suggestion-ignores path from an override",
+      CorePaths.resolveSuggestionIgnoresPath(environmentOverride: "/tmp/custom-ignores.json",
+                                             homeDirectory: "/Users/x")
+          == "/tmp/custom-ignores.json")
+check("CorePaths falls back to ~/.aliasbar/suggestion-ignores.json with no override",
+      CorePaths.resolveSuggestionIgnoresPath(environmentOverride: nil, homeDirectory: "/Users/x")
+          == "/Users/x/.aliasbar/suggestion-ignores.json")
+
+setenv("ALIASBAR_SUGGESTION_IGNORES", "/tmp/env-override-ignores.json", 1)
+check("AppPaths.suggestionIgnoresPath honors the environment override",
+      AppPaths.suggestionIgnoresPath == "/tmp/env-override-ignores.json")
+unsetenv("ALIASBAR_SUGGESTION_IGNORES")
+
+// --- Frequency normalization: whitespace variants of one command merge -------
+
+let freqFile = scratch("""
+git  status
+git\tstatus
+git status
+git status
+git status
+""")
+let normalizedFreq = HistoryScanner.normalizedCommands(path: freqFile)
+check("frequency normalization collapses whitespace variants into a single command",
+      normalizedFreq.count == 1 && normalizedFreq.first?.text == "git status",
+      normalizedFreq.map(\.text).joined(separator: " | "))
+check("frequency normalization sums counts across the collapsed variants",
+      normalizedFreq.first?.count == 5)
+
+// --- Secret-filtered commands are never suggested, even at high frequency ----
+
+let secretFile = scratch("""
+curl -H 'Authorization: Bearer abc.def.ghi' https://api.example.com
+curl -H 'Authorization: Bearer abc.def.ghi' https://api.example.com
+curl -H 'Authorization: Bearer abc.def.ghi' https://api.example.com
+curl -H 'Authorization: Bearer abc.def.ghi' https://api.example.com
+curl -H 'Authorization: Bearer abc.def.ghi' https://api.example.com
+curl -H 'Authorization: Bearer abc.def.ghi' https://api.example.com
+git status
+git status
+git status
+git status
+git status
+""")
+let secretSuggestions = SuggestionEngine.suggest(history: secretFile, existingEntries: [],
+                                                 ignores: [], pathLookup: { _ in false })
+check("a secret-shaped command is never suggested even repeated 6 times",
+      !secretSuggestions.contains { $0.command.contains("Authorization") },
+      secretSuggestions.map(\.command).joined(separator: " | "))
+check("an ordinary command alongside a filtered one is still suggested",
+      secretSuggestions.contains { $0.command == "git status" })
+
+// --- Coverage: an existing alias, exact or with a trailing-args suffix -------
+
+let coverageFile = scratch("""
+git status
+git status
+git status
+git status
+git status
+git log --oneline
+git log --oneline
+git log --oneline
+git log --oneline
+git log --oneline
+git log
+git log
+git log
+git log
+git log
+""")
+let coverageAliases = [
+    ShellEntry(kind: .alias, name: "gs", command: "git status", comment: nil,
+              sourceFile: "fixture-rc", line: 1, managed: true),
+    ShellEntry(kind: .alias, name: "gl", command: "git log", comment: nil,
+              sourceFile: "fixture-rc", line: 2, managed: true),
+]
+let coverageSuggestions = SuggestionEngine.suggest(history: coverageFile, existingEntries: coverageAliases,
+                                                   ignores: [], pathLookup: { _ in false })
+check("an exact alias command match is excluded from suggestions",
+      !coverageSuggestions.contains { $0.command == "git status" })
+check("an existing alias's command plus a trailing-args suffix is excluded",
+      !coverageSuggestions.contains { $0.command == "git log --oneline" })
+check("both covered commands leave nothing left to suggest",
+      coverageSuggestions.isEmpty, coverageSuggestions.map(\.command).joined(separator: " | "))
+
+// --- Ignore exclusion, and un-ignoring restores the candidate ----------------
+
+let ignoreCandidateFile = scratch("""
+docker ps -a
+docker ps -a
+docker ps -a
+docker ps -a
+docker ps -a
+""")
+let ignoredSuggestions = SuggestionEngine.suggest(history: ignoreCandidateFile, existingEntries: [],
+                                                  ignores: ["docker ps -a"], pathLookup: { _ in false })
+check("an ignored command is excluded from suggestions",
+      !ignoredSuggestions.contains { $0.command == "docker ps -a" })
+let unignoredSuggestions = SuggestionEngine.suggest(history: ignoreCandidateFile, existingEntries: [],
+                                                    ignores: [], pathLookup: { _ in false })
+check("the same command is offered again once it's no longer ignored",
+      unignoredSuggestions.contains { $0.command == "docker ps -a" })
+
+// --- Thresholds: single words and under-frequent commands are never offered --
+
+let thresholdFile = scratch("""
+status
+status
+status
+status
+status
+status
+git status
+git status
+git status
+git status
+""")
+let thresholdSuggestions = SuggestionEngine.suggest(history: thresholdFile, existingEntries: [],
+                                                    ignores: [], pathLookup: { _ in false })
+check("a single-word command is never suggested no matter how often it recurs",
+      !thresholdSuggestions.contains { $0.command == "status" })
+check("a multi-word command below the occurrence threshold is not suggested",
+      !thresholdSuggestions.contains { $0.command == "git status" })
+check("both thresholds together leave nothing to suggest",
+      thresholdSuggestions.isEmpty, thresholdSuggestions.map(\.command).joined(separator: " | "))
+
+// --- Name dedupe against existing names and PATH binaries --------------------
+
+let nameDedupPathDir = sandbox + "/suggestion-path-case1"
+try! FileManager.default.createDirectory(atPath: nameDedupPathDir, withIntermediateDirectories: true)
+let shadowedBinaryPath = nameDedupPathDir + "/gis"
+FileManager.default.createFile(atPath: shadowedBinaryPath, contents: Data())
+try! FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: shadowedBinaryPath)
+
+let nameDedupHistory = scratch("""
+git status
+git status
+git status
+git status
+git status
+git status
+""")
+let nameDedupExisting = [
+    ShellEntry(kind: .alias, name: "gs", command: "totally unrelated command", comment: nil,
+              sourceFile: "fixture-rc", line: 1, managed: true),
+]
+let nameDedupSuggestions = SuggestionEngine.suggest(
+    history: nameDedupHistory, existingEntries: nameDedupExisting, ignores: [],
+    pathLookup: { ConflictDetector.isShadowed($0, searchPaths: [nameDedupPathDir]) })
+check("exactly one suggestion comes back for the one repeated command",
+      nameDedupSuggestions.count == 1, "\(nameDedupSuggestions)")
+check("the proposed name skips a name an existing alias already uses ('gs')",
+      nameDedupSuggestions.first?.proposedName != "gs")
+check("the proposed name skips a name shadowed by a PATH binary ('gis')",
+      nameDedupSuggestions.first?.proposedName != "gis")
+check("the proposed name settles on the next candidate that's neither taken nor shadowed",
+      nameDedupSuggestions.first?.proposedName == "gist",
+      nameDedupSuggestions.first?.proposedName ?? "<none>")
+
+// The default (no-pathLookup-argument) overload wires PATH lookups through
+// ConflictDetector.isShadowed against the real machine's PATH. Exercised only
+// against a fixture with nothing anywhere near the occurrence threshold, so the
+// assertion never depends on what's actually installed.
+let convenienceFile = scratch("echo hi\n")
+check("the PATH-lookup convenience overload runs without a caller-supplied closure",
+      SuggestionEngine.suggest(history: convenienceFile, existingEntries: [], ignores: []).isEmpty)
+
+// --- Determinism, including name dedup *within* one suggest() call -----------
+
+let batchDedupHistory = scratch("""
+git status
+git status
+git status
+git status
+git status
+git status
+git stash
+git stash
+git stash
+git stash
+git stash
+""")
+let batchSuggestions = SuggestionEngine.suggest(history: batchDedupHistory, existingEntries: [],
+                                                ignores: [], pathLookup: { _ in false })
+check("two candidates that would naturally get the same first-choice name both appear",
+      batchSuggestions.count == 2, "\(batchSuggestions)")
+check("deterministic order: the higher-count candidate (git status, 6) comes first",
+      batchSuggestions.first?.command == "git status")
+check("the first candidate claims the name both would naturally propose first ('gs')",
+      batchSuggestions.first?.proposedName == "gs")
+check("the second candidate does not reuse the name just claimed within the same batch",
+      batchSuggestions.last?.proposedName != "gs" && batchSuggestions.last?.proposedName == "gis")
+
+let determinismRunA = SuggestionEngine.suggest(history: batchDedupHistory, existingEntries: [],
+                                               ignores: [], pathLookup: { _ in false })
+let determinismRunB = SuggestionEngine.suggest(history: batchDedupHistory, existingEntries: [],
+                                               ignores: [], pathLookup: { _ in false })
+check("suggest() is byte-for-byte deterministic across repeated runs on identical input",
+      determinismRunA == determinismRunB)
+
+// --- SuggestionIgnoreStore: round-trip, corrupt tolerance, atomicity ---------
+
+let ignoresPath1 = suggestionIgnoresFixturePath()
+check("a missing ignores file reads as empty", SuggestionIgnoreStore.all(path: ignoresPath1).isEmpty)
+
+SuggestionIgnoreStore.ignore("git status", path: ignoresPath1)
+SuggestionIgnoreStore.ignore("docker ps -a", path: ignoresPath1)
+check("ignoring two commands round-trips both",
+      SuggestionIgnoreStore.all(path: ignoresPath1) == Set(["git status", "docker ps -a"]))
+
+SuggestionIgnoreStore.unignore("git status", path: ignoresPath1)
+check("unignoring removes only that command",
+      SuggestionIgnoreStore.all(path: ignoresPath1) == Set(["docker ps -a"]))
+
+let ignoresPath2 = suggestionIgnoresFixturePath()
+try! "not json at all".write(toFile: ignoresPath2, atomically: true, encoding: .utf8)
+check("a corrupt ignores file reads as empty rather than crashing",
+      SuggestionIgnoreStore.all(path: ignoresPath2).isEmpty)
+SuggestionIgnoreStore.ignore("git status", path: ignoresPath2)
+check("writing after a corrupt read replaces the file with valid content",
+      SuggestionIgnoreStore.all(path: ignoresPath2) == Set(["git status"]))
+
+let ignoresPath3 = suggestionIgnoresFixturePath()
+SuggestionIgnoreStore.ignore("npm run build", path: ignoresPath3)
+let ignoresDir3 = (ignoresPath3 as NSString).deletingLastPathComponent
+let strayIgnoreTemps = (try? FileManager.default.contentsOfDirectory(atPath: ignoresDir3))?
+    .filter { $0.hasPrefix(".aliasbar-suggestion-ignores-") } ?? []
+check("no stray temp files survive an ignore-store write", strayIgnoreTemps.isEmpty)
+
+// ---------------------------------------------------------------------------
 print("\n" + String(repeating: "-", count: 60))
 print("\(passes) passed, \(failures) failed")
 exit(failures == 0 ? 0 : 1)
