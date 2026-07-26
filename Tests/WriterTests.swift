@@ -3311,6 +3311,9 @@ check("Shortcut.swift and PromptStore.swift are readable",
 for forbidden in ["import SwiftUI", "import AppKit", "UserDefaults", "AppSettings"] {
     check("Shortcut.swift excludes \(forbidden)", !shortcutSource.contains(forbidden))
     check("PromptStore.swift excludes \(forbidden)", !promptStoreSource.contains(forbidden))
+}
+
+// ---------------------------------------------------------------------------
 print("\n31. Clipboard capture: quarantine routing and store")
 
 let quarantineBase = Date(timeIntervalSince1970: 1_700_000_000)
