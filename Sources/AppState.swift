@@ -222,39 +222,11 @@ final class AppState: ObservableObject {
         editor = .create(name: suggestedName(for: command.text), command: command.text)
     }
 
-    /// Initials of the first few real words: `git status -sb` suggests `gs`.
-    ///
-    /// Flags and environment assignments are skipped — they are the part that varies, so
-    /// they are the part that makes a bad name.
     func suggestedName(for command: String) -> String {
-        let words = command.split(separator: " ").map(String.init)
-            .filter { !$0.hasPrefix("-") && !$0.contains("=") && $0 != "sudo" }
-        guard !words.isEmpty else { return "" }
-
-        func clean(_ text: String) -> String {
-            text.lowercased().filter { $0.isLetter || $0.isNumber }
-        }
-
-        // Tried in order, longest-lived first. A collision should push toward a name
-        // that is still readable rather than straight to a numbered one — `gs` taken
-        // should suggest `gis`, not `gs2`.
-        var candidates: [String] = []
-        candidates.append(clean(words.prefix(3).compactMap { $0.first.map(String.init) }.joined()))
-        if words.count >= 2 {
-            candidates.append(clean(String(words[0].prefix(2)) + String(words[1].prefix(1))))
-            candidates.append(clean(String(words[0].prefix(2)) + String(words[1].prefix(2))))
-        }
-        candidates.append(clean(String(words[0].prefix(4))))
-
-        let taken = Set(store.ranked.map(\.name))
-        let usable = candidates.filter { $0.count >= 2 }
-        for candidate in usable where !taken.contains(candidate) { return candidate }
-
-        guard let base = usable.first else { return "" }
-        for suffix in 2...9 where !taken.contains(base + String(suffix)) {
-            return base + String(suffix)
-        }
-        return base
+        AliasNameSuggester.suggest(
+            for: command,
+            takenNames: Set(store.ranked.map(\.name))
+        )
     }
 
     /// BOARD shows the whole pool, always. Typing dims rather than removes, so the grid

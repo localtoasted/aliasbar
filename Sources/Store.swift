@@ -1,13 +1,5 @@
 import SwiftUI
 
-/// An entry paired with how often it has actually been run.
-struct RankedEntry: Identifiable, Hashable {
-    let entry: ShellEntry
-    let uses: Int
-    var id: String { entry.id }
-    var name: String { entry.name }
-}
-
 // MARK: - Store
 
 final class EntryStore: ObservableObject {
@@ -94,65 +86,5 @@ final class EntryStore: ObservableObject {
         case .fileOrder:
             return entries.sorted { $0.entry.line < $1.entry.line }
         }
-    }
-}
-
-// MARK: - Ranking
-
-enum Ranker {
-    /// Tiers, highest first: exact name, name prefix, name substring, comment, command.
-    /// Usage count breaks ties inside a tier, which is why a bare score is not enough.
-    private static func score(_ r: RankedEntry, query: String, scope: SearchScope) -> Int? {
-        let name = r.entry.name.lowercased()
-        let comment = (r.entry.comment ?? "").lowercased()
-        let command = r.entry.command.lowercased()
-
-        if name == query { return 500_000 }
-        if name.hasPrefix(query) { return 400_000 }
-        if name.contains(query) { return 300_000 }
-
-        if scope == .name { return nil }
-        if comment.contains(query) { return 200_000 }
-
-        if scope == .nameComment { return nil }
-        if command.contains(query) { return 100_000 }
-
-        return nil
-    }
-
-    /// Ranked matches for a query. An empty query returns the rest state: whatever the
-    /// user's sort order says, which defaults to most-used first.
-    static func rank(_ entries: [RankedEntry],
-                     query: String,
-                     scope: SearchScope) -> [RankedEntry] {
-        let q = query.lowercased().trimmingCharacters(in: .whitespaces)
-        guard !q.isEmpty else {
-            return entries.sorted {
-                $0.uses != $1.uses ? $0.uses > $1.uses : $0.name < $1.name
-            }
-        }
-        return entries
-            .compactMap { r -> (RankedEntry, Int)? in
-                guard let tier = score(r, query: q, scope: scope) else { return nil }
-                return (r, tier)
-            }
-            .sorted { lhs, rhs in
-                if lhs.1 != rhs.1 { return lhs.1 > rhs.1 }
-                if lhs.0.uses != rhs.0.uses { return lhs.0.uses > rhs.0.uses }
-                // Shorter names win at equal relevance: `gs` beats `gstash` for "gs".
-                if lhs.0.name.count != rhs.0.name.count {
-                    return lhs.0.name.count < rhs.0.name.count
-                }
-                return lhs.0.name < rhs.0.name
-            }
-            .map(\.0)
-    }
-
-    /// Whether an entry matches at all, ignoring order. Used by BOARD, which dims
-    /// non-matches instead of removing them.
-    static func matches(_ r: RankedEntry, query: String, scope: SearchScope) -> Bool {
-        let q = query.lowercased().trimmingCharacters(in: .whitespaces)
-        guard !q.isEmpty else { return true }
-        return score(r, query: q, scope: scope) != nil
     }
 }

@@ -2141,6 +2141,7 @@ let histFile = scratch("""
 """)
 setenv("ALIASBAR_HISTORY", histFile, 1)
 let histCommands = HistoryScanner.commands()
+let explicitHistCommands = HistoryScanner.commands(path: histFile)
 check("history strips the extended-format prefix",
       histCommands.contains { $0.text == "git status -sb" },
       histCommands.map(\.text).joined(separator: " | "))
@@ -2152,6 +2153,10 @@ check("history records recency in file order",
 check("history omits the secret from a real file",
       !histCommands.contains { $0.text.contains("API_KEY") },
       histCommands.map(\.text).joined(separator: " | "))
+check("history app adapter matches the explicit-path core command scan",
+      Set(histCommands) == Set(explicitHistCommands))
+check("history app adapter matches the explicit-path core usage scan",
+      HistoryScanner.commandWordCounts() == HistoryScanner.commandWordCounts(path: histFile))
 
 let multiline = scratch("""
 : 1700000000:0;for f in *.txt; do \\
@@ -2466,6 +2471,139 @@ let onboardingAccessibilityLabelCount =
 check("all onboarding button boundaries own exactly one accessibility label",
       onboardingAccessibilityLabelCount == 13,
       "found \(onboardingAccessibilityLabelCount), expected 13")
+
+// ---------------------------------------------------------------------------
+print("\n29. Foundation core seam")
+
+let coreModelSource = read(projectRoot.appendingPathComponent("Sources/Model.swift").path)
+let coreWriterSource = read(projectRoot.appendingPathComponent("Sources/AliasWriter.swift").path)
+check("core sources are readable",
+      coreModelSource != "<unreadable>" && coreWriterSource != "<unreadable>")
+for forbidden in ["import SwiftUI", "import AppKit", "UserDefaults", "AppSettings"] {
+    check("core source excludes \(forbidden)",
+          !coreModelSource.contains(forbidden) && !coreWriterSource.contains(forbidden))
+}
+
+check("stored rc path wins over the environment",
+      AppPaths.resolveRcPath(stored: "/tmp/stored.zshrc",
+                             environmentOverride: "/tmp/environment.zshrc",
+                             homeDirectory: "/tmp/home") == "/tmp/stored.zshrc")
+check("environment rc path wins when no setting exists",
+      AppPaths.resolveRcPath(stored: nil,
+                             environmentOverride: "/tmp/environment.zshrc",
+                             homeDirectory: "/tmp/home") == "/tmp/environment.zshrc")
+check("rc path falls back to the supplied home",
+      AppPaths.resolveRcPath(stored: nil,
+                             environmentOverride: nil,
+                             homeDirectory: "/tmp/home") == "/tmp/home/.zshrc")
+check("history path falls back to the supplied home",
+      AppPaths.resolveHistoryPath(environmentOverride: nil,
+                                  homeDirectory: "/tmp/home") == "/tmp/home/.zsh_history")
+
+let coreRc = scratch("""
+# status shortcut
+alias gst='git status'
+
+say_hi() {
+  echo hi
+}
+""")
+let explicitParse = ZshrcParser.parse(path: coreRc)
+let textParse = ZshrcParser.parseText(read(coreRc), sourceFile: coreRc)
+check("explicit-path parser matches the text parser",
+      explicitParse.entries == textParse)
+
+let duplicateAlias = ShellEntry(kind: .alias, name: "same", command: "echo first",
+                                comment: nil, sourceFile: coreRc, line: 1, managed: false)
+let winningAlias = ShellEntry(kind: .alias, name: "same", command: "echo second",
+                              comment: nil, sourceFile: coreRc, line: 5, managed: false)
+let sameFunction = ShellEntry(kind: .function, name: "same", command: "echo function",
+                              comment: nil, sourceFile: coreRc, line: 9, managed: false)
+let structuralConflicts = ConflictDetector.detect(
+    in: [duplicateAlias, winningAlias, sameFunction],
+    searchPaths: []
+)
+check("conflict core preserves redefinition details",
+      structuralConflicts.contains {
+          if case .redefined(let times, let winningLine) = $0.reason {
+              return $0.name == "same" && times == 2 && winningLine == 5
+          }
+          return false
+      })
+check("conflict core preserves alias/function clashes",
+      structuralConflicts.contains {
+          $0.name == "same" && $0.reason == .aliasFunctionClash
+      })
+
+let fakePathDirectory = sandbox + "/core-path"
+try! FileManager.default.createDirectory(atPath: fakePathDirectory,
+                                         withIntermediateDirectories: true)
+let fakeExecutable = fakePathDirectory + "/coretool"
+FileManager.default.createFile(atPath: fakeExecutable, contents: Data())
+try! FileManager.default.setAttributes([.posixPermissions: 0o755],
+                                       ofItemAtPath: fakeExecutable)
+let shadowEntry = ShellEntry(kind: .alias, name: "coretool", command: "echo shadow",
+                             comment: nil, sourceFile: coreRc, line: 12, managed: false)
+check("conflict core preserves executable shadow detection",
+      ConflictDetector.detect(in: [shadowEntry], searchPaths: [fakePathDirectory]).contains {
+          if case .shadowsBinary(let path) = $0.reason {
+              return $0.name == "coretool" && path == fakeExecutable
+          }
+          return false
+      })
+
+func coreRanked(_ name: String,
+                command: String,
+                comment: String? = nil,
+                uses: Int,
+                line: Int) -> RankedEntry {
+    RankedEntry(
+        entry: ShellEntry(kind: .alias, name: name, command: command, comment: comment,
+                          sourceFile: coreRc, line: line, managed: false),
+        uses: uses
+    )
+}
+
+let rankingFixture = [
+    coreRanked("git", command: "git", uses: 1, line: 1),
+    coreRanked("git-sync", command: "sync", uses: 2, line: 2),
+    coreRanked("legit", command: "echo legitimate", uses: 3, line: 3),
+    coreRanked("helper", command: "echo helper", comment: "git utilities", uses: 4, line: 4),
+    coreRanked("runner", command: "git status", uses: 5, line: 5),
+    coreRanked("other", command: "echo other", uses: 6, line: 6),
+]
+check("ranker preserves exact/prefix/substring/comment/command tiers",
+      Ranker.rank(rankingFixture, query: "  GIT  ", scope: .everything).map(\.name)
+          == ["git", "git-sync", "legit", "helper", "runner"])
+check("name-only scope excludes comment and command matches",
+      Ranker.rank(rankingFixture, query: "git", scope: .name).map(\.name)
+          == ["git", "git-sync", "legit"])
+check("name-and-comment scope excludes command-only matches",
+      Ranker.rank(rankingFixture, query: "git", scope: .nameComment).map(\.name)
+          == ["git", "git-sync", "legit", "helper"])
+check("empty-query ranking preserves usage-first rest order",
+      Ranker.rank(rankingFixture, query: "", scope: .everything).map(\.name)
+          == ["other", "runner", "helper", "legit", "git-sync", "git"])
+check("board matching uses the same ranker tiers",
+      Ranker.matches(rankingFixture[3], query: "git", scope: .nameComment)
+          && !Ranker.matches(rankingFixture[4], query: "git", scope: .nameComment)
+          && Ranker.matches(rankingFixture[4], query: "git", scope: .everything))
+
+check("name suggester keeps the primary initials",
+      AliasNameSuggester.suggest(for: "sudo FOO=bar git status -sb", takenNames: []) == "gs")
+check("name suggester advances to the readable collision candidate",
+      AliasNameSuggester.suggest(for: "git status", takenNames: ["gs"]) == "gis")
+check("name suggester numbers only after readable candidates are taken",
+      AliasNameSuggester.suggest(for: "git status",
+                                 takenNames: ["gs", "gis", "gist", "git"]) == "gs2")
+check("name suggester preserves the exhausted fallback",
+      AliasNameSuggester.suggest(
+          for: "git status",
+          takenNames: ["gs", "gis", "gist", "git", "gs2", "gs3", "gs4",
+                       "gs5", "gs6", "gs7", "gs8", "gs9"]
+      ) == "gs")
+check("name suggester returns empty when no usable word remains",
+      AliasNameSuggester.suggest(for: "sudo --help FOO=bar", takenNames: []) == "")
 
 
 // ---------------------------------------------------------------------------
