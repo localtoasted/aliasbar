@@ -58,6 +58,16 @@ enum AppPaths {
         )
     }
 
+    /// Where MANAGE's Delivery bucket asks `PromptCompiler` to write/remove Claude
+    /// Code slash commands. `ALIASBAR_CLAUDE_COMMANDS_DIR` exists purely for
+    /// testability, matching every other override in this file.
+    static var claudeCommandsDirectory: String {
+        CorePaths.resolveClaudeCommandsDirectory(
+            environmentOverride: ProcessInfo.processInfo.environment["ALIASBAR_CLAUDE_COMMANDS_DIR"],
+            homeDirectory: NSHomeDirectory()
+        )
+    }
+
     // Existing call sites (including WriterTests.swift) reach the resolvers through
     // AppPaths. Kept as thin forwarders so nothing outside this file has to change,
     // while CorePaths remains the one place the actual precedence logic lives.
