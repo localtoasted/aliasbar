@@ -2903,6 +2903,151 @@ for forbiddenAPI in [
           !classifierSource.contains(forbiddenAPI))
 }
 
+// ---------------------------------------------------------------------------
+print("\n31. Clipboard capture: quarantine routing and store")
+
+let quarantineBase = Date(timeIntervalSince1970: 1_700_000_000)
+
+func capturedClip(
+    _ content: String,
+    declaredTypes: [String] = ["public.utf8-plain-text"],
+    concealed: Bool = false
+) -> CapturedClip {
+    CapturedClip(
+        content: content,
+        declaredTypes: declaredTypes,
+        capturedAt: quarantineBase,
+        concealed: concealed
+    )
+}
+
+// Concealed short-circuits before any text heuristic runs, even for content that would
+// otherwise sail through unclassified.
+let concealedInnocuous = ClipIngestor.decide(
+    capturedClip("just a grocery list", concealed: true), now: quarantineBase
+)
+if case .quarantine(let memoryClip) = concealedInnocuous {
+    check("concealed pasteboard type is quarantined regardless of content",
+          memoryClip.reason == .concealedPasteboardType)
+    check("concealed quarantine keeps the original content",
+          memoryClip.content == "just a grocery list")
+    check("concealed quarantine expires 90s from capture",
+          memoryClip.expiresAt == quarantineBase.addingTimeInterval(QuarantineStore.expiryInterval))
+} else {
+    check("concealed pasteboard type is quarantined regardless of content", false)
+}
+
+// A concealed type with classifier-positive content must still report the concealed
+// reason: the short-circuit runs before the classifier is ever consulted.
+let concealedSecret = ClipIngestor.decide(
+    capturedClip("ghp_\(providerTokenBody)", concealed: true), now: quarantineBase
+)
+if case .quarantine(let memoryClip) = concealedSecret {
+    check("concealed type wins over a classifier-positive body",
+          memoryClip.reason == .concealedPasteboardType)
+} else {
+    check("concealed type wins over a classifier-positive body", false)
+}
+
+// Classifier-positive, not concealed: routed to quarantine with the classifier's own
+// reason.
+let classifierPositive = ClipIngestor.decide(
+    capturedClip("ghp_\(providerTokenBody)"), now: quarantineBase
+)
+if case .quarantine(let memoryClip) = classifierPositive {
+    check("classifier-positive content is quarantined with the matching reason",
+          memoryClip.reason == .githubToken)
+} else {
+    check("classifier-positive content is quarantined with the matching reason", false)
+}
+
+// Classifier-nil, not concealed: the only path to persist.
+let classifierNegative = ClipIngestor.decide(
+    capturedClip("git status", declaredTypes: ["public.utf8-plain-text"]),
+    now: quarantineBase
+)
+if case .persist(let safeClip) = classifierNegative {
+    check("classifier-nil content is persisted", safeClip.content == "git status")
+    check("persisted clip records detection time", safeClip.detectedAt == quarantineBase)
+    check("persisted clip carries the declared pasteboard types",
+          safeClip.source.declaredTypes == ["public.utf8-plain-text"])
+    check("persisted clip records byte size",
+          safeClip.source.byteSize == "git status".utf8.count)
+} else {
+    check("classifier-nil content is persisted", false)
+}
+
+// Byte size defaults to the content's own UTF-8 length when the capture layer doesn't
+// supply one (e.g. a plain-text-only read with no independent size available).
+check("captured clip defaults byte size to UTF-8 length",
+      capturedClip("héllo").byteSize == "héllo".utf8.count)
+
+print("\n31a. QuarantineStore expiry")
+
+var quarantineClock = quarantineBase
+let store = QuarantineStore(clock: { quarantineClock })
+
+if case .quarantine(let expiring) = ClipIngestor.decide(
+    capturedClip("ghp_\(providerTokenBody)"), now: quarantineBase
+) {
+    store.add(expiring)
+}
+
+quarantineClock = quarantineBase.addingTimeInterval(89)
+check("clip is still active 89s after capture (expiry is 90s)",
+      store.active().count == 1)
+
+quarantineClock = quarantineBase.addingTimeInterval(91)
+check("clip is pruned 91s after capture",
+      store.active().isEmpty)
+
+// An explicit `now:` overrides the store's own clock. Two separate stores, each seeded
+// once: `active` prunes as a side effect, so reusing one store across both assertions
+// would have the first call's pruning silently decide the second's outcome.
+func seededStore() -> QuarantineStore {
+    let seeded = QuarantineStore(clock: { quarantineBase })
+    seeded.add(MemoryClip(
+        content: "second", reason: .highEntropyString,
+        expiresAt: quarantineBase.addingTimeInterval(QuarantineStore.expiryInterval)
+    ))
+    return seeded
+}
+check("active(now:) can be driven independently of the injected clock",
+      seededStore().active(now: quarantineBase.addingTimeInterval(91)).isEmpty)
+check("omitting now: falls back to the injected clock",
+      seededStore().active().count == 1)
+
+let explicitNowStore = seededStore()
+check("clear() empties the store",
+      { explicitNowStore.clear(); return explicitNowStore.active().isEmpty }())
+
+print("\n31b. SafeClip persistence boundary")
+
+let roundTripClip = SafeClip(
+    content: "git status",
+    detectedAt: quarantineBase,
+    source: SafeClip.SourceMetadata(declaredTypes: ["public.utf8-plain-text"], byteSize: 10)
+)
+let roundTripData = try? JSONEncoder().encode(roundTripClip)
+check("SafeClip encodes", roundTripData != nil)
+let roundTripDecoded = roundTripData.flatMap {
+    try? JSONDecoder().decode(SafeClip.self, from: $0)
+}
+check("SafeClip round-trips through JSONEncoder/JSONDecoder",
+      roundTripDecoded == roundTripClip)
+
+// Neither in-memory clip type conforms to Encodable. Boxing a real instance as `Any`
+// and casting to `any Encodable` only succeeds if the concrete type actually conforms —
+// there is no other way to observe "not Codable" at runtime, since the compiler already
+// refuses `JSONEncoder().encode(memoryClip)` at the call site above.
+let sampleMemoryClip = MemoryClip(
+    content: "x", reason: .highEntropyString, expiresAt: quarantineBase
+)
+check("MemoryClip does not conform to Encodable",
+      (sampleMemoryClip as Any) as? any Encodable == nil)
+let sampleCapturedClip = capturedClip("x")
+check("CapturedClip does not conform to Encodable",
+      (sampleCapturedClip as Any) as? any Encodable == nil)
 
 // ---------------------------------------------------------------------------
 print("\n31. SharedDocumentStore")

@@ -6,6 +6,11 @@ import Foundation
 /// deliberately returns only a stable reason: it never stores or echoes matched bytes.
 enum SensitiveContentClassifier {
     enum QuarantineReason: String, CaseIterable, Equatable, Sendable, CustomStringConvertible {
+        /// Set by the capture layer, never by `quarantineReason(in:)` itself: the
+        /// pasteboard declared `org.nspasteboard.ConcealedType` before any text was
+        /// inspected. Lives here so every quarantine reason — text-shaped or not —
+        /// shares one type.
+        case concealedPasteboardType = "concealed-pasteboard-type"
         case oversizedContent = "oversized-content"
         case privateKey = "private-key"
         case awsAccessKeyID = "aws-access-key-id"
@@ -20,6 +25,8 @@ enum SensitiveContentClassifier {
 
         var description: String {
             switch self {
+            case .concealedPasteboardType:
+                return "Copied from a concealed field (e.g. a password manager)"
             case .oversizedContent:
                 return "Content exceeds the offline inspection limit"
             case .privateKey:
