@@ -189,11 +189,11 @@ struct RootView: View {
                     .help("Searching your shell history — ⌘H to go back")
                 }
 
-                // Same badge treatment for a non-All bucket, and for the same reason:
-                // the bucket now narrows FIND and BOARD too, and a filter that hides
-                // things without saying so reads as data loss. MANAGE already names
-                // its bucket in the sidebar; history ignores buckets entirely.
-                if state.bucket != .all && state.mode != .manage && !state.historyMode {
+                // A subset bucket needs a badge in FIND and BOARD because hiding
+                // things without saying so reads as data loss. `By file` only changes
+                // order, MANAGE names its bucket in the sidebar, and history ignores
+                // buckets entirely.
+                if state.bucket.showsHeaderFilter(in: state.mode) && !state.historyMode {
                     HStack(spacing: 4) {
                         Image(systemName: state.bucket.symbol)
                             .font(.system(size: 9.5, weight: .semibold))
