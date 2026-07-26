@@ -3134,6 +3134,55 @@ if case .success(var toEdit) = PromptStore.read(url: unknownKeyDir.appendingPath
     check("prompt reads for the field-edit test", false)
 }
 
+// --- CRLF frontmatter: delimiters and values with a trailing \r are recognized ---
+// Splitting on "\n" alone means a CRLF file's delimiter lines read as "---\r", not
+// "---", and a value like "schema: 1\r" carries that \r right through a plain
+// `.trimmingCharacters(in: .whitespaces)` — neither of which strips \r. Unhandled,
+// that means a CRLF file's frontmatter is never recognized at all.
+
+let crlfFixture = promptFixture([
+    "---",
+    "schema: 1",
+    "description: CRLF prompt",
+    "---",
+    "Summarize: {{notes}}",
+    "",
+]).replacingOccurrences(of: "\n", with: "\r\n")
+let crlfDir = promptScratchDir()
+writeRawPromptFile(crlfFixture, name: "crlf", in: crlfDir)
+if case .success(let parsed) = PromptStore.read(url: crlfDir.appendingPathComponent("crlf.md")) {
+    check("CRLF file: frontmatter is recognized despite the trailing \\r on its delimiters",
+          parsed.frontmatter != nil)
+    check("CRLF file: description reads with no stray \\r left in it",
+          parsed.description == "CRLF prompt")
+    check("CRLF file: slots still reach through to the body", parsed.slots == ["notes"])
+
+    let rtDir = promptScratchDir()
+    try! PromptStore.write(prompt: parsed, to: rtDir)
+    check("CRLF file round-trips byte-for-byte, preserving its original line endings",
+          read(rtDir.appendingPathComponent("crlf.md").path) == crlfFixture)
+} else {
+    check("CRLF frontmatter reads", false)
+}
+
+// Editing a known field on a CRLF file must not flip its delimiters to LF.
+if case .success(var toEditCRLF) = PromptStore.read(url: crlfDir.appendingPathComponent("crlf.md")) {
+    toEditCRLF.frontmatter = toEditCRLF.frontmatter?.setting("description", to: "Updated CRLF description")
+    let crlfEditDir = promptScratchDir()
+    try! PromptStore.write(prompt: toEditCRLF, to: crlfEditDir)
+    let editedCRLF = read(crlfEditDir.appendingPathComponent("crlf.md").path)
+    // The closing delimiter's own trailing \r is what `delimiterUsesCRLF` restores;
+    // what precedes it is always exactly one "\n" (from `lines.joined(separator:
+    // "\n")`) regardless of whether the line just edited happens to carry its own
+    // trailing \r, so the assertion checks for "\n---\r\n" rather than "\r\n---\r\n".
+    check("editing a known field on a CRLF file keeps its delimiters CRLF",
+          editedCRLF.hasPrefix("---\r\n") && editedCRLF.contains("\n---\r\n"))
+    check("editing a known field on a CRLF file updates the value",
+          editedCRLF.contains("description: Updated CRLF description"))
+} else {
+    check("prompt reads for the CRLF field-edit test", false)
+}
+
 // --- Scan outcome distinctions ------------------------------------------------
 
 let missingPromptsDir = URL(fileURLWithPath: "\(sandbox)/prompts-missing-\(UUID().uuidString)")
@@ -3229,6 +3278,23 @@ check("every overwrite left its own backup file", backupsListing.count == 2)
 let strayTempFiles = try! FileManager.default.contentsOfDirectory(atPath: backupDir.path)
     .filter { $0.hasPrefix(".aliasbar-prompt-write-") }
 check("no temp files are left behind after a write", strayTempFiles.isEmpty)
+
+// A prior version that isn't valid UTF-8 must still be backed up. The old
+// implementation read the prior file via `String(contentsOf:encoding:.utf8)`, which
+// throws on invalid UTF-8 — silently skipping the backup and letting the overwrite
+// proceed with no safety copy at all.
+let nonUTF8Dir = promptScratchDir()
+let nonUTF8Bytes = Data([0x2D, 0x2D, 0x2D, 0x0A, 0x62, 0x6F, 0x64, 0x79, 0xFF, 0xFE, 0x0A])
+try! nonUTF8Bytes.write(to: nonUTF8Dir.appendingPathComponent("binary.md"))
+let nonUTF8Backup = try! PromptStore.write(
+    prompt: Prompt(name: "binary", frontmatter: nil, body: "replacement body\n"), to: nonUTF8Dir)
+check("overwriting a non-UTF-8 prompt file still produces a backup", nonUTF8Backup != nil)
+if let backupPath = nonUTF8Backup {
+    check("the backup preserves the original bytes exactly, not a lossy re-decode",
+          (try? Data(contentsOf: URL(fileURLWithPath: backupPath))) == nonUTF8Bytes)
+}
+check("the live file now holds the new content",
+      read(nonUTF8Dir.appendingPathComponent("binary.md").path) == "replacement body\n")
 
 // --- PromptUsageCounter --------------------------------------------------------
 
@@ -3547,6 +3613,21 @@ check("restoreUserContent refuses when something else wrote in between",
       !clobberRestoreAttempt)
 check("a refused restore leaves the intervening content alone",
       clobberFake.string(forType: .string) == "a second, unrelated copy")
+
+// Bounded self-write history: only the most recent writes are remembered per
+// pasteboard, so a long-running session (or a recycled `ObjectIdentifier`) can't
+// grow this bookkeeping without bound.
+let boundedFake = FakePasteboard()
+var boundedWriteCounts: [Int] = []
+for i in 0..<20 {
+    boundedWriteCounts.append(PasteboardBroker.write(transient: "item \(i)", to: boundedFake))
+}
+check("no more than the capped number of changeCounts are retained per pasteboard",
+      PasteboardBroker.recordedChangeCountForTesting(on: boundedFake) <= 8)
+check("a changeCount older than the cap is forgotten",
+      !PasteboardBroker.isSelfWrite(changeCount: boundedWriteCounts[0], on: boundedFake))
+check("the most recent changeCount is still recognized",
+      PasteboardBroker.isSelfWrite(changeCount: boundedWriteCounts.last!, on: boundedFake))
 
 // ---------------------------------------------------------------------------
 print("\n33. ClipboardMonitor: the 248-D gate proof")
@@ -4062,6 +4143,40 @@ let reencoded = try! JSONEncoder.aliasBarDocument.encode(decoded1)
 let decoded2 = try! JSONDecoder.aliasBarDocument.decode(SharedDocument.self, from: reencoded)
 check("unknown field survives a decode-encode-decode cycle", decoded2 == decoded1)
 
+// A whole-number unknown field above 2^53 (the largest integer a Double can
+// represent exactly) must not lose precision on round-trip. 9007199254740993 is
+// 2^53 + 1 — the smallest integer a Double cannot represent exactly.
+let bigIntJSON = """
+{"schema":1,"settings":{},"records":{},"futureFeature":{"bigId":9007199254740993}}
+"""
+let bigIntDecoded = try! JSONDecoder.aliasBarDocument.decode(SharedDocument.self, from: Data(bigIntJSON.utf8))
+if case .object(let nested)? = bigIntDecoded.unknownFields["futureFeature"],
+   case .int(let value)? = nested["bigId"] {
+    check("an integer above 2^53 decodes as .int, exactly, not a rounded Double",
+          value == 9_007_199_254_740_993)
+} else {
+    check("an integer above 2^53 decodes as .int, exactly, not a rounded Double", false)
+}
+let bigIntReencoded = try! JSONEncoder.aliasBarDocument.encode(bigIntDecoded)
+let bigIntReencodedText = String(data: bigIntReencoded, encoding: .utf8) ?? ""
+check("re-encoding writes the integer back as a whole number, not 9007199254740993.0",
+      bigIntReencodedText.contains("9007199254740993") && !bigIntReencodedText.contains("9007199254740993.0"))
+let bigIntRedecoded = try! JSONDecoder.aliasBarDocument.decode(SharedDocument.self, from: bigIntReencoded)
+check("the big integer survives a full decode-encode-decode cycle", bigIntRedecoded == bigIntDecoded)
+
+// A genuine fractional number must still decode as .number, not be misrouted to .int.
+let fractionalJSON = """
+{"schema":1,"settings":{},"records":{},"futureFeature":{"ratio":1.5}}
+"""
+let fractionalDecoded = try! JSONDecoder.aliasBarDocument.decode(SharedDocument.self,
+                                                                  from: Data(fractionalJSON.utf8))
+if case .object(let nested)? = fractionalDecoded.unknownFields["futureFeature"] {
+    check("a fractional value still decodes as .number, not misrouted to .int",
+          nested["ratio"] == .number(1.5))
+} else {
+    check("a fractional value still decodes as .number, not misrouted to .int", false)
+}
+
 // -- Store basics -------------------------------------------------------------
 let dir1 = sharedStoreDir()
 let docURL1 = URL(fileURLWithPath: "\(dir1)/settings.json")
@@ -4429,6 +4544,62 @@ expectThrow("uninstall also refuses a dot-dot traversal to the right filename") 
         return rPath
     }())
 }
+
+// --- A tampered registry cannot redirect compile outside commandsDir either -----
+// The same rule uninstall enforces above must hold for compile: a registry entry
+// whose recorded path isn't commandsDir/<name>.md must be refused, not silently
+// repointed. Without this, and with nothing yet on disk at the expected destination
+// (so the collision/hash-mismatch checks never fire), compile would happily write a
+// fresh file there and overwrite the registry entry to match — orphaning whatever
+// the old entry actually pointed to, with nothing left recording it ever existed.
+
+(cDir, rPath) = promptFixture()
+let escapeTargetPath = (rPath as NSString).deletingLastPathComponent + "/elsewhere.md"
+try! "content the registry claims to own, elsewhere\n".write(
+    toFile: escapeTargetPath, atomically: true, encoding: .utf8)
+let escapeTargetHash = SHA256Digest.hex("content the registry claims to own, elsewhere\n")
+try! """
+{"escape3": {"path": "\(escapeTargetPath)", "sha256": "\(escapeTargetHash)", "installedAt": "2026-07-26T00:00:00Z"}}
+""".write(toFile: rPath, atomically: true, encoding: .utf8)
+
+expectThrow("compile refuses a registry entry pointing outside commandsDir instead of silently repointing it") {
+    _ = try PromptCompiler.compile(name: "escape3", description: nil, body: "new content\n",
+                                   commandsDir: cDir, registryPath: rPath)
+}
+check("nothing was written to commandsDir for the escaping name",
+      !FileManager.default.fileExists(atPath: cDir + "/escape3.md"))
+check("the file the registry pointed at outside commandsDir is untouched",
+      read(escapeTargetPath) == "content the registry claims to own, elsewhere\n")
+if case .ok(let installed) = PromptCompiler.installedCommands(registryPath: rPath) {
+    check("the tampered registry entry is left exactly as it was, not silently repointed",
+          installed.first(where: { $0.name == "escape3" })?.path == escapeTargetPath)
+} else {
+    check("registry is still readable after the refused compile", false)
+}
+
+// --- Ownership hashes are computed over raw bytes, not a lossy UTF-8 decode ------
+// Decoding the on-disk file as a `String` before hashing replaces any invalid UTF-8
+// byte with U+FFFD, changing what actually gets hashed. That turns an untouched
+// non-UTF-8 file into a false hash mismatch, refusing an update that should succeed.
+
+(cDir, rPath) = promptFixture()
+let invalidUTF8Bytes = Data([0x68, 0x69, 0x0A, 0xFF, 0xFE, 0x0A]) // "hi\n" + two invalid UTF-8 bytes + "\n"
+let invalidUTF8Path = cDir + "/binaryish.md"
+try! invalidUTF8Bytes.write(to: URL(fileURLWithPath: invalidUTF8Path))
+let rawContentHash = SHA256Digest.hex(invalidUTF8Bytes)
+try! """
+{"binaryish": {"path": "\(invalidUTF8Path)", "sha256": "\(rawContentHash)", "installedAt": "2026-07-26T00:00:00Z"}}
+""".write(toFile: rPath, atomically: true, encoding: .utf8)
+
+let hashFixResult = try! PromptCompiler.compile(name: "binaryish", description: nil, body: "updated body\n",
+                                                commandsDir: cDir, registryPath: rPath)
+check("a registry hash computed over raw bytes matches, so a non-UTF-8 file updates instead of falsely refusing",
+      hashFixResult.backup != nil)
+if let backup = hashFixResult.backup {
+    check("the backup preserves the original non-UTF-8 bytes exactly",
+          (try? Data(contentsOf: URL(fileURLWithPath: backup))) == invalidUTF8Bytes)
+}
+check("the file now holds the updated content", read(cDir + "/binaryish.md").contains("updated body"))
 
 // --- Atomicity: no stray temp files survive a run ---------------------------
 

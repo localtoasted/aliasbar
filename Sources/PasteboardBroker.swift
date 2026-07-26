@@ -27,11 +27,21 @@ enum PasteboardBroker {
         let string: String?
     }
 
-    /// changeCounts we produced, keyed by pasteboard identity. Keying by identity
-    /// (rather than one global set) means a test's fake pasteboard can never collide
-    /// with another test's, or with `NSPasteboard.general`, whose counts persist for
-    /// the app's whole run.
-    private static var selfWriteChangeCounts: [ObjectIdentifier: Set<Int>] = [:]
+    /// changeCounts we produced, keyed by pasteboard identity, newest last, capped to
+    /// the most recent `maxRecordedChangeCounts` per key.
+    ///
+    /// Keying by identity (rather than one global set) means a test's fake pasteboard
+    /// can never collide with another test's, or with `NSPasteboard.general`, whose
+    /// counts persist for the app's whole run — but `ObjectIdentifier` is a pointer
+    /// value, and AppKit is free to recycle a deallocated pasteboard's address for an
+    /// unrelated object later. Without a cap, a long-running app session would both
+    /// grow this dictionary forever (a leak: every distinct pasteboard the app has
+    /// ever touched, including short-lived test fakes, stays keyed here) and risk a
+    /// recycled identity inheriting a stale, unrelated set of "self-written" counts.
+    /// Keeping only the last few counts per key bounds the leak and keeps a stale
+    /// identity's history small enough to be harmless even if it is reused.
+    private static let maxRecordedChangeCounts = 8
+    private static var selfWriteChangeCounts: [ObjectIdentifier: [Int]] = [:]
 
     /// Writes `transient` to `pasteboard` and remembers the changeCount it produced.
     @discardableResult
@@ -46,6 +56,12 @@ enum PasteboardBroker {
     /// True when `changeCount` is one this broker produced itself, on `pasteboard`.
     static func isSelfWrite(changeCount: Int, on pasteboard: PasteboardWriting = NSPasteboard.general) -> Bool {
         selfWriteChangeCounts[ObjectIdentifier(pasteboard)]?.contains(changeCount) ?? false
+    }
+
+    /// Test-only: how many changeCounts are currently recorded for `pasteboard`, so a
+    /// test can prove the bound holds without reaching into private storage.
+    static func recordedChangeCountForTesting(on pasteboard: PasteboardWriting) -> Int {
+        selfWriteChangeCounts[ObjectIdentifier(pasteboard)]?.count ?? 0
     }
 
     /// Captures `pasteboard`'s current string content, to hand to `restoreUserContent`
@@ -75,6 +91,12 @@ enum PasteboardBroker {
     }
 
     private static func record(_ count: Int, on pasteboard: PasteboardWriting) {
-        selfWriteChangeCounts[ObjectIdentifier(pasteboard), default: []].insert(count)
+        var counts = selfWriteChangeCounts[ObjectIdentifier(pasteboard), default: []]
+        counts.removeAll { $0 == count }
+        counts.append(count)
+        if counts.count > maxRecordedChangeCounts {
+            counts.removeFirst(counts.count - maxRecordedChangeCounts)
+        }
+        selfWriteChangeCounts[ObjectIdentifier(pasteboard)] = counts
     }
 }
