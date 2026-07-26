@@ -225,57 +225,50 @@ struct Arriving: ViewModifier {
 extension View {
     func arriving(_ index: Int) -> some View { modifier(Arriving(index: index)) }
 
-    /// Makes a control answer the pointer. A thing that does not respond to a hover reads
-    /// as a picture of a control rather than a control.
-    func live(pressDrop: CGFloat = 0) -> some View {
-        modifier(LiveSurface(pressDrop: pressDrop))
+    /// Makes a control answer the pointer *and* do its job. A thing that does not respond
+    /// to a hover reads as a picture of a control; a thing that responds and then swallows
+    /// the click is worse.
+    ///
+    /// The action belongs here rather than in a separate `onTapGesture` behind it. Two
+    /// independent gestures on one view means arbitration, and arbitration means the one
+    /// that resolves first — a press detector — wins and the tap never fires. That shipped
+    /// once already.
+    func live(pressDrop: CGFloat = 0, action: @escaping () -> Void) -> some View {
+        Button(action: action) { self }
+            .buttonStyle(LiveButtonStyle(pressDrop: pressDrop))
+    }
+
+    /// Hover and press feedback for something that is already a `Button` and owns its own
+    /// gesture — a `ButtonStyle` cannot be applied to a plain view, and a plain view cannot
+    /// be given press feedback without an action to hang it on.
+    func liveButton(pressDrop: CGFloat = 0) -> some View {
+        buttonStyle(LiveButtonStyle(pressDrop: pressDrop))
     }
 }
 
-/// Hover and press states for anything clickable.
+/// The single control treatment: hover, press, and activation as one thing.
 ///
-/// The press treatment is deliberately physical: a keycap travels downward and loses its
-/// contact shadow, because that is what a key does. Everything else just dims slightly,
-/// which is enough to say "yes, I felt that" without turning a settings row into a toy.
-struct LiveSurface: ViewModifier {
-    @Environment(\.motion) private var motion
-    /// How far the surface travels when pressed. Zero for flat controls.
+/// A `ButtonStyle` rather than a gesture, because `configuration.isPressed` is the press
+/// state the button already tracks. Nothing competes with anything.
+struct LiveButtonStyle: ButtonStyle {
+    /// How far the surface travels when pressed. A keycap travels; a settings row does not.
     var pressDrop: CGFloat = 0
-    @State private var hovering = false
-    @State private var pressing = false
 
-    func body(content: Content) -> some View {
-        content
-            .brightness(brightness)
-            .scaleEffect(motion.movesThings && pressing ? 0.985 : 1)
-            .offset(y: motion.movesThings && pressing ? pressDrop : 0)
-            .animation(motion(pressing ? Motion.press : Motion.hover), value: pressing)
-            .animation(motion(Motion.hover), value: hovering)
-            .onHover { hovering = $0 }
-            // A zero-duration long press is the only way to see the *down* edge of a click
-            // in SwiftUI. `onTapGesture` fires on release and knows nothing about the hold,
-            // which is exactly the half we need here.
-            .onLongPressGesture(minimumDuration: 0, pressing: { pressing = $0 }, perform: {})
+    func makeBody(configuration: Configuration) -> some View {
+        Surface(configuration: configuration, pressDrop: pressDrop)
     }
 
-    /// Brightness rather than an overlay, so it works over a material, a paper ground, and
-    /// a tinted keycap without any of them needing to know about it.
-    private var brightness: Double {
-        guard motion.fades else { return 0 }
-        if pressing { return -0.04 }
-        return hovering ? 0.06 : 0
-    }
-}
+    /// A real view rather than a bare modifier chain, because hover is `@State` and a
+    /// `ButtonStyle` is recreated on every render.
+    private struct Surface: View {
+        let configuration: Configuration
+        let pressDrop: CGFloat
+        @Environment(\.motion) private var motion
+        @State private var hovering = false
 
-/// Reads the current theme once and hands it down, so views never touch Settings
-/// directly for appearance.
-private struct ThemeKey: EnvironmentKey {
-    static let defaultValue = Theme.derive(from: .graphite)
-}
-
-extension EnvironmentValues {
-    var theme: Theme {
-        get { self[ThemeKey.self] }
-        set { self[ThemeKey.self] = newValue }
-    }
-}
+        var body: some View {
+            configuration.label
+                .brightness(brightness)
+                .scaleEffect(motion.movesThings && configuration.isPressed ? 0.985 : 1)
+                .offset(y: motion.movesThings && configuration.isPressed ? pressDrop : 0)
+                .animation(motion(configuration.isPressed

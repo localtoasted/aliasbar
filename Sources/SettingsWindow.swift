@@ -202,8 +202,7 @@ struct SettingsView: View {
                 .background(active ? theme.selectionFill : .clear,
                             in: RoundedRectangle(cornerRadius: theme.cornerRadius + 1))
                 .contentShape(Rectangle())
-                .live()
-                .onTapGesture { section = item }
+                .live { section = item }
             }
             Spacer()
         }
@@ -329,12 +328,12 @@ struct SettingsView: View {
                         ThemeSwatch(appearance: preset,
                                     systemIsDark: settings.systemIsDark,
                                     selected: settings.appearance.id == preset.id
-                                        && settings.appearance == preset)
-                            .onTapGesture {
-                                withAnimation(.easeOut(duration: 0.15)) {
-                                    settings.appearance = preset
-                                }
-                            }
+                                        && settings.appearance == preset,
+                                    action: {
+                                        withAnimation(.easeOut(duration: 0.15)) {
+                                            settings.appearance = preset
+                                        }
+                                    })
                     }
                 }
                 if isEditedCopy {
@@ -765,8 +764,7 @@ struct ThemedButton: View {
                 .overlay(RoundedRectangle(cornerRadius: theme.cornerRadius)
                     .strokeBorder(theme.rule.opacity(0.6), lineWidth: 1))
         }
-        .buttonStyle(.plain)
-        .live()
+        .liveButton()
     }
 }
 
@@ -882,6 +880,7 @@ struct ThemeSwatch: View {
     let appearance: Appearance
     let systemIsDark: Bool
     let selected: Bool
+    let action: () -> Void
 
     private var t: Theme { Theme.derive(from: appearance, dark: systemIsDark) }
 
@@ -936,7 +935,7 @@ struct ThemeSwatch: View {
                               lineWidth: selected ? 2 : 1)
         )
         .contentShape(Rectangle())
-        .live()
+        .live(action: action)
     }
 }
 
@@ -967,5 +966,4 @@ final class HotkeyRecorder {
 }
 
 extension Notification.Name {
-    static let aliasBarHotkeyFired = Notification.Name("aliasBarHotkeyFired")
-}
+    static let aliasBarHotkeyFired = Notification.Name("ali

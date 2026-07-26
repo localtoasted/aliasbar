@@ -220,8 +220,7 @@ struct RootView: View {
                     .strokeBorder(active ? theme.accent.opacity(0.4) : .clear, lineWidth: 1)
             )
             .contentShape(Rectangle())
-            .live()
-            .onTapGesture { state.mode = mode; state.selection = 0 }
+            .live { state.mode = mode; state.selection = 0 }
             .help("\(mode.label) — ⌘\(mode == .find ? "1" : mode == .board ? "2" : "3")")
     }
 
@@ -266,9 +265,8 @@ struct RootView: View {
             Button { state.onOpenSettings?() } label: {
                 Image(systemName: "gearshape.fill").font(.system(size: 10.5))
             }
-            .buttonStyle(.plain)
+            .liveButton()
             .foregroundStyle(theme.dim)
-            .live()
             .help("Settings — ⌘,")
         }
         .frame(height: 16)
@@ -741,11 +739,11 @@ struct BoardView: View {
                             Keycap(entry: entry,
                                    selected: state.selection == index,
                                    dimmed: !state.boardMatches(entry),
-                                   density: settings.boardDensity)
-                                .onTapGesture {
-                                    state.selection = index
-                                    state.perform(settings.enterAction, on: entry)
-                                }
+                                   density: settings.boardDensity,
+                                   action: {
+                                       state.selection = index
+                                       state.perform(settings.enterAction, on: entry)
+                                   })
                         }
                     }
                     .padding(10)
@@ -802,6 +800,7 @@ private struct Keycap: View {
     let selected: Bool
     let dimmed: Bool
     let density: BoardDensity
+    let action: () -> Void
 
     var body: some View {
         VStack(spacing: 1) {
@@ -848,7 +847,7 @@ private struct Keycap: View {
         .contentShape(Rectangle())
         // A key travels when you press it. One point is enough to feel and small enough
         // that a grid of fifty does not look like it is breathing.
-        .live(pressDrop: 1)
+        .live(pressDrop: 1, action: action)
     }
 }
 
@@ -919,8 +918,7 @@ struct ManageView: View {
         .background(active ? theme.selectionFill : .clear,
                     in: RoundedRectangle(cornerRadius: theme.cornerRadius + 1))
         .contentShape(Rectangle())
-        .live()
-        .onTapGesture { state.bucket = bucket; state.selection = 0 }
+        .live { state.bucket = bucket; state.selection = 0 }
     }
 
     private func countFor(_ bucket: Bucket) -> Int {
@@ -980,8 +978,7 @@ struct ManageView: View {
         .background(selected ? theme.selectionFill : .clear,
                     in: RoundedRectangle(cornerRadius: theme.cornerRadius))
         .contentShape(Rectangle())
-        .live()
-        .onTapGesture { state.selection = index }
+        .live { state.selection = index }
     }
 
     @ViewBuilder
@@ -1259,3 +1256,4 @@ struct RemovalConfirmSheet: View {
         line.trimmingCharacters(in: .whitespaces) == confirmation.suspect
     }
 }
+                                                     
