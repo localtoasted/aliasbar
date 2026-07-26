@@ -210,6 +210,18 @@ struct RootView: View {
                     .help("Showing only \(state.bucket.label.lowercased()) — ⌘↑↓ to change, esc for all")
                 }
 
+                // The inference copy, FIND only — it explains the dialect boost, which
+                // only affects FIND's ranking. Plain text, not a badge: this is a guess
+                // AliasBar is making, not a state you are "in" the way a bucket is.
+                if state.mode == .find, !state.historyMode, let chip = state.contextChip {
+                    Text(chip)
+                        .font(.system(size: 10.5, design: theme.bodyDesign))
+                        .foregroundStyle(theme.faint)
+                        .lineLimit(1)
+                        .layoutPriority(-1)
+                        .help("Guessed only from the app you switched from — never what's on its screen. ⇥ flips between shell and prompt.")
+                }
+
                 Spacer(minLength: 6)
 
                 Text(ZshrcParser.displayPath)
@@ -235,7 +247,7 @@ struct RootView: View {
                     .focused($searchFocused)
                     .onChange(of: state.query) { _ in state.selection = 0 }
                 if !state.query.isEmpty {
-                    Text("\(state.historyMode ? state.historyResults.count : state.activeList.count)")
+                    Text("\(state.historyMode ? state.historyResults.count : state.activeCount)")
                         .font(.system(size: 10, weight: .semibold, design: .monospaced))
                         .foregroundStyle(theme.faint)
                 }
@@ -653,7 +665,7 @@ struct FindView: View {
     // MARK: Aliases
 
     private var aliases: some View {
-        let results = state.results
+        let results = state.findResults
         return Group {
             if results.isEmpty {
                 if state.query.isEmpty {
@@ -688,19 +700,27 @@ struct FindView: View {
                                 .padding(.bottom, 2)
                         }
 
-                        ForEach(Array(results.enumerated()), id: \.element.id) { index, entry in
+                        ForEach(Array(results.enumerated()), id: \.element.id) { index, shortcut in
                             Group {
-                                if index == 0 && !state.query.isEmpty {
-                                    PrimaryResult(entry: entry,
+                                // Prompts are new to FIND this slice and deliberately
+                                // plain — PromptRow, not Primary/Alternate — since
+                                // PRE-260 rebuilds prompt presentation from scratch.
+                                if shortcut.kind == .prompt {
+                                    PromptRow(shortcut: shortcut,
+                                              selected: state.selection == index,
+                                              highlight: highlight)
+                                        .onTapGesture { state.selection = index; activate(shortcut) }
+                                } else if index == 0 && !state.query.isEmpty {
+                                    PrimaryResult(entry: rankedEntry(for: shortcut),
                                                   selected: state.selection == 0,
-                                                  conflicts: state.store.conflicts(for: entry.name),
+                                                  conflicts: state.store.conflicts(for: shortcut.name),
                                                   highlight: highlight)
-                                        .onTapGesture { state.selection = 0; activate(entry) }
+                                        .onTapGesture { state.selection = 0; activate(shortcut) }
                                 } else {
-                                    AlternateRow(entry: entry,
+                                    AlternateRow(entry: rankedEntry(for: shortcut),
                                                  selected: state.selection == index,
                                                  highlight: highlight)
-                                        .onTapGesture { state.selection = index; activate(entry) }
+                                        .onTapGesture { state.selection = index; activate(shortcut) }
                                 }
                             }
                             .arriving(index)
@@ -727,8 +747,15 @@ struct FindView: View {
         return state.store.mostUsed.isEmpty ? "YOUR ALIASES" : "MOST USED"
     }
 
-    private func activate(_ entry: RankedEntry) {
-        state.perform(settings.enterAction, on: entry)
+    /// Rebuilds the `RankedEntry` `PrimaryResult`/`AlternateRow` expect, from a
+    /// shell-kind `Shortcut`. Never called for a `.prompt` shortcut — those get
+    /// `PromptRow` instead — so `shellEntry` is never nil here.
+    private func rankedEntry(for shortcut: Shortcut) -> RankedEntry {
+        RankedEntry(entry: shortcut.shellEntry!, uses: shortcut.uses)
+    }
+
+    private func activate(_ shortcut: Shortcut) {
+        state.performFind(shortcut, secondary: false)
     }
 }
 
@@ -908,6 +935,64 @@ private struct AlternateRow: View {
                     .foregroundStyle(theme.faint)
                     // A fixed trailing column, so the counts line up down the list
                     // instead of ragging with the length of each command.
+                    .frame(width: 34, alignment: .trailing)
+            } else {
+                Spacer().frame(width: 34)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 9)
+        .background {
+            if selected {
+                SelectionCapsule(radius: theme.cornerRadius + 1, namespace: highlight)
+            }
+        }
+        .contentShape(Rectangle())
+    }
+}
+
+/// A prompt in FIND: name plus a one-line description, and a distinct icon in place of
+/// `KindBadge` (that badge is `ShellEntry.Kind`-typed and stays that way — this is an
+/// addition alongside it, not a change to it).
+///
+/// Deliberately one plain row shape regardless of position in the list, unlike shell
+/// results' Primary/Alternate split — PRE-260 rebuilds prompt presentation, so this
+/// exists to make prompts visible and actionable, not to be a finished design.
+private struct PromptRow: View {
+    @Environment(\.theme) private var theme
+    let shortcut: Shortcut
+    let selected: Bool
+    let highlight: Namespace.ID
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "text.book.closed.fill")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(theme.accent)
+                .frame(width: 18, height: 18)
+            Text(shortcut.name)
+                .font(.system(size: 14.5, weight: .medium, design: theme.nameDesign))
+                .kerning(-0.15)
+                .foregroundStyle(theme.text)
+                .layoutPriority(1)
+            Text(shortcut.description ?? shortcut.body.replacingOccurrences(of: "\n", with: " ⏎ "))
+                .font(.system(size: 12.5, design: theme.bodyDesign))
+                .foregroundStyle(theme.dim.opacity(0.72))
+                .lineLimit(1)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .mask(
+                    HStack(spacing: 0) {
+                        Rectangle()
+                        LinearGradient(colors: [.black, .clear],
+                                       startPoint: .leading, endPoint: .trailing)
+                            .frame(width: 24)
+                    }
+                )
+            if shortcut.uses > 0 {
+                Text("\(shortcut.uses)×")
+                    .font(.system(size: 9.5, design: .monospaced))
+                    .monospacedDigit()
+                    .foregroundStyle(theme.faint)
                     .frame(width: 34, alignment: .trailing)
             } else {
                 Spacer().frame(width: 34)

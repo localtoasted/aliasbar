@@ -4525,6 +4525,242 @@ for forbiddenSymbol in [
 }
 
 // ---------------------------------------------------------------------------
+print("\n37. Context detection + dialect ranking (PRE-259)")
+
+// --- ContextDetector: the whole privacy boundary is this table -------------
+// A bundle ID in, a guess out — nothing here ever looks at a tab, a title, or
+// anything accessibility could see.
+
+let dialectTerminalBundleIDs: [String: String] = [
+    "com.googlecode.iterm2": "iTerm2",
+    "com.apple.Terminal": "Terminal",
+    "dev.warp.Warp-Stable": "Warp",
+    "net.kovidgoyal.kitty": "kitty",
+    "com.github.wez.wezterm": "WezTerm",
+    "org.alacritty": "Alacritty",
+    "com.mitchellh.ghostty": "Ghostty",
+]
+for (bundleID, name) in dialectTerminalBundleIDs {
+    let guess = ContextDetector.guess(forBundleID: bundleID)
+    check("terminal \(name) guesses shell", guess.dialect == .shell)
+    check("terminal \(name) chip reads \"over \(name) → shell first\"",
+          guess.chip == "over \(name) → shell first")
+}
+
+let dialectAINativeBundleIDs: [String: String] = [
+    "com.anthropic.claudefordesktop": "Claude",
+    "com.openai.chat": "ChatGPT",
+    "com.todesktop.230313mzl4w4u92": "Cursor",
+]
+for (bundleID, name) in dialectAINativeBundleIDs {
+    let guess = ContextDetector.guess(forBundleID: bundleID)
+    check("AI-native \(name) guesses prompt", guess.dialect == .prompt)
+    check("AI-native \(name) chip reads \"over \(name) → prompt first\"",
+          guess.chip == "over \(name) → prompt first")
+}
+
+let dialectBrowserBundleIDs: [String: String] = [
+    "com.google.Chrome": "Chrome",
+    "com.apple.Safari": "Safari",
+    "org.mozilla.firefox": "Firefox",
+    "company.thebrowser.Browser": "Arc",
+    "com.brave.Browser": "Brave",
+    "com.microsoft.edgemac": "Edge",
+]
+for (bundleID, name) in dialectBrowserBundleIDs {
+    let guess = ContextDetector.guess(forBundleID: bundleID)
+    check("browser \(name) guesses no dialect (a tab could be either kind of work)",
+          guess.dialect == nil)
+    check("browser \(name) chip names it and points at ⇥",
+          guess.chip == "\(name) — can't see the tab · ⇥ flips")
+}
+
+check("an unrecognized bundle ID guesses nothing",
+      ContextDetector.guess(forBundleID: "com.example.SomeRandomApp").dialect == nil)
+check("an unrecognized bundle ID has no chip at all",
+      ContextDetector.guess(forBundleID: "com.example.SomeRandomApp").chip == nil)
+check("a nil bundle ID (no previous app remembered) guesses nothing",
+      ContextDetector.guess(forBundleID: nil).dialect == nil)
+check("a nil bundle ID has no chip",
+      ContextDetector.guess(forBundleID: nil).chip == nil)
+check("guess(for:) with no running application matches guess(forBundleID: nil)",
+      ContextDetector.guess(for: nil).dialect == nil && ContextDetector.guess(for: nil).chip == nil)
+
+// --- ShortcutRanker: fixtures -------------------------------------------------
+
+func dialectShellShortcut(name: String, command: String = "echo hi", comment: String? = nil,
+                          uses: Int = 0) -> Shortcut {
+    var shortcut = Shortcut(entry: ShellEntry(kind: .alias, name: name, command: command,
+                                              comment: comment,
+                                              sourceFile: "/tmp/pre259-fixture.zshrc",
+                                              line: 1, managed: true))
+    shortcut.uses = uses
+    return shortcut
+}
+
+func dialectPromptShortcut(name: String, description: String? = nil, body: String = "body",
+                           uses: Int = 0) -> Shortcut {
+    var frontmatter: PromptFrontmatter?
+    if let description {
+        frontmatter = PromptFrontmatter.empty().setting("description", to: description)
+    }
+    var shortcut = Shortcut(prompt: Prompt(name: name, frontmatter: frontmatter, body: body))
+    shortcut.uses = uses
+    return shortcut
+}
+
+// --- Both kinds are always searchable: a boost, never a wall -----------------
+
+let boostShell = dialectShellShortcut(name: "zzz-shell")
+let boostPrompt = dialectPromptShortcut(name: "aaa-prompt")
+let boostPool = [boostShell, boostPrompt]
+
+let rankedEmptyShellDialect = ShortcutRanker.rank(boostPool, query: "", scope: .everything, dialect: .shell)
+check("empty query: shell dialect boosts the shell shortcut to the front",
+      rankedEmptyShellDialect.first?.name == "zzz-shell")
+check("empty query: the boost never removes the other kind from the list",
+      Set(rankedEmptyShellDialect.map(\.name)) == Set(boostPool.map(\.name)))
+
+let rankedEmptyPromptDialect = ShortcutRanker.rank(boostPool, query: "", scope: .everything, dialect: .prompt)
+check("empty query: prompt dialect boosts the prompt shortcut to the front",
+      rankedEmptyPromptDialect.first?.name == "aaa-prompt")
+
+// --- "Two typed letters override the guess" ---------------------------------
+
+let oneCharShell = dialectShellShortcut(name: "zshell")
+let oneCharPrompt = dialectPromptShortcut(name: "zprompt")
+let oneCharPool = [oneCharShell, oneCharPrompt]
+// Both names share the same one-character prefix, so absent the boost they would
+// tie on tier and on usage — the only thing that can be deciding order here is dialect.
+let rankedOneCharShellDialect = ShortcutRanker.rank(oneCharPool, query: "z", scope: .everything, dialect: .shell)
+check("at one typed character, the boost still applies",
+      rankedOneCharShellDialect.first?.name == "zshell")
+let rankedOneCharPromptDialect = ShortcutRanker.rank(oneCharPool, query: "z", scope: .everything, dialect: .prompt)
+check("at one typed character, flipping dialect flips which one leads",
+      rankedOneCharPromptDialect.first?.name == "zprompt")
+
+let twoCharShell = dialectShellShortcut(name: "abshel")
+let twoCharPrompt = dialectPromptShortcut(name: "abprom")
+let twoCharPool = [twoCharShell, twoCharPrompt]
+// Equal tier (both a prefix match), equal usage, equal name length — with the boost
+// off, only the alphabet is left to decide, and "abprom" < "abshel".
+let rankedTwoCharShellDialect = ShortcutRanker.rank(twoCharPool, query: "ab", scope: .everything, dialect: .shell)
+let rankedTwoCharPromptDialect = ShortcutRanker.rank(twoCharPool, query: "ab", scope: .everything, dialect: .prompt)
+check("at two typed characters, dialect no longer affects order",
+      rankedTwoCharShellDialect.map(\.name) == rankedTwoCharPromptDialect.map(\.name))
+check("at two typed characters, order falls back to relevance/alphabetical only",
+      rankedTwoCharShellDialect.map(\.name) == ["abprom", "abshel"])
+
+// --- Usage breaks ties within a tier, independent of dialect -----------------
+
+let usageTieShell = dialectShellShortcut(name: "deploy-shell", uses: 5)
+let usageTiePrompt = dialectPromptShortcut(name: "deploy-prompt", uses: 50)
+let usageTiePool = [usageTieShell, usageTiePrompt]
+// "deploy" is 6 characters, so the boost is already off; both names prefix-match it
+// at the same tier, leaving usage as the only tiebreaker.
+let rankedByUsage = ShortcutRanker.rank(usageTiePool, query: "deploy", scope: .everything, dialect: .shell)
+check("usage breaks a tier tie toward the prompt when it has more uses",
+      rankedByUsage.first?.name == "deploy-prompt")
+
+let usageTieShell2 = dialectShellShortcut(name: "sync-shell", uses: 80)
+let usageTiePrompt2 = dialectPromptShortcut(name: "sync-prompt", uses: 3)
+let rankedByUsage2 = ShortcutRanker.rank([usageTieShell2, usageTiePrompt2], query: "sync",
+                                        scope: .everything, dialect: .prompt)
+check("usage breaks a tier tie toward the shell entry even when dialect favors prompt",
+      rankedByUsage2.first?.name == "sync-shell")
+
+// --- Shell tier mirrors Ranker's scope rules; prompts ignore scope entirely --
+
+let scopedShell = dialectShellShortcut(name: "xx", command: "special-command-token",
+                                       comment: "special-comment-token")
+let scopedPrompt = dialectPromptShortcut(name: "yy", description: "special-comment-token",
+                                         body: "special-command-token")
+let scopedPool = [scopedShell, scopedPrompt]
+let scopedByName = ShortcutRanker.rank(scopedPool, query: "special", scope: .name, dialect: .shell)
+check(".name scope excludes a shell shortcut matched only in its comment/command",
+      !scopedByName.contains { $0.name == "xx" })
+check("prompts are never scope-gated: description/body still match under .name scope",
+      scopedByName.contains { $0.name == "yy" })
+
+// --- Shortcut.shellEntry: the reverse of Shortcut(entry:) --------------------
+
+let dialectOriginalEntry = ShellEntry(kind: .function, name: "myfunc", command: "echo hi",
+                                      comment: "a function", sourceFile: "/tmp/pre259-x.zshrc",
+                                      line: 12, managed: true)
+check("Shortcut(entry:).shellEntry round-trips a function",
+      Shortcut(entry: dialectOriginalEntry).shellEntry == dialectOriginalEntry)
+check("a prompt-kind Shortcut has no shellEntry to recover",
+      Shortcut(prompt: Prompt(name: "p", frontmatter: nil, body: "b")).shellEntry == nil)
+
+// --- AppState integration: prompt-dir override, dialect flip, bucket gating -
+
+// `AppSettings.shared` is a true process-wide singleton (`private init()`), and its
+// backing UserDefaults suite is decided on first touch by `ALIASBAR_DEFAULTS_SUITE`.
+// Nothing earlier in this test binary touches `AppSettings`, so setting the env var
+// here — before the first reference below — keeps every setting this section reads
+// or writes inside a throwaway suite, never the real one.
+setenv("ALIASBAR_DEFAULTS_SUITE", "aliasbar-tests-pre259-\(UUID().uuidString)", 1)
+
+let dialectSandbox = "\(sandbox)/pre259"
+try! FileManager.default.createDirectory(atPath: dialectSandbox, withIntermediateDirectories: true)
+
+let dialectRcPath = "\(dialectSandbox)/zshrc"
+try! """
+# >>> aliasbar managed block >>>
+# Edited by AliasBar. Anything outside these markers is never touched.
+# find me by name
+alias findme='echo findme'
+# <<< aliasbar managed block <<<
+""".write(toFile: dialectRcPath, atomically: true, encoding: .utf8)
+
+let dialectHistoryPath = "\(dialectSandbox)/history"
+try! "echo findme\n".write(toFile: dialectHistoryPath, atomically: true, encoding: .utf8)
+
+let dialectPromptsDirURL = URL(fileURLWithPath: "\(dialectSandbox)/prompts")
+try! FileManager.default.createDirectory(at: dialectPromptsDirURL, withIntermediateDirectories: true)
+writeRawPromptFile(
+    promptFixture(["---", "schema: 1", "description: a stored prompt", "---", "Prompt body.", ""]),
+    name: "storedprompt", in: dialectPromptsDirURL)
+
+// Never the app's real `~/.zshrc`, `~/.zsh_history`, or `~/.aliasbar/prompts` — all
+// three overrides point at this section's own sandbox fixtures.
+setenv("ALIASBAR_ZSHRC", dialectRcPath, 1)
+setenv("ALIASBAR_HISTORY", dialectHistoryPath, 1)
+setenv("ALIASBAR_PROMPTS_DIR", dialectPromptsDirURL.path, 1)
+
+let dialectSettings = AppSettings.shared
+let dialectStore = EntryStore()
+let dialectState = AppState(store: dialectStore, settings: dialectSettings)
+dialectState.prepareForShow()
+
+check("prompt-dir env override: prepareForShow's scan picks up the fixture prompt",
+      dialectState.findResults.contains { $0.name == "storedprompt" && $0.kind == .prompt })
+check("the shell fixture is in the same union pool as the fixture prompt",
+      dialectState.findResults.contains { $0.name == "findme" })
+
+dialectState.query = "findm"
+let dialectBefore = dialectState.dialect
+dialectState.flipDialect()
+check("flipDialect toggles away from the starting dialect", dialectState.dialect != dialectBefore)
+check("flipDialect preserves the query", dialectState.query == "findm")
+dialectState.flipDialect()
+check("flipDialect toggles back to the original dialect", dialectState.dialect == dialectBefore)
+
+dialectState.mode = .board
+let dialectBoardDialect = dialectState.dialect
+dialectState.flipDialect()
+check("flipDialect is a no-op outside FIND", dialectState.dialect == dialectBoardDialect)
+dialectState.mode = .find
+
+dialectState.query = ""
+dialectState.bucket = .functions
+check("a non-.all bucket excludes prompts from FIND's pool (bucket is a shell-only facet)",
+      !dialectState.findResults.contains { $0.kind == .prompt })
+dialectState.bucket = .all
+check("bucket .all restores prompts to FIND's pool",
+      dialectState.findResults.contains { $0.kind == .prompt })
+
+// ---------------------------------------------------------------------------
 print("\n" + String(repeating: "-", count: 60))
 print("\(passes) passed, \(failures) failed")
 exit(failures == 0 ? 0 : 1)
