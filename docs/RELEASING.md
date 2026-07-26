@@ -19,8 +19,9 @@ The tools ship in the same Sparkle download `build.sh` caches: `.deps/Sparkle-<v
 1. **Bump the version** in `build.sh`'s Info.plist heredoc: `CFBundleShortVersionString`
    (marketing, e.g. `0.3`) and `CFBundleVersion` (monotonic integer — Sparkle compares
    this one). Also bump the `v0.x` string in `SettingsWindow.swift`'s sidebar footer.
-2. **Build**: `./build.sh`. The bundle lands in `.build/AliasBar.app` (and installs to
-   `~/Applications`).
+2. **Build**: `./build.sh`. The bundle lands in `.build/AliasBar.app` without changing
+   `~/Applications`. Pass `--install` only when you also want to replace the local
+   installed copy.
 3. **Archive**: `ditto -c -k --sequesterRsrc --keepParent .build/AliasBar.app AliasBar-<version>.zip`
    (`ditto` preserves the code signature; plain `zip` does not).
 4. **Sign + appcast**: put the zip in an otherwise-empty directory (Sparkle scans the

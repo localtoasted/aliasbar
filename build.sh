@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # AliasBar build script
-# Compiles Sources/*.swift, assembles AliasBar.app, ad-hoc codesigns, installs to ~/Applications
+# Compiles Sources/*.swift and assembles AliasBar.app. Installation is opt-in.
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILD_DIR="${PROJECT_DIR}/.build"
@@ -10,6 +10,37 @@ APP_NAME="AliasBar"
 APP_BUNDLE="${BUILD_DIR}/${APP_NAME}.app"
 INSTALL_DIR="${HOME}/Applications"
 INSTALL_PATH="${INSTALL_DIR}/${APP_NAME}.app"
+INSTALL=false
+
+usage() {
+    cat <<EOF
+Usage: ./build.sh [--install]
+
+Builds ${APP_BUNDLE}.
+
+Options:
+  --install  Replace ${INSTALL_PATH} with the completed build.
+  -h, --help Show this help.
+EOF
+}
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --install)
+            INSTALL=true
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            echo "Unknown option: $1" >&2
+            usage >&2
+            exit 2
+            ;;
+    esac
+    shift
+done
 
 # Sparkle (auto-updates) is the one binary dependency. It is fetched once from the
 # pinned release below, checksum-verified, and cached in .deps/ — never committed.
@@ -133,9 +164,12 @@ else
     sign_bundle "-"
 fi
 
-echo "==> Installing to ${INSTALL_PATH}"
-mkdir -p "${INSTALL_DIR}"
-rm -rf "${INSTALL_PATH}"
-cp -R "${APP_BUNDLE}" "${INSTALL_PATH}"
-
-echo "==> Done: ${INSTALL_PATH}"
+if [ "${INSTALL}" = true ]; then
+    echo "==> Installing to ${INSTALL_PATH}"
+    mkdir -p "${INSTALL_DIR}"
+    rm -rf "${INSTALL_PATH}"
+    cp -R "${APP_BUNDLE}" "${INSTALL_PATH}"
+    echo "==> Done: ${INSTALL_PATH}"
+else
+    echo "==> Done: ${APP_BUNDLE}"
+fi
