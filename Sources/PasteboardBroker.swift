@@ -64,6 +64,21 @@ enum PasteboardBroker {
         selfWriteChangeCounts[ObjectIdentifier(pasteboard)]?.count ?? 0
     }
 
+    /// Test-only: clears every recorded self-write changeCount for every pasteboard
+    /// identity this process has ever seen.
+    ///
+    /// `ObjectIdentifier`-keyed tracking is a memory address, and production's
+    /// `NSPasteboard.general` identity never gets freed and reallocated mid-run —
+    /// but a test suite constructing many short-lived `PasteboardWriting` fakes in
+    /// a tight sequence can have a later fake's allocation land at the exact
+    /// address an earlier, already-deallocated fake used, which would then
+    /// spuriously "inherit" that earlier fake's recorded self-writes. A test that
+    /// constructs a fresh fake and cares about self-write detection being correct
+    /// from a clean slate should call this first.
+    static func resetForTesting() {
+        selfWriteChangeCounts.removeAll()
+    }
+
     /// Captures `pasteboard`'s current string content, to hand to `restoreUserContent`
     /// once whatever transient write follows is done with it.
     static func snapshot(of pasteboard: PasteboardWriting = NSPasteboard.general) -> Snapshot {

@@ -202,11 +202,30 @@ struct RootView: View {
                     .help("Searching your shell history — ⌘H to go back")
                 }
 
+                // Clipboard's counterpart to the History badge above — same reasoning,
+                // same treatment, a third FIND source rather than a fourth tab.
+                if state.findSource == .clipboard {
+                    HStack(spacing: 4) {
+                        Image(systemName: "doc.on.clipboard")
+                            .font(.system(size: 9.5, weight: .semibold))
+                        Text("Clipboard")
+                            .font(.system(size: 11, weight: .semibold, design: theme.bodyDesign))
+                    }
+                    .foregroundStyle(theme.accent)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 2.5)
+                    .background(theme.surface,
+                                in: RoundedRectangle(cornerRadius: theme.cornerRadius))
+                    .overlay(RoundedRectangle(cornerRadius: theme.cornerRadius)
+                        .strokeBorder(theme.accent.opacity(0.28), lineWidth: 1))
+                    .help("Browsing your clipboard history — ⌘K to go back")
+                }
+
                 // A subset bucket needs a badge in FIND and BOARD because hiding
                 // things without saying so reads as data loss. `By file` only changes
-                // order, MANAGE names its bucket in the sidebar, and history ignores
-                // buckets entirely.
-                if state.bucket.showsHeaderFilter(in: state.mode) && !state.historyMode {
+                // order, MANAGE names its bucket in the sidebar, and history/clipboard
+                // ignore buckets entirely.
+                if state.bucket.showsHeaderFilter(in: state.mode) && state.findSource == .aliases {
                     HStack(spacing: 4) {
                         Image(systemName: state.bucket.symbol)
                             .font(.system(size: 9.5, weight: .semibold))
@@ -226,7 +245,7 @@ struct RootView: View {
                 // The inference copy, FIND only — it explains the dialect boost, which
                 // only affects FIND's ranking. Plain text, not a badge: this is a guess
                 // AliasBar is making, not a state you are "in" the way a bucket is.
-                if state.mode == .find, !state.historyMode, let chip = state.contextChip {
+                if state.mode == .find, state.findSource == .aliases, let chip = state.contextChip {
                     Text(chip)
                         .font(.system(size: 10.5, design: theme.bodyDesign))
                         .foregroundStyle(theme.faint)
@@ -260,7 +279,7 @@ struct RootView: View {
                     .focused($searchFocused)
                     .onChange(of: state.query) { _ in state.selection = 0 }
                 if !state.query.isEmpty {
-                    Text("\(state.historyMode ? state.historyResults.count : state.activeCount)")
+                    Text("\(state.navigableCount)")
                         .font(.system(size: 10, weight: .semibold, design: .monospaced))
                         .foregroundStyle(theme.faint)
                 }
@@ -281,6 +300,7 @@ struct RootView: View {
 
     private var searchPrompt: String {
         if state.historyMode { return "Search everything you have run" }
+        if state.findSource == .clipboard { return "Search your clipboard history" }
         switch state.mode {
         case .find:
             return state.bucket == .all
@@ -337,6 +357,10 @@ struct RootView: View {
                         KeyHint(keys: "⏎", label: "run it")
                         KeyHint(keys: "⌘⏎", label: "make an alias")
                         KeyHint(keys: "⌘H", label: "back")
+                    } else if state.findSource == .clipboard {
+                        KeyHint(keys: "⏎", label: "copy")
+                        KeyHint(keys: "⇥", label: "cycle transforms")
+                        KeyHint(keys: "⌘K", label: "back")
                     } else {
                         KeyHint(keys: "⏎", label: settings.enterAction.short)
                         KeyHint(keys: "⌘⏎", label: settings.enterAction.secondary.short)
@@ -347,6 +371,7 @@ struct RootView: View {
                         KeyHint(keys: "⌘↑↓", label: "buckets")
                         KeyHint(keys: "⌘N", label: "new")
                         KeyHint(keys: "⌘H", label: "history")
+                        KeyHint(keys: "⌘K", label: "clipboard")
                     }
                 }
                 .opacity(hintsShown ? 1 : 0)
@@ -639,7 +664,11 @@ struct FindView: View {
     @Environment(\.motion) private var motion
 
     var body: some View {
-        if state.historyMode { history } else { aliases }
+        switch state.findSource {
+        case .history: history
+        case .clipboard: ClipboardFindView(state: state, settings: settings)
+        case .aliases: aliases
+        }
     }
 
     // MARK: History
@@ -922,7 +951,10 @@ private struct HistoryRow: View {
 /// Exactly one of these exists at a time. Giving it a stable identity across rows is
 /// what lets it slide instead of blink; the effect is the thing people describe as
 /// feeling expensive without being able to name it.
-private struct SelectionCapsule: View {
+///
+/// Not `private`: `ClipboardFindView.swift` reuses it for the clipboard source's own
+/// rows rather than reimplementing the same travelling highlight a second time.
+struct SelectionCapsule: View {
     @Environment(\.theme) private var theme
     let radius: CGFloat
     let namespace: Namespace.ID

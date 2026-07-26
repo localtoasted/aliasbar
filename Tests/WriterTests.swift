@@ -8156,6 +8156,414 @@ do {
     state.commitEditor()
     check("an unrelated save afterwards does not also mark the abandoned item handled",
           state.inboxPendingCount == 1)
+print("\n40. Clipboard Find source, persistence, and sync mirror (PRE-247-C/D)")
+
+func freshClipboardFixtures() -> (settings: AppSettings, clipsPath: String) {
+    let (settings, _) = freshTestSettings()
+    let dir = "\(sandbox)/clipboard-\(UUID().uuidString)"
+    try! FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+    return (settings, dir + "/clips.json")
+}
+
+func clipboardClip(_ content: String, at date: Date) -> SafeClip {
+    SafeClip(content: content, detectedAt: date,
+             source: SafeClip.SourceMetadata(declaredTypes: ["public.utf8-plain-text"],
+                                             byteSize: content.utf8.count))
+}
+
+/// A synthetic key-down event, matching the shape PRE-260's FillInSheet Esc test
+/// already uses (`NSEvent.keyEvent` with empty characters — only `keyCode` and
+/// `modifierFlags` matter to `AppState.handleKey`).
+func keyEvent(keyCode: UInt16, modifiers: NSEvent.ModifierFlags = []) -> NSEvent {
+    NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: modifiers,
+                     timestamp: 0, windowNumber: 0, context: nil,
+                     characters: "", charactersIgnoringModifiers: "",
+                     isARepeat: false, keyCode: keyCode)!
+}
+
+/// `PasteboardBroker`'s self-write tracking is keyed by `ObjectIdentifier` — a
+/// memory address. This section constructs many short-lived `FakePasteboard`s in
+/// a tight sequence; without holding a reference, ARC freeing one lets a later
+/// fake's allocation land at the same address, which then spuriously "inherits"
+/// stale self-write changeCounts recorded against the freed instance (a real
+/// pasteboard's identity is never recycled mid-run the same way). Retaining every
+/// fake this section builds for the rest of the process is what keeps that
+/// collision from ever happening here.
+var clipboardTestPasteboardsKeepAlive: [FakePasteboard] = []
+func trackedFakePasteboard() -> FakePasteboard {
+    let pasteboard = FakePasteboard()
+    clipboardTestPasteboardsKeepAlive.append(pasteboard)
+    return pasteboard
+}
+
+// --- Path resolution ---------------------------------------------------------
+
+check("CorePaths resolves the clips path from an override",
+      AppPaths.resolveClipsPath(environmentOverride: "/tmp/custom-clips.json", homeDirectory: "/Users/x")
+          == "/tmp/custom-clips.json")
+check("CorePaths falls back to ~/.aliasbar/clips.json with no override",
+      AppPaths.resolveClipsPath(environmentOverride: nil, homeDirectory: "/Users/x")
+          == "/Users/x/.aliasbar/clips.json")
+
+// --- ClipboardHistoryStore: corrupt/missing tolerance ------------------------
+
+do {
+    let dir = "\(sandbox)/clipboard-corrupt-\(UUID().uuidString)"
+    try! FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+    let path = dir + "/clips.json"
+    check("ClipboardHistoryStore.load on a missing file returns empty, not a crash",
+          ClipboardHistoryStore.load(path: path).isEmpty)
+    try! "not valid json at all".write(toFile: path, atomically: true, encoding: .utf8)
+    check("ClipboardHistoryStore.load on a corrupt file returns empty, not a crash",
+          ClipboardHistoryStore.load(path: path).isEmpty)
+}
+
+// --- The Find source: switching, keyboard bindings, transform surfacing -----
+
+// An epoch timestamp, not the JWT fixture above: a JWT is itself classifier-hot
+// (`SensitiveContentClassifier.containsSignedJWT`), so copying one through the
+// monitor would quarantine it before it ever reached history — exactly the
+// behavior PRE-248's gate is supposed to have. An epoch string exercises
+// `ClipTransformer`'s multi-action surfacing without tripping that gate.
+let clipboardTransformFixture = "1700000000"
+
+do {
+    let (settings, _) = freshClipboardFixtures()
+    let state = AppState(store: EntryStore(), settings: settings)
+    PasteboardBroker.resetForTesting()
+    let pasteboard = trackedFakePasteboard()
+    let monitor = ClipboardMonitor(pasteboard: pasteboard,
+                                   quarantine: QuarantineStore(clock: { quarantineBase }),
+                                   clock: { quarantineBase })
+    state.clipboardMonitor = monitor
+    state.pasteboard = pasteboard
+
+    pasteboard.simulateExternalCopy(clipboardTransformFixture)
+    monitor.poll()
+    pasteboard.simulateExternalCopy("just some plain text")
+    monitor.poll()
+
+    check("AppState starts in the aliases source", state.findSource == .aliases)
+
+    // ⌘K mirrors ⌘H's toggle exactly, for the clipboard source.
+    _ = state.handleKey(keyEvent(keyCode: 40, modifiers: .command)) // kVK_ANSI_K
+    check("⌘K switches into the clipboard source",
+          state.findSource == .clipboard && state.mode == .find)
+    check("clipboardRows starts newest-first, matching the monitor's own history",
+          state.clipboardRows.map(\.content) == monitor.history.map(\.content))
+
+    state.selection = 0 // newest: "just some plain text"
+    check("transform surfacing: plain text offers no actions", state.clipboardActions.isEmpty)
+    state.selection = 1 // the epoch timestamp
+    check("transform surfacing: a typed clip offers the same actions ClipTransformer itself would",
+          state.clipboardActions.map(\.title)
+              == ClipTransformer.actions(for: clipboardTransformFixture).map(\.title))
+
+    // ⇥ cycles the detail pane's highlight instead of flipping dialect, which the
+    // clipboard source has none of.
+    check("clipActionSelection starts at nil (\"the clip itself\")",
+          state.clipActionSelection == nil)
+    _ = state.handleKey(keyEvent(keyCode: 48)) // kVK_Tab
+    check("⇥ moves off \"the clip itself\" onto the first transform action",
+          state.clipActionSelection == 0)
+    _ = state.handleKey(keyEvent(keyCode: 48, modifiers: .shift)) // Shift-⇥
+    check("Shift-⇥ moves back to \"the clip itself\"", state.clipActionSelection == nil)
+
+    _ = state.handleKey(keyEvent(keyCode: 48)) // land on an action again
+    state.selection = 0
+    check("changing the clip selection resets the action highlight back to the clip itself",
+          state.clipActionSelection == nil)
+
+    // Esc steps back to aliases, mirroring history's own Esc-to-back-out.
+    state.selection = 1
+    _ = state.handleKey(keyEvent(keyCode: 53)) // kVK_Escape
+    check("Esc from the clipboard source steps back to aliases", state.findSource == .aliases)
+
+    _ = state.handleKey(keyEvent(keyCode: 40, modifiers: .command))
+    check("⌘K a second time re-enters the clipboard source", state.findSource == .clipboard)
+    _ = state.handleKey(keyEvent(keyCode: 40, modifiers: .command))
+    check("⌘K toggles back out of the clipboard source", state.findSource == .aliases)
+}
+
+// --- historyMode compatibility shim: the third source doesn't break the second
+
+do {
+    let (settings, _) = freshClipboardFixtures()
+    let state = AppState(store: EntryStore(), settings: settings)
+    state.enterHistory()
+    check("enterHistory sets findSource to .history", state.findSource == .history)
+    check("the historyMode compatibility getter reflects findSource == .history", state.historyMode)
+    state.enterClipboard()
+    check("enterClipboard from history switches findSource straight to .clipboard",
+          state.findSource == .clipboard)
+    check("historyMode reads false once findSource has moved to .clipboard", !state.historyMode)
+    state.historyMode = false
+    check("setting historyMode = false from clipboard routes to .aliases, not a silent no-op",
+          state.findSource == .aliases)
+}
+
+// --- Enter delivers the clip itself, or the highlighted transform's output --
+
+do {
+    let (settings, _) = freshClipboardFixtures()
+    settings.enterAction = .copyName // copy-mode: never gated behind Accessibility trust
+    let state = AppState(store: EntryStore(), settings: settings)
+    PasteboardBroker.resetForTesting()
+    let pasteboard = trackedFakePasteboard()
+    state.pasteboard = pasteboard
+    let monitor = ClipboardMonitor(pasteboard: pasteboard,
+                                   quarantine: QuarantineStore(clock: { quarantineBase }),
+                                   clock: { quarantineBase })
+    state.clipboardMonitor = monitor
+
+    pasteboard.simulateExternalCopy(clipboardTransformFixture)
+    monitor.poll()
+    state.enterClipboard()
+    state.selection = 0
+
+    _ = state.handleKey(keyEvent(keyCode: 36)) // kVK_Return, the clip itself
+    check("Enter on the clip itself delivers the raw clip content",
+          pasteboard.string(forType: .string) == clipboardTransformFixture)
+
+    _ = state.handleKey(keyEvent(keyCode: 48)) // ⇥ onto the first transform action
+    _ = state.handleKey(keyEvent(keyCode: 36)) // Enter
+    check("Enter on a highlighted transform action delivers that action's output, not the raw clip",
+          pasteboard.string(forType: .string)
+              == ClipTransformer.actions(for: clipboardTransformFixture).first?.output)
+}
+
+// --- Quarantine row: reasons only, content never reaches clipboardRows ------
+
+do {
+    let (settings, _) = freshClipboardFixtures()
+    let state = AppState(store: EntryStore(), settings: settings)
+    PasteboardBroker.resetForTesting()
+    let pasteboard = trackedFakePasteboard()
+    let monitor = ClipboardMonitor(pasteboard: pasteboard,
+                                   quarantine: QuarantineStore(clock: { quarantineBase }),
+                                   clock: { quarantineBase })
+    state.clipboardMonitor = monitor
+
+    pasteboard.simulateExternalCopy("ghp_\(providerTokenBody)")
+    monitor.poll()
+    pasteboard.simulateExternalCopy("just a normal note", concealed: true)
+    monitor.poll()
+
+    check("activeQuarantine surfaces exactly the quarantined reasons, not the content",
+          state.activeQuarantine.map(\.reason.rawValue).sorted() ==
+              [SensitiveContentClassifier.QuarantineReason.githubToken.rawValue,
+               SensitiveContentClassifier.QuarantineReason.concealedPasteboardType.rawValue].sorted())
+    check("nothing quarantined ever reaches clipboardRows", state.clipboardRows.isEmpty)
+}
+
+// --- Live enable/disable ------------------------------------------------------
+
+do {
+    let (settings, _) = freshClipboardFixtures()
+    check("clipboardMonitoring defaults to off", settings.clipboardMonitoring == false)
+    let state = AppState(store: EntryStore(), settings: settings)
+    state.enableClipboardMonitoring()
+    check("enableClipboardMonitoring flips the setting on — App.swift's own observer is what actually starts the monitor",
+          settings.clipboardMonitoring == true)
+
+    // `ClipboardMonitor.start()`/`stop()` themselves are idempotent and safe under
+    // repeated use — the live-toggle wiring itself (App.swift's Combine
+    // subscription onto `$clipboardMonitoring`) isn't unit-testable without a real
+    // `NSApplication` delegate, but the primitive it calls must never crash.
+    PasteboardBroker.resetForTesting()
+    let pasteboard = trackedFakePasteboard()
+    let monitor = ClipboardMonitor(pasteboard: pasteboard,
+                                   quarantine: QuarantineStore(clock: { quarantineBase }),
+                                   clock: { quarantineBase })
+    monitor.stop() // stopping before ever starting is a no-op, not a crash
+    monitor.start()
+    monitor.start() // starting twice tears down and reinstalls, not a leak or crash
+    pasteboard.simulateExternalCopy("captured while running")
+    monitor.poll()
+    check("the monitor still captures after being (re)started", monitor.history.count == 1)
+    monitor.stop()
+    monitor.stop() // stopping twice is also safe
+}
+
+// --- THE test: persistence off writes zero clipboard bytes, anywhere --------
+
+do {
+    let (settings, clipsPath) = freshClipboardFixtures()
+    check("clipboardPersistence defaults to false", !settings.clipboardPersistence)
+    let controller = ClipboardPersistenceController(settings: settings, clipsPath: clipsPath)
+    check("loadInitialHistory is empty with persistence off, even with nothing on disk yet",
+          controller.loadInitialHistory().isEmpty)
+
+    PasteboardBroker.resetForTesting()
+    let pasteboard = trackedFakePasteboard()
+    let monitor = ClipboardMonitor(pasteboard: pasteboard,
+                                   quarantine: QuarantineStore(clock: { quarantineBase }),
+                                   clock: { quarantineBase },
+                                   initialHistory: controller.loadInitialHistory(),
+                                   persistence: controller)
+
+    // A full exercise: several ordinary copies, one quarantined copy, and a
+    // clipboard delivery through the exact AppState pipeline the clipboard
+    // source's own Enter uses.
+    for i in 0..<5 {
+        pasteboard.simulateExternalCopy("clip number \(i)")
+        monitor.poll()
+    }
+    pasteboard.simulateExternalCopy("ghp_\(providerTokenBody)")
+    monitor.poll()
+
+    let state = AppState(store: EntryStore(), settings: settings)
+    state.pasteboard = pasteboard
+    state.clipboardMonitor = monitor
+    state.enterClipboard()
+    state.selection = 0
+    state.performClipboardEnter()
+
+    check("the exercise is real, not a no-op: history actually captured the ordinary copies",
+          monitor.history.count == 5)
+    check("persistence-off: the clips file never appears on disk",
+          !FileManager.default.fileExists(atPath: clipsPath))
+
+    // Turning sync-inclusion on by itself still mirrors nothing: `historyChanged`
+    // gates on `clipboardPersistence` before it ever looks at `clipboardInSyncFile`.
+    let syncDir = "\(sandbox)/clipboard-sync-off-persist-\(UUID().uuidString)"
+    try! FileManager.default.createDirectory(atPath: syncDir, withIntermediateDirectories: true)
+    let syncURL = URL(fileURLWithPath: syncDir + "/sync.json")
+    settings.clipboardInSyncFile = true
+    settings.syncFileURL = syncURL
+    pasteboard.simulateExternalCopy("one more ordinary clip")
+    monitor.poll()
+    check("persistence-off: the clips file still never appears, even with sync-inclusion on",
+          !FileManager.default.fileExists(atPath: clipsPath))
+    if case .success(let doc) = SharedDocumentStore(url: syncURL).read() {
+        check("persistence-off: the sync doc has no clips section",
+              (doc.records["clips"] ?? []).isEmpty)
+    } else {
+        check("the sync doc reads back at all (even an empty fresh document)", false)
+    }
+}
+
+// --- Persistence on: round-trip, cap, startup load ---------------------------
+
+do {
+    let (settings, clipsPath) = freshClipboardFixtures()
+    settings.clipboardPersistence = true
+    let controller = ClipboardPersistenceController(settings: settings, clipsPath: clipsPath)
+    check("loadInitialHistory is empty when no file exists yet", controller.loadInitialHistory().isEmpty)
+
+    PasteboardBroker.resetForTesting()
+    let pasteboard = trackedFakePasteboard()
+    let monitor = ClipboardMonitor(pasteboard: pasteboard,
+                                   quarantine: QuarantineStore(clock: { quarantineBase }),
+                                   clock: { quarantineBase },
+                                   initialHistory: controller.loadInitialHistory(),
+                                   persistence: controller)
+
+    for i in 0..<205 {
+        pasteboard.simulateExternalCopy("persisted clip \(i)")
+        monitor.poll()
+    }
+    check("in-memory history is capped at 200", monitor.history.count == 200)
+
+    let onDisk = ClipboardHistoryStore.load(path: clipsPath)
+    check("persistence-on: the clips file appears on disk",
+          FileManager.default.fileExists(atPath: clipsPath))
+    check("persisted history round-trips capped at 200", onDisk.count == 200)
+    check("persisted history matches the monitor's own newest-first order",
+          onDisk.map(\.content) == monitor.history.map(\.content))
+    check("persisted history keeps the most recent entries",
+          onDisk.first?.content == "persisted clip 204")
+
+    // Startup load: a fresh monitor, built the way `App.swift` builds one after a
+    // relaunch — seeded from `loadInitialHistory()` alone, before any `poll()`.
+    let reloadedController = ClipboardPersistenceController(settings: settings, clipsPath: clipsPath)
+    let reloadedMonitor = ClipboardMonitor(initialHistory: reloadedController.loadInitialHistory())
+    check("a fresh monitor loads the persisted history at startup",
+          reloadedMonitor.history.map(\.content) == onDisk.map(\.content))
+}
+
+// A stale file from an earlier "persistence used to be on" session must not
+// resurface just because it still exists — the setting decides whether disk is
+// ever consulted at all, not whether a file happens to be sitting there.
+do {
+    let (settings, clipsPath) = freshClipboardFixtures()
+    ClipboardHistoryStore.save([clipboardClip("stale leftover", at: quarantineBase)], path: clipsPath)
+    settings.clipboardPersistence = false
+    let controller = ClipboardPersistenceController(settings: settings, clipsPath: clipsPath)
+    check("loadInitialHistory ignores a stale file on disk when persistence is off right now",
+          controller.loadInitialHistory().isEmpty)
+}
+
+// --- Sync gating: needs both toggles -----------------------------------------
+
+do {
+    let (settings, clipsPath) = freshClipboardFixtures()
+    settings.clipboardPersistence = true
+    let syncDir = "\(sandbox)/clipboard-sync-gate-\(UUID().uuidString)"
+    try! FileManager.default.createDirectory(atPath: syncDir, withIntermediateDirectories: true)
+    let syncURL = URL(fileURLWithPath: syncDir + "/sync.json")
+    settings.syncFileURL = syncURL // enables sync itself; clipboardInSyncFile is the second, separate gate
+
+    let controller = ClipboardPersistenceController(settings: settings, clipsPath: clipsPath)
+    PasteboardBroker.resetForTesting()
+    let pasteboard = trackedFakePasteboard()
+    let monitor = ClipboardMonitor(pasteboard: pasteboard,
+                                   quarantine: QuarantineStore(clock: { quarantineBase }),
+                                   clock: { quarantineBase },
+                                   persistence: controller)
+
+    func clipsCollection() -> [SyncedRecord] {
+        guard case .success(let doc) = SharedDocumentStore(url: syncURL).read() else { return [] }
+        return doc.records["clips"] ?? []
+    }
+
+    pasteboard.simulateExternalCopy("gated clip one")
+    monitor.poll()
+    check("persistence on, sync-inclusion off: nothing mirrors to the clips collection",
+          clipsCollection().isEmpty)
+
+    settings.clipboardInSyncFile = true
+    pasteboard.simulateExternalCopy("gated clip two")
+    monitor.poll()
+    check("persistence on, sync-inclusion on: the clips collection now has entries",
+          !clipsCollection().isEmpty)
+    check("mirrored records decode back to matching SafeClips",
+          clipsCollection()
+              .compactMap { try? JSONDecoder.aliasBarDocument.decode(SafeClip.self, from: $0.payload) }
+              .map(\.content).sorted()
+              == monitor.history.map(\.content).sorted())
+}
+
+// --- ClipboardSyncMirror: eviction tombstones, never deletes the file entry -
+
+do {
+    let syncDir = "\(sandbox)/clipboard-sync-tombstone-\(UUID().uuidString)"
+    try! FileManager.default.createDirectory(atPath: syncDir, withIntermediateDirectories: true)
+    let store = SharedDocumentStore(url: URL(fileURLWithPath: syncDir + "/sync.json"))
+    let clipA = clipboardClip("clip a", at: quarantineBase)
+    let clipB = clipboardClip("clip b", at: quarantineBase.addingTimeInterval(1))
+
+    ClipboardSyncMirror.reconcile([clipA, clipB], into: store)
+    func liveRecordIDs() -> Set<String> {
+        guard case .success(let doc) = store.read() else { return [] }
+        return Set((doc.records["clips"] ?? []).filter { !$0.deleted }.map(\.id))
+    }
+    check("reconcile upserts every local clip",
+          liveRecordIDs() == Set([clipA.id.uuidString, clipB.id.uuidString]))
+
+    // clipA falls out of the local (capped) history — reconcile tombstones it.
+    ClipboardSyncMirror.reconcile([clipB], into: store)
+    check("reconcile tombstones a clip the local history no longer has",
+          liveRecordIDs() == Set([clipB.id.uuidString]))
+
+    guard case .success(let doc) = store.read(),
+          let removedRecord = (doc.records["clips"] ?? []).first(where: { $0.id == clipA.id.uuidString })
+    else {
+        check("the tombstoned record is still present in the file, not gone entirely", false)
+        fatalError("unreachable — check() above already failed")
+    }
+    check("the tombstoned record is marked deleted, not removed from the file",
+          removedRecord.deleted)
 }
 
 // ---------------------------------------------------------------------------

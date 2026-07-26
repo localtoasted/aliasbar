@@ -154,6 +154,14 @@ struct ComposerPrefill {
     var source: String? = nil
 }
 
+/// What FIND is currently searching: your defined aliases and functions, your shell
+/// history, or your clipboard. Three sources sharing one surface, not three views —
+/// see `AppState.findSource`'s own doc comment for why this replaced a plain
+/// history-only flag.
+enum FindSource: Equatable {
+    case aliases, history, clipboard
+}
+
 /// The single source of truth for what the popover is showing and what the keyboard
 /// should do next.
 ///
@@ -163,7 +171,14 @@ struct ComposerPrefill {
 final class AppState: ObservableObject {
     @Published var mode: ViewMode
     @Published var query = ""
-    @Published var selection = 0
+    /// Whichever list a source is currently navigating — shell/prompt rows, history
+    /// commands, or clipboard clips, depending on `findSource`/`mode`. Resetting the
+    /// clipboard source's action highlight here, in one place, is what keeps every
+    /// route that moves this (arrow keys, a query edit, flipping `findSource` itself)
+    /// from having to remember to do it individually.
+    @Published var selection = 0 {
+        didSet { if findSource == .clipboard { clipActionSelection = nil } }
+    }
     @Published var bucket: Bucket = .all
     /// MANAGE's prompt-dialect counterpart to `bucket` — which of Library/Delivery/
     /// Health the sidebar has selected. Independent of `bucket` on purpose: flipping
@@ -358,6 +373,13 @@ final class AppState: ObservableObject {
     /// prompt. Same "no fallback to first" rule: an index that has drifted off the end
     /// of a reranked list should act on nothing, not on whatever slid under it.
     var selectedShortcut: Shortcut? {
+        // `selection` means something different in each FIND source now — a row in
+        // `findResults` only while `findSource == .aliases`. Without this guard, a
+        // selection index that happens to also be in range for `findResults` would
+        // silently resolve against the wrong list while browsing history or
+        // clipboard, the same class of bug `selectedEntry`'s own guard prevents for
+        // BOARD's two decks.
+        guard findSource == .aliases else { return nil }
         let list = findResults
         guard list.indices.contains(selection) else { return nil }
         return list[selection]
@@ -367,7 +389,7 @@ final class AppState: ObservableObject {
     /// of shortcut ranking favors, in BOARD it changes which deck is on screen. A no-op
     /// in MANAGE and in FIND's history mode, neither of which has anything to flip.
     func flipDialect() {
-        guard (mode == .find && !historyMode) || mode == .board else { return }
+        guard (mode == .find && findSource == .aliases) || mode == .board else { return }
         dialect = dialect == .shell ? .prompt : .shell
         selection = 0
     }
@@ -1032,10 +1054,27 @@ final class AppState: ObservableObject {
 
     // MARK: - History
 
-    /// FIND, but searching everything you have ever run instead of everything you have
-    /// defined. Not a fourth view: the same surface, a different pool.
-    @Published var historyMode = false {
-        didSet { selection = 0; historyMemoQuery = nil }
+    // MARK: - Find source
+
+    /// FIND, but searching everything you have ever run, or your clipboard, instead
+    /// of everything you have defined. Not a fourth (or fifth) view: the same
+    /// surface, a different pool — the audit's own framing, and the reason this
+    /// replaced a plain history-only flag once clipboard became a second alternate
+    /// source rather than inventing its own boolean beside it.
+    @Published var findSource: FindSource = .aliases {
+        didSet { selection = 0; historyMemoQuery = nil; clipActionSelection = nil }
+    }
+
+    /// Compatibility read for every call site that predates the three-way source
+    /// (Views.swift's history chrome, `?`'s prefix-bucket guard, etc.) and only ever
+    /// needed "is history the thing showing" as a yes/no. Kept as a computed alias
+    /// rather than rewritten everywhere at once, so this slice's diff stays inside
+    /// the clipboard/Find-source regions instead of touching every existing
+    /// `historyMode` call site. `findSource`'s own `didSet` above does the resetting
+    /// either route needs, so routing the setter through it costs nothing.
+    var historyMode: Bool {
+        get { findSource == .history }
+        set { findSource = newValue ? .history : .aliases }
     }
 
     private var historyCache: [HistoryScanner.Command] = []
@@ -1104,6 +1143,107 @@ final class AppState: ObservableObject {
             for: command,
             takenNames: Set(store.ranked.map(\.name))
         )
+    }
+
+    // MARK: - Clipboard source
+
+    /// Set by the app delegate once a `ClipboardMonitor` exists — nil until
+    /// clipboard monitoring has been started at least once this run (`App.swift`
+    /// never constructs one while the setting is off, matching `historyMode`'s
+    /// "not a fourth view" framing: there is nothing to browse until there is
+    /// something watching). `@Published` so FIND's clipboard source redraws the
+    /// moment monitoring gets turned on live, rather than only at the next summon.
+    @Published var clipboardMonitor: ClipboardMonitor?
+
+    /// Which transform action is highlighted in the clipboard source's detail pane,
+    /// or nil for "the clip itself". Tab/Shift-Tab cycles through
+    /// `[nil, action0, action1, ...]` — the same field-cycling shape
+    /// `FillInSheet.SlotFillState.advance` already uses for slots, applied here to
+    /// transform actions instead. Reset whenever the clip selection or the find
+    /// source changes (see `selection` and `findSource`'s own `didSet`s), never left
+    /// to a caller to remember.
+    @Published var clipActionSelection: Int?
+
+    /// FIND's clipboard rows: `ClipboardMonitor`'s SafeClip history, newest first,
+    /// exactly as the monitor already orders it, optionally narrowed by the live
+    /// query (plain substring match — a recency list, not a ranked search, so there
+    /// is nothing here for `Ranker` to do).
+    var clipboardRows: [SafeClip] {
+        let all = clipboardMonitor?.history ?? []
+        guard !query.isEmpty else { return all }
+        let needle = query.lowercased()
+        return all.filter { $0.content.lowercased().contains(needle) }
+    }
+
+    /// Quarantined clips still alive right now, reason-only — the clipboard
+    /// source's summary row reads this directly rather than reaching into
+    /// `clipboardMonitor` itself, so the row and the monitor's own clock can never
+    /// silently disagree about what's still active.
+    var activeQuarantine: [MemoryClip] {
+        clipboardMonitor?.activeQuarantine ?? []
+    }
+
+    /// FIND's clipboard counterpart to `selectedHistory`/`selectedShortcut` — same
+    /// "no fallback to first" rule, and nil outside the clipboard source so a
+    /// selection index left over from another source's list can never be misread
+    /// as a clip.
+    var selectedClip: SafeClip? {
+        guard findSource == .clipboard else { return nil }
+        let rows = clipboardRows
+        guard rows.indices.contains(selection) else { return nil }
+        return rows[selection]
+    }
+
+    /// The transform actions offered for whatever clip is selected right now. The
+    /// detail pane and the keyboard handler both read this rather than each calling
+    /// `ClipTransformer.actions` themselves, so Tab's cycling and what the pane
+    /// draws can never disagree about how many actions there are.
+    var clipboardActions: [ClipAction] {
+        guard let clip = selectedClip else { return [] }
+        return ClipTransformer.actions(for: clip.content)
+    }
+
+    /// Switches into the clipboard source and makes sure there is something to
+    /// show. The mirror of `enterHistory()` — same shape, same reason: FIND's third
+    /// source, not a fourth view.
+    func enterClipboard() {
+        mode = .find
+        findSource = .clipboard
+    }
+
+    /// Tab/Shift-Tab inside the clipboard source: cycles the detail pane's
+    /// highlight through "the clip itself" (nil) and each of its transform actions,
+    /// wrapping at both ends.
+    func cycleClipboardAction(forward: Bool) {
+        let actions = clipboardActions
+        guard !actions.isEmpty else { clipActionSelection = nil; return }
+        let count = actions.count + 1 // +1 slot for "the clip itself"
+        let current = (clipActionSelection ?? -1) + 1 // shift nil to slot 0
+        let next = ((current + (forward ? 1 : -1)) % count + count) % count
+        clipActionSelection = next == 0 ? nil : next - 1
+    }
+
+    /// Enter/⌘⏎ while the clipboard source is showing: delivers whatever is
+    /// highlighted — the clip's own content, or the selected transform's output —
+    /// through the exact same broker/paste pipeline every other Enter in this file
+    /// uses, so clipboard delivery honors `enterAction`'s copy/paste half and
+    /// `afterAction` identically to a shell or prompt result.
+    func performClipboardEnter() {
+        guard let clip = selectedClip else { return }
+        let pasting = settings.enterAction == .pasteName || settings.enterAction == .pasteCommand
+        if let index = clipActionSelection, clipboardActions.indices.contains(index) {
+            let action = clipboardActions[index]
+            deliver(action.output, pasting: pasting, toast: "Copied \(action.title)")
+        } else {
+            deliver(clip.content, pasting: pasting, toast: "Copied clip")
+        }
+    }
+
+    /// The clipboard source's empty-state Enable action — flips the setting on;
+    /// `AppDelegate`'s observer (`App.swift`) is what actually starts the monitor
+    /// live and hands this state a `ClipboardMonitor` moments later.
+    func enableClipboardMonitoring() {
+        settings.clipboardMonitoring = true
     }
 
     /// BOARD shows the whole pool, always. Typing dims rather than removes, so the grid
@@ -1193,6 +1333,20 @@ final class AppState: ObservableObject {
         return activeList.count
     }
 
+    /// What `move(by:)` and `clampSelection()` (and the header's live counter) are
+    /// actually walking through right now — `activeCount`'s three-way counterpart
+    /// now that FIND has three sources instead of one flag. Outside FIND,
+    /// `findSource` is always `.aliases` (`switchTo` resets it on the way out, via
+    /// `historyMode = false`'s compatibility setter), so this reduces to plain
+    /// `activeCount` for BOARD and MANAGE exactly as it always did.
+    var navigableCount: Int {
+        switch findSource {
+        case .history: return historyResults.count
+        case .clipboard: return clipboardRows.count
+        case .aliases: return activeCount
+        }
+    }
+
     /// The selected entry, or nil when the selection no longer points at anything.
     ///
     /// Deliberately does **not** fall back to the first item. The selection is an index
@@ -1269,7 +1423,7 @@ final class AppState: ObservableObject {
     }
 
     func clampSelection() {
-        let count = historyMode ? historyResults.count : activeCount
+        let count = navigableCount
         if count == 0 { selection = 0 }
         else if selection >= count { selection = count - 1 }
         else if selection < 0 { selection = 0 }
@@ -1321,9 +1475,9 @@ final class AppState: ObservableObject {
         switch Int(event.keyCode) {
         case kVK_Escape:
             // One step back before one step out. Escaping straight to the desktop from
-            // history would make the view feel like a trapdoor.
-            if historyMode {
-                historyMode = false
+            // history or the clipboard would make the view feel like a trapdoor.
+            if findSource != .aliases {
+                findSource = .aliases
                 return true
             }
             // A non-All bucket is a second thing to be inside of, so it is the second
@@ -1342,9 +1496,26 @@ final class AppState: ObservableObject {
             if historyMode { historyMode = false } else { enterHistory() }
             return true
 
+        // Mirrors ⌘H's toggle exactly, for the clipboard source. ⌘K rather than a
+        // letter tied to "clipboard" itself (⌘C is universally "copy the current
+        // text selection", which several detail-pane fields in this very source
+        // rely on via `.textSelection(.enabled)` — reusing it here would fight
+        // muscle memory instead of extending it) — ⌘K is the "jump to something
+        // else" mnemonic several command-palette-style apps already share.
+        case kVK_ANSI_K where command:
+            if findSource == .clipboard { findSource = .aliases } else { enterClipboard() }
+            return true
+
         case kVK_Return where historyMode:
             guard let entry = selectedHistory else { return true }
             if command { promoteToAlias(entry) } else { run(entry) }
+            return true
+
+        // The clipboard source's rows are `SafeClip`s, not a `Shortcut` or a
+        // `RankedEntry`, so its Enter goes through `performClipboardEnter` rather
+        // than either of the paths below.
+        case kVK_Return where findSource == .clipboard:
+            performClipboardEnter()
             return true
 
         // FIND's rows are the shell+prompt union, so its Enter goes through
@@ -1372,11 +1543,18 @@ final class AppState: ObservableObject {
             performBoardPrompt(prompt)
             return true
 
-        // ⇥ flips the dialect boost in FIND and the deck in BOARD, instead of cycling
-        // the view — MANAGE keeps ⇥ as a view switch below, since it has no dialect to
-        // flip.
-        case kVK_Tab where (mode == .find && !historyMode) || mode == .board:
+        // ⇥ flips the dialect boost in FIND's aliases source and the deck in BOARD,
+        // instead of cycling the view — MANAGE keeps ⇥ as a view switch below, since
+        // it has no dialect to flip.
+        case kVK_Tab where (mode == .find && findSource == .aliases) || mode == .board:
             flipDialect()
+            return true
+
+        // The clipboard source has no dialect to flip — ⇥ instead cycles the detail
+        // pane's highlight through the clip itself and its transform actions, the
+        // same "Tab/Shift-Tab cycles fields" shape `FillInSheet` already uses.
+        case kVK_Tab where mode == .find && findSource == .clipboard:
+            cycleClipboardAction(forward: !flags.contains(.shift))
             return true
 
         // MANAGE's own ⇥ flip, mirroring FIND's immediately above.
@@ -1514,8 +1692,9 @@ final class AppState: ObservableObject {
         }
 
         // Prefix keys jump straight into a MANAGE bucket, but only as the first
-        // character. Typing `?` mid-query should search for a question mark.
-        if query.isEmpty, !historyMode, !command, !control,
+        // character, and only while searching aliases — `?` typed into history or
+        // the clipboard should search for a literal question mark, not jump away.
+        if query.isEmpty, findSource == .aliases, !command, !control,
            let chars = event.charactersIgnoringModifiers {
             if let target = Self.prefixBucket(for: chars) {
                 mode = .manage
@@ -1543,7 +1722,7 @@ final class AppState: ObservableObject {
     }
 
     private func move(by delta: Int) {
-        let count = historyMode ? historyResults.count : activeCount
+        let count = navigableCount
         guard count > 0 else { selection = 0; return }
         // Wraps, because in a capped list the fastest way to the last item is up.
         selection = ((selection + delta) % count + count) % count
@@ -1572,9 +1751,9 @@ final class AppState: ObservableObject {
     /// narrows what you are looking at without moving you; the header chip (and in
     /// MANAGE, the sidebar) says where you have landed.
     private func cycleBucket(by delta: Int) {
-        // Buckets slice your aliases, not your history. Reaching for one while looking
-        // at history is a statement that you are done with history.
-        if historyMode { historyMode = false }
+        // Buckets slice your aliases, not your history or your clipboard. Reaching
+        // for one while looking at either is a statement that you are done with it.
+        if findSource != .aliases { findSource = .aliases }
         // MANAGE's prompt dialect has its own sidebar (Library/Delivery/Health), so
         // ⌘↑↓ there walks `PromptBucket`, not the shell `Bucket` list — the same
         // split FIND and BOARD never need, since neither has replaced its sidebar.

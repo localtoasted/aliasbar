@@ -34,7 +34,7 @@ struct CapturedClip {
 
 /// A clip cleared to live on disk. This is the only clip type in this file that is
 /// Codable — persistence is the exception, not the default, for clipboard content.
-struct SafeClip: Codable, Equatable {
+struct SafeClip: Codable, Equatable, Identifiable {
     struct SourceMetadata: Codable, Equatable {
         let declaredTypes: [String]
         let byteSize: Int
@@ -43,6 +43,18 @@ struct SafeClip: Codable, Equatable {
     let content: String
     let detectedAt: Date
     let source: SourceMetadata
+    /// Stable per-capture identity. Doubles as `Identifiable`'s `id` for the
+    /// clipboard source's list views, and as the key `ClipboardSyncMirror` upserts
+    /// and tombstones records by. Defaulted so every existing call site —
+    /// `ClipIngestor.decide`, every fixture in this test suite — keeps compiling
+    /// unchanged, while every clip still gets its own fresh, genuinely unique id.
+    ///
+    /// `var`, not `let`: a `let` with an inline default value is a documented
+    /// Codable-synthesis trap — the compiler-generated `init(from:)` would keep the
+    /// fresh default forever and silently never decode the stored id back, since a
+    /// `let` cannot be assigned a second time. `var` costs nothing here (nothing
+    /// ever mutates it after capture) and is what makes the round trip real.
+    var id: UUID = UUID()
 }
 
 /// A clip the classifier (or the concealed-type short-circuit) refused to persist.
@@ -128,5 +140,112 @@ final class QuarantineStore {
 
     func clear() {
         clips.removeAll()
+    }
+}
+
+// MARK: - Local persistence (PRE-247-C/D)
+
+/// Local, opt-in persistence of `ClipboardMonitor`'s history to
+/// `~/.aliasbar/clips.json` — concrete-path API, exactly like `PromptUsageCounter`:
+/// tolerant of a missing or corrupt file (reads as empty rather than failing), and
+/// every write is atomic (temp file + rename).
+///
+/// This type does no gating of its own: `load`/`save` are only ever called by
+/// `ClipboardPersistenceController` (`ClipboardMonitor.swift`), which is the one
+/// place `clipboardPersistence` is read — so "is persistence actually on" only ever
+/// has one answer in the whole app, and only `SafeClip`s (never `MemoryClip`s or
+/// `CapturedClip`s, neither of which is even `Encodable`) ever reach this file.
+enum ClipboardHistoryStore {
+    /// Matches `ClipboardMonitor.historyCap` — enforced again here so a corrupt or
+    /// hand-edited file larger than the cap can never blow it back up in memory.
+    static let cap = 200
+
+    private static let encoder: JSONEncoder = {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        encoder.outputFormatting = [.sortedKeys]
+        return encoder
+    }()
+
+    private static let decoder: JSONDecoder = {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return decoder
+    }()
+
+    /// Newest-first, exactly as `ClipboardMonitor.history` stores them. A missing or
+    /// corrupt file reads as empty — a lost clipboard history is an inconvenience,
+    /// never something worth crashing or refusing to launch over.
+    static func load(path: String) -> [SafeClip] {
+        guard let data = FileManager.default.contents(atPath: path) else { return [] }
+        let decoded = (try? decoder.decode([SafeClip].self, from: data)) ?? []
+        return Array(decoded.prefix(cap))
+    }
+
+    /// Writes `clips`, capped, atomically. Never throws: a failed save here should
+    /// never interrupt whatever triggered it — a copy, a poll tick.
+    static func save(_ clips: [SafeClip], path: String) {
+        let capped = Array(clips.prefix(cap))
+        guard let data = try? encoder.encode(capped) else { return }
+        let directory = (path as NSString).deletingLastPathComponent
+        try? FileManager.default.createDirectory(atPath: directory, withIntermediateDirectories: true)
+        let tempPath = directory + "/.aliasbar-clips-\(UUID().uuidString)"
+        do {
+            try data.write(to: URL(fileURLWithPath: tempPath))
+        } catch {
+            return
+        }
+        if rename(tempPath, path) != 0 {
+            try? FileManager.default.removeItem(atPath: tempPath)
+        }
+    }
+}
+
+// MARK: - Sync mirror (PRE-247-C/D)
+
+/// Presets and clips both travel through `SharedDocumentStore`'s generic
+/// per-collection dual-write pattern (see `SettingsSyncCoordinator.pushPresets` in
+/// `SettingsSync.swift`) — this is that same shape, applied to `SafeClip`.
+/// Conformance lives here, beside `SafeClip` itself, for the same reason
+/// `SettingsSync.swift` keeps `Appearance`'s conformance beside its own sync wiring:
+/// the decision to sync a type should be visible in one place.
+extension SafeClip: SharedRecordConvertible {}
+
+enum ClipboardSyncCollection {
+    static let clips = "clips"
+}
+
+/// Reconciles a local, already-capped clip history against the shared document's
+/// "clips" collection: whole-collection reconciliation, exactly like
+/// `SettingsSyncCoordinator.pushPresets` — upsert anything local that's new or
+/// changed, tombstone anything the document still lists live that a cap eviction (or
+/// a setting flip) has since dropped locally. There is no merge-on-enable step here,
+/// unlike settings/presets: clips are a rolling recency window, not a durable
+/// preference, so "the document's clips collection eventually mirrors whatever is in
+/// the local history file" is the whole contract.
+enum ClipboardSyncMirror {
+    static func reconcile(_ clips: [SafeClip], into store: SharedDocumentStore) {
+        let now = Date()
+        let existing: [SyncedRecord]
+        if case .success(let doc) = store.read() {
+            existing = doc.records[ClipboardSyncCollection.clips] ?? []
+        } else {
+            existing = []
+        }
+
+        let localIDs = Set(clips.map { $0.id.uuidString })
+        for clip in clips {
+            let id = clip.id.uuidString
+            let currentRecord = existing.first { $0.id == id && !$0.deleted }
+            let decodedCurrent = currentRecord.flatMap {
+                try? JSONDecoder.aliasBarDocument.decode(SafeClip.self, from: $0.payload)
+            }
+            guard decodedCurrent != clip else { continue }
+            _ = try? store.upsert(clip, id: id, in: ClipboardSyncCollection.clips, modifiedAt: now)
+        }
+
+        for record in existing where !record.deleted && !localIDs.contains(record.id) {
+            _ = try? store.tombstone(id: record.id, in: ClipboardSyncCollection.clips, modifiedAt: now)
+        }
     }
 }
