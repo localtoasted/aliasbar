@@ -1750,6 +1750,54 @@ for (label, victim) in [
         survives: [victim])
 }
 
+// 10. Output process substitution is the same nested command context as <(...).
+checkExactSpanDelete(
+    "output process substitution",
+    statement: """
+    alias doomed=>(print one
+    print two)
+    alias outputProcessKeeper='10'
+    """,
+    removes: ["alias doomed=", "print two)"],
+    survives: ["alias outputProcessKeeper='10'"])
+
+// 11. Legacy backtick command substitution can span physical lines too.
+checkExactSpanDelete(
+    "multiline backtick substitution",
+    statement: """
+    alias doomed=`print one
+    print two`
+    alias backtickKeeper='11'
+    """,
+    removes: ["alias doomed=", "print two`"],
+    survives: ["alias backtickKeeper='11'"])
+
+// 12. A case pattern's closing parenthesis is grammar, not the end of $().
+checkExactSpanDelete(
+    "case arm inside command substitution",
+    statement: """
+    alias doomed=$(case x in
+    x) print yes ;;
+    esac
+    )
+    alias caseKeeper='12'
+    """,
+    removes: ["alias doomed=", "esac"],
+    survives: ["alias caseKeeper='12'"])
+
+// 13. Heredoc bodies are opaque shell input; delimiters in their payload are data.
+checkExactSpanDelete(
+    "heredoc inside command substitution",
+    statement: """
+    alias doomed=$(cat <<'EOF'
+    payload )
+    EOF
+    )
+    alias heredocKeeper='13'
+    """,
+    removes: ["alias doomed=", "payload )"],
+    survives: ["alias heredocKeeper='13'"])
+
 
 // ===========================================================================
 // HISTORY

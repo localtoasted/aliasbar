@@ -850,21 +850,39 @@ enum AliasWriter {
             case arithmetic
             case parameter
             case process
+            case backtick
 
             /// `#` is shell-comment syntax in command contexts. In arithmetic it is the
             /// radix operator (`16#ff`), and in parameter expansion it is an operator.
             var allowsComments: Bool {
                 switch self {
-                case .root, .command, .process: return true
+                case .root, .command, .process, .backtick: return true
                 case .arithmetic, .parameter: return false
                 }
             }
+        }
+
+        enum CasePhase {
+            case awaitingIn
+            case pattern
+            case body
+        }
+
+        struct Heredoc {
+            var delimiter: String
+            var stripsTabs: Bool
         }
 
         struct LexFrame {
             var kind: NestingKind
             var quote: QuoteState = .unquoted
             var atWordStart = true
+            var atCommandStart = true
+            var token = ""
+            var tokenStartedCommand = false
+            var cases: [CasePhase] = []
+            var pendingHeredocs: [Heredoc] = []
+            var activeHeredoc: Heredoc?
             /// Number of unmatched delimiters belonging to this frame. Arithmetic
             /// starts at two for `$((`, while every other nested construct starts at
             /// one. Ordinary parentheses/braces inside the construct adjust the same
@@ -907,8 +925,79 @@ enum AliasWriter {
 
             func push(_ kind: NestingKind, delimiterDepth: Int, tokenLength: Int) {
                 state.frames[state.frames.count - 1].atWordStart = false
+                state.frames[state.frames.count - 1].atCommandStart = false
                 state.frames.append(LexFrame(kind: kind, delimiterDepth: delimiterDepth))
                 index = advance(index, by: tokenLength)
+            }
+
+            func finishToken(in frameIndex: Int) {
+                let token = state.frames[frameIndex].token
+                guard !token.isEmpty else { return }
+                let beganCommand = state.frames[frameIndex].tokenStartedCommand
+                state.frames[frameIndex].token = ""
+                state.frames[frameIndex].tokenStartedCommand = false
+
+                if beganCommand, token == "case" {
+                    state.frames[frameIndex].cases.append(.awaitingIn)
+                } else if state.frames[frameIndex].cases.last == .awaitingIn, token == "in" {
+                    state.frames[frameIndex].cases[state.frames[frameIndex].cases.count - 1] = .pattern
+                } else if beganCommand, token == "esac",
+                          !state.frames[frameIndex].cases.isEmpty {
+                    state.frames[frameIndex].cases.removeLast()
+                }
+                state.frames[frameIndex].atCommandStart = false
+            }
+
+            func appendToToken(_ ch: Character, in frameIndex: Int) {
+                if state.frames[frameIndex].token.isEmpty {
+                    state.frames[frameIndex].tokenStartedCommand =
+                        state.frames[frameIndex].atCommandStart
+                }
+                state.frames[frameIndex].token.append(ch)
+            }
+
+            /// Reads the delimiter word after `<<` without treating its quotes as shell
+            /// state. Heredoc delimiter quotes are removed by the shell, and the body is
+            /// lexically opaque until that exact word appears on a line by itself.
+            func heredoc(after operatorEnd: String.Index) -> (Heredoc, String.Index)? {
+                var cursor = operatorEnd
+                var stripsTabs = false
+                if cursor < line.endIndex, line[cursor] == "-" {
+                    stripsTabs = true
+                    cursor = line.index(after: cursor)
+                } else if cursor < line.endIndex, line[cursor] == "<" {
+                    return nil // here-string, not a heredoc
+                }
+                while cursor < line.endIndex, line[cursor] == " " || line[cursor] == "\t" {
+                    cursor = line.index(after: cursor)
+                }
+                guard cursor < line.endIndex else { return nil }
+
+                var delimiter = ""
+                var quote: Character?
+                if line[cursor] == "'" || line[cursor] == "\"" {
+                    quote = line[cursor]
+                    cursor = line.index(after: cursor)
+                }
+                while cursor < line.endIndex {
+                    let ch = line[cursor]
+                    if let quote {
+                        if ch == quote {
+                            cursor = line.index(after: cursor)
+                            break
+                        }
+                    } else if ch == " " || ch == "\t" || ch == ";" || ch == "|" || ch == "&" {
+                        break
+                    } else if ch == "\\" {
+                        let next = line.index(after: cursor)
+                        guard next < line.endIndex else { break }
+                        cursor = next
+                    }
+                    delimiter.append(line[cursor])
+                    cursor = line.index(after: cursor)
+                }
+                guard !delimiter.isEmpty else { return nil }
+                return (Heredoc(delimiter: delimiter, stripsTabs: stripsTabs), cursor)
             }
 
             /// Expansions are active in unquoted and double-quoted text, but process
@@ -928,11 +1017,33 @@ enum AliasWriter {
                     push(.parameter, delimiterDepth: 1, tokenLength: 2)
                     return true
                 }
-                if allowProcess, line[index] == "<", next == "(" {
+                if allowProcess, (line[index] == "<" || line[index] == ">"), next == "(" {
                     push(.process, delimiterDepth: 1, tokenLength: 2)
                     return true
                 }
+                if line[index] == "`" {
+                    push(.backtick, delimiterDepth: 1, tokenLength: 1)
+                    return true
+                }
                 return false
+            }
+
+            if let frameIndex = state.frames.indices.last,
+               let active = state.frames[frameIndex].activeHeredoc {
+                let candidate = active.stripsTabs
+                    ? String(line.drop(while: { $0 == "\t" }))
+                    : line
+                if candidate == active.delimiter {
+                    state.frames[frameIndex].activeHeredoc = nil
+                    if !state.frames[frameIndex].pendingHeredocs.isEmpty {
+                        state.frames[frameIndex].activeHeredoc =
+                            state.frames[frameIndex].pendingHeredocs.removeFirst()
+                    }
+                    state.frames[frameIndex].atWordStart = true
+                    state.frames[frameIndex].atCommandStart = true
+                }
+                state.continues = true
+                return state
             }
 
             while index < line.endIndex {
@@ -960,7 +1071,10 @@ enum AliasWriter {
                     state.frames[frameIndex].atWordStart = false
 
                 case .unquoted:
-                    if ch == "\\" {
+                    if state.frames[frameIndex].kind == .backtick, ch == "`" {
+                        finishToken(in: frameIndex)
+                        state.frames.removeLast()
+                    } else if ch == "\\" {
                         let next = line.index(after: index)
                         if next == line.endIndex { trailingEscape = true; index = next; continue }
                         index = next
@@ -982,6 +1096,7 @@ enum AliasWriter {
                         endedInComment = true
                         break
                     } else if ch == " " || ch == "\t" {
+                        finishToken(in: frameIndex)
                         state.frames[frameIndex].atWordStart = true
                     } else if state.frames[frameIndex].kind == .root,
                               ch == ";" || ch == "|" || ch == "&" {
@@ -1007,20 +1122,49 @@ enum AliasWriter {
                             state.frames.removeLast()
                         }
                     } else if state.frames[frameIndex].kind == .command
-                                || state.frames[frameIndex].kind == .process {
+                                || state.frames[frameIndex].kind == .process
+                                || state.frames[frameIndex].kind == .backtick {
                         if ch == "(" {
-                            state.frames[frameIndex].delimiterDepth += 1
+                            finishToken(in: frameIndex)
+                            // zsh accepts both `word)` and `(word)` case-arm forms.
+                            // The optional opening paren belongs to the pattern grammar,
+                            // not to the command substitution's structural depth.
+                            if state.frames[frameIndex].cases.last != .pattern {
+                                state.frames[frameIndex].delimiterDepth += 1
+                            }
                             state.frames[frameIndex].atWordStart = true
                         } else if ch == ")" {
-                            state.frames[frameIndex].delimiterDepth -= 1
-                            if state.frames[frameIndex].delimiterDepth == 0 {
-                                state.frames.removeLast()
+                            finishToken(in: frameIndex)
+                            if state.frames[frameIndex].cases.last == .pattern {
+                                state.frames[frameIndex].cases[
+                                    state.frames[frameIndex].cases.count - 1] = .body
+                                state.frames[frameIndex].atCommandStart = true
+                            } else {
+                                state.frames[frameIndex].delimiterDepth -= 1
+                                if state.frames[frameIndex].delimiterDepth == 0 {
+                                    state.frames.removeLast()
+                                }
                             }
+                        } else if ch == "<", character(after: index) == "<",
+                                  let parsed = heredoc(after: advance(index, by: 2)) {
+                            finishToken(in: frameIndex)
+                            state.frames[frameIndex].pendingHeredocs.append(parsed.0)
+                            index = parsed.1
+                            continue
                         } else if ch == ";" || ch == "|" || ch == "&" {
+                            finishToken(in: frameIndex)
                             // Separators inside a substitution separate its commands,
                             // not the outer alias statement.
                             state.frames[frameIndex].atWordStart = true
+                            state.frames[frameIndex].atCommandStart = true
+                            if ch == ";", character(after: index) == ";",
+                               state.frames[frameIndex].cases.last == .body {
+                                state.frames[frameIndex].cases[
+                                    state.frames[frameIndex].cases.count - 1] = .pattern
+                                index = line.index(after: index)
+                            }
                         } else {
+                            appendToToken(ch, in: frameIndex)
                             state.frames[frameIndex].atWordStart = false
                         }
                     } else {
@@ -1038,7 +1182,14 @@ enum AliasWriter {
                 // A physical newline is a command boundary inside substitutions. A
                 // backslash-newline is removed instead, so it deliberately preserves
                 // the word-boundary state from before the backslash.
+                finishToken(in: state.frames.count - 1)
                 state.frames[state.frames.count - 1].atWordStart = true
+                state.frames[state.frames.count - 1].atCommandStart = true
+                if state.frames[state.frames.count - 1].activeHeredoc == nil,
+                   !state.frames[state.frames.count - 1].pendingHeredocs.isEmpty {
+                    state.frames[state.frames.count - 1].activeHeredoc =
+                        state.frames[state.frames.count - 1].pendingHeredocs.removeFirst()
+                }
             }
 
             // Any open nesting frame or quote carries the statement across a newline.
