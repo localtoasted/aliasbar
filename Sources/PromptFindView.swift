@@ -16,12 +16,24 @@ struct PromptFindPreviewLayout<ListContent: View>: View {
     let listContent: ListContent
 
     var body: some View {
-        HStack(spacing: 0) {
-            listContent
-                .frame(width: 268, alignment: .top)
-            Rectangle().fill(theme.rule.opacity(0.5)).frame(width: 1)
-            PromptDetailPane(state: state)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        VStack(spacing: 0) {
+            // The union pool means this layout can be showing while the library
+            // itself has nothing in it yet — the list beside this banner is full of
+            // shell entries, not prompts. Reusing `InfoBanner` (PromptManageView.swift)
+            // rather than a full empty state: shell results are still genuinely
+            // useful here, so this never replaces them, only sits above them.
+            if state.promptLibraryEmpty {
+                InfoBanner(text: AppState.promptLibraryEmptyHint)
+                    .padding(10)
+            }
+            HStack(spacing: 0) {
+                listContent
+                    .frame(width: 268, alignment: .top)
+                Rectangle().fill(theme.rule.opacity(0.5)).frame(width: 1)
+                PromptDetailPane(state: state)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }

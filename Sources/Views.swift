@@ -1224,11 +1224,16 @@ struct ManageView: View {
         HStack(spacing: 0) {
             sidebar
             Rectangle().fill(theme.rule.opacity(0.5)).frame(width: 1)
-            // The prompt dialect (Library/Delivery/Health) is an entirely different
-            // list-shape from the shell buckets' `[RankedEntry]` — its own list and
-            // detail panes live in PromptManageView.swift, this is only the routing.
+            // The prompt dialect (Library/Delivery/Health/Inbox) is an entirely
+            // different list-shape from the shell buckets' `[RankedEntry]` — its own
+            // list and detail panes live in PromptManageView.swift (and, for Inbox,
+            // InboxView.swift), this is only the routing.
             if state.dialect == .prompt {
-                PromptManageView(state: state, settings: settings)
+                if state.promptBucket == .inbox {
+                    InboxView(state: state, settings: settings)
+                } else {
+                    PromptManageView(state: state, settings: settings)
+                }
             } else if state.bucket == .suggested {
                 SuggestedManageView(state: state, settings: settings)
             } else {
@@ -1313,6 +1318,14 @@ struct ManageView: View {
                               design: theme.bodyDesign))
                 .foregroundStyle(active ? theme.text : theme.dim)
             Spacer(minLength: 2)
+            // Inbox is the one prompt bucket worth a glance from the sidebar alone —
+            // Library/Delivery/Health are browsed, not triaged, so only this one
+            // carries a count, mirroring the shell sidebar's per-bucket counts.
+            if bucket == .inbox {
+                Text("\(state.inboxPendingCount)")
+                    .font(.system(size: 9.5, weight: .medium, design: .monospaced))
+                    .foregroundStyle(state.inboxPendingCount > 0 ? theme.accent : theme.faint)
+            }
         }
         .padding(.horizontal, 7)
         .padding(.vertical, 5)
