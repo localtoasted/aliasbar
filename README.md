@@ -33,6 +33,7 @@ That's the actual problem: an alias is a compression artifact, and the key to re
 | `⏎` | primary action |
 | `⌘⏎` | the other one |
 | `⌘1` `⌘2` `⌘3` | Find / Board / Manage |
+| `⌥←` `⌥→` | cycle Find / Board / Manage |
 | `⇥` | flip Find/Board between shell and prompts, or cycle Manage's sidebar |
 | `⌘K` | clipboard, as a Find source |
 | `?` `!` `@` `#` | jump straight to graveyard / conflicts / by file / stats |

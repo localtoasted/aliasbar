@@ -22,8 +22,8 @@ enum PromptInbox {
     /// A flag is advisory: it never blocks approval by itself, but `approve` refuses a
     /// flagged item unless the caller passes `acknowledgedFlags: true`. (The UI slice
     /// that calls this is expected to only pass that once the item has actually been
-    /// viewed in full — this API can't enforce that part, only the "was it ever passed
-    /// at all" part.)
+    /// viewed in full — the UI requires an explicit read-in-full control for flagged
+    /// items; this API can only enforce the "was it ever passed at all" part.)
     struct Flag: Equatable {
         enum Reason: String, Equatable {
             case shellCommandShape = "shell-command-shape"

@@ -170,6 +170,19 @@ final class ClipboardPersistenceController: ClipboardPersisting {
         return ClipboardHistoryStore.load(path: clipsPath)
     }
 
+    /// Turning persistence OFF means the bytes leave the disk, not merely that new
+    /// ones stop arriving: the local file is deleted, and any clips already mirrored
+    /// into the sync document are tombstoned so other Macs drop them too. Static and
+    /// path-parameterized because the toggle can be flipped while no monitor (and so
+    /// no controller instance) exists at all.
+    static func purgeDiskCopies(clipsPath: String = AppPaths.clipsPath,
+                                syncFileURL: URL?) {
+        try? FileManager.default.removeItem(atPath: clipsPath)
+        if let syncFileURL {
+            ClipboardSyncMirror.reconcile([], into: SharedDocumentStore(url: syncFileURL))
+        }
+    }
+
     func historyChanged(_ history: [SafeClip]) {
         guard settings.clipboardPersistence else { return }
         ClipboardHistoryStore.save(history, path: clipsPath)

@@ -102,6 +102,10 @@ struct EditTarget: Identifiable {
     var body: String = ""
     /// Whether "Install as /name in Claude Code" is checked. Unused for `.alias`.
     var deliverToClaudeCode: Bool = false
+    /// Advisory flag lines carried from an inbox item into edit-before-approve, so
+    /// the sheet can show the same warning `approve` would have required
+    /// acknowledging. Empty everywhere else.
+    var flagReasons: [String] = []
     /// The name as it was when editing began, so a rename can delete/replace the old
     /// entry (alias rename via `AliasWriter.Operation.rename`, or a prompt rename via
     /// write-new + `PromptStore.delete(old)`).
@@ -155,6 +159,10 @@ struct ComposerPrefill {
     var deliverToClaudeCode: Bool = false
     var originalName: String = ""
     var source: String? = nil
+    /// Advisory flag lines carried from an inbox item into edit-before-approve, so
+    /// the human saving it sees exactly what `approve` would have made them
+    /// acknowledge. Empty everywhere else.
+    var flagReasons: [String] = []
 }
 
 /// What the Snippets sheet is currently doing — deliberately its own small type
@@ -1093,12 +1101,13 @@ final class AppState: ObservableObject {
         return promptCache.first { $0.name.lowercased() == replaces.lowercased() }?.body
     }
 
-    /// Marks item `index` of `file` as having had its full body actually displayed
-    /// — called from the detail pane's own `onAppear`, once, the first time its
-    /// complete, untruncated body has actually been laid out on screen. This is the
-    /// only place `viewedInFull` is ever set, and nothing else sets it, which is
-    /// what makes `acknowledgedFlags: true` a fact `approveInboxItem` reads back
-    /// rather than a formality any caller could assert.
+    /// Marks item `index` of `file` as viewed. For unflagged items the detail
+    /// pane's `onAppear` calls this on selection; for FLAGGED items nothing calls it
+    /// except the explicit "I've read the full item" control that sits below the
+    /// complete body in the scroll flow — selection alone never satisfies the flag
+    /// gate. This is the only place `viewedInFull` is ever set, which is what makes
+    /// `acknowledgedFlags: true` a fact `approveInboxItem` reads back rather than a
+    /// formality any caller could assert.
     func markInboxItemViewed(file: URL, index: Int) {
         guard var review = inboxReviews[file], review.items.indices.contains(index),
               !review.viewedInFull.contains(index)
@@ -1171,7 +1180,8 @@ final class AppState: ObservableObject {
         let item = review.items[index]
         openComposer(prefill: ComposerPrefill(kind: .prompt, name: item.name,
                                               description: item.description ?? "",
-                                              body: item.body, source: "inbox"))
+                                              body: item.body, source: "inbox",
+                                              flagReasons: item.flags.map(\.detail)))
         pendingInboxEdit = (file, index)
     }
 
@@ -1734,7 +1744,13 @@ final class AppState: ObservableObject {
         // instead of cycling the view — MANAGE keeps ⇥ as a view switch below, since
         // it has no dialect to flip.
         case kVK_Tab where (mode == .find && findSource == .aliases) || mode == .board:
-            flipDialect()
+            if settings.promptFeaturesEnabled {
+                flipDialect()
+            } else {
+                // No prompt features means no dialect to flip; ⇥ falls back to its
+                // pre-prompt-platform meaning so the key never dead-ends.
+                cycleView(backwards: flags.contains(.shift))
+            }
             return true
 
         // The clipboard source has no dialect to flip — ⇥ instead cycles the detail
@@ -1746,7 +1762,11 @@ final class AppState: ObservableObject {
 
         // MANAGE's own ⇥ flip, mirroring FIND's immediately above.
         case kVK_Tab where mode == .manage:
-            flipManageDialect()
+            if settings.promptFeaturesEnabled {
+                flipManageDialect()
+            } else {
+                cycleView(backwards: flags.contains(.shift))
+            }
             return true
 
         // Buckets are the folders, and ⌘↑ ⌘↓ walk them the way ⌘↑ walks Finder's — in
@@ -2108,6 +2128,7 @@ final class AppState: ObservableObject {
             editor = EditTarget(kind: .prompt, mode: prefill.mode, name: prefill.name,
                                 command: "", description: prefill.description, body: prefill.body,
                                 deliverToClaudeCode: prefill.deliverToClaudeCode,
+                                flagReasons: prefill.flagReasons,
                                 originalName: prefill.originalName, source: prefill.source)
         }
     }
@@ -2371,7 +2392,10 @@ final class AppState: ObservableObject {
             // order, so a failed write never destroys the original.
             let caseOnlyRename = isRename && target.originalName.lowercased() == name.lowercased()
             if caseOnlyRename {
-                _ = try? PromptStore.delete(name: target.originalName, from: directory)
+                // Not `try?`: if this delete fails, the write below trips the
+                // case-collision guard and blames the user's own prompt. Better to
+                // name the real failure.
+                _ = try PromptStore.delete(name: target.originalName, from: directory)
             }
             _ = try PromptStore.write(prompt: prompt, to: directory)
             if isRename && !caseOnlyRename {
