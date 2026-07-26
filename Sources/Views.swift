@@ -153,6 +153,27 @@ struct RootView: View {
                     .help("Searching your shell history — ⌘H to go back")
                 }
 
+                // Same badge treatment for a non-All bucket, and for the same reason:
+                // the bucket now narrows FIND and BOARD too, and a filter that hides
+                // things without saying so reads as data loss. MANAGE already names
+                // its bucket in the sidebar; history ignores buckets entirely.
+                if state.bucket != .all && state.mode != .manage && !state.historyMode {
+                    HStack(spacing: 4) {
+                        Image(systemName: state.bucket.symbol)
+                            .font(.system(size: 9.5, weight: .semibold))
+                        Text(state.bucket.label)
+                            .font(.system(size: 11, weight: .semibold, design: theme.bodyDesign))
+                    }
+                    .foregroundStyle(theme.accent)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 2.5)
+                    .background(theme.surface,
+                                in: RoundedRectangle(cornerRadius: theme.cornerRadius))
+                    .overlay(RoundedRectangle(cornerRadius: theme.cornerRadius)
+                        .strokeBorder(theme.accent.opacity(0.28), lineWidth: 1))
+                    .help("Showing only \(state.bucket.label.lowercased()) — ⌘↑↓ to change, esc for all")
+                }
+
                 Spacer(minLength: 6)
 
                 Text(ZshrcParser.displayPath)
@@ -200,7 +221,10 @@ struct RootView: View {
     private var searchPrompt: String {
         if state.historyMode { return "Search everything you have run" }
         switch state.mode {
-        case .find: return "Search aliases and functions"
+        case .find:
+            return state.bucket == .all
+                ? "Search aliases and functions"
+                : "Search \(state.bucket.label.lowercased())"
         case .board: return "Type to highlight"
         case .manage: return "Filter \(state.bucket.label.lowercased())"
         }
@@ -450,9 +474,17 @@ struct FindView: View {
         return Group {
             if results.isEmpty {
                 if state.query.isEmpty {
-                    EmptyStateView(symbol: "doc.text.magnifyingglass",
-                                   title: "Nothing in \(ZshrcParser.displayPath)",
-                                   hint: "Press ⌘N to write your first alias.")
+                    // An empty bucket is not an empty file, and saying the second when
+                    // the first is true would send someone to check their zshrc.
+                    if state.bucket != .all {
+                        EmptyStateView(symbol: state.bucket.symbol,
+                                       title: "Nothing in \(state.bucket.label.lowercased())",
+                                       hint: "Esc shows everything again.")
+                    } else {
+                        EmptyStateView(symbol: "doc.text.magnifyingglass",
+                                       title: "Nothing in \(ZshrcParser.displayPath)",
+                                       hint: "Press ⌘N to write your first alias.")
+                    }
                 } else {
                     EmptyStateView(symbol: "magnifyingglass",
                                    title: "No match for \"\(state.query)\"",
@@ -505,9 +537,11 @@ struct FindView: View {
     }
 
     /// Names the rest state honestly. With no shell history to rank by, calling the list
-    /// "most used" would be a lie.
+    /// "most used" would be a lie — and with a bucket applied, so would any label that
+    /// is not the bucket's own name.
     private var restLabel: String {
-        state.store.mostUsed.isEmpty ? "YOUR ALIASES" : "MOST USED"
+        if state.bucket != .all { return state.bucket.label.uppercased() }
+        return state.store.mostUsed.isEmpty ? "YOUR ALIASES" : "MOST USED"
     }
 
     private func activate(_ entry: RankedEntry) {
@@ -729,9 +763,15 @@ struct BoardView: View {
         let entries = state.boardEntries
         VStack(spacing: 0) {
             if entries.isEmpty {
-                EmptyStateView(symbol: "square.grid.3x3",
-                               title: "Nothing to show",
-                               hint: "⌘N writes your first alias.")
+                if state.bucket != .all {
+                    EmptyStateView(symbol: state.bucket.symbol,
+                                   title: "Nothing in \(state.bucket.label.lowercased())",
+                                   hint: "Esc shows everything again.")
+                } else {
+                    EmptyStateView(symbol: "square.grid.3x3",
+                                   title: "Nothing to show",
+                                   hint: "⌘N writes your first alias.")
+                }
             } else {
                 ScrollView {
                     LazyVGrid(columns: columns, spacing: 6) {
