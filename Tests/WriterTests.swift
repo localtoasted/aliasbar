@@ -1919,6 +1919,177 @@ check("an unconsumed root heredoc leaves the file byte-for-byte untouched",
       read(unconsumedRootHeredoc) == unconsumedRootHeredocBefore,
       read(unconsumedRootHeredoc))
 
+/// A heredoc delimiter outside the recognized set must refuse the edit and leave
+/// the file byte-for-byte untouched. Guessing at the delimiter is what round 4
+/// proved fatal: an identity that diverges from zsh balances the unresolved
+/// counter against a false terminator, and the deletion orphans live heredoc
+/// payload as executable input.
+func checkHeredocDelimiterRefusal(_ label: String, statement: String,
+                                  fixtureMustBeValidZsh: Bool = true) {
+    let path = scratch("""
+    \(ManagedBlock.begin)
+    \(statement)
+    \(ManagedBlock.end)
+    """)
+    if fixtureMustBeValidZsh {
+        check("\(label): fixture is valid zsh", zshAccepts(path), read(path))
+    }
+    let before = read(path)
+    expectThrow("\(label): delete refuses the edit") {
+        _ = try AliasWriter.apply(.delete(name: "doomed"), path: path, allEntries: [],
+                                  confirmedCollateral: true)
+    }
+    check("\(label): file left byte-for-byte untouched", read(path) == before,
+          read(path))
+}
+
+// 21. Round-4 corruption reproduction: the backslash against the newline continues
+// the delimiter word, so the real delimiter is EOF. A scanner that stops at the
+// backslash invents EO, terminates the body two lines early, and the deletion
+// orphans `second payload` and the real terminator as executable input.
+checkHeredocDelimiterRefusal(
+    "backslash-continued heredoc delimiter",
+    statement: """
+    alias doomed=cat <<EO\\
+    F
+    first payload
+    EO
+    second payload
+    EOF
+    alias continuationKeeper='21'
+    """)
+
+// 22. Round-4 corruption reproduction: `$'EOF'` is ANSI-C quoting, so the real
+// delimiter is EOF. A scanner that reads the characters literally invents $EOF and
+// terminates against the literal `$EOF` body line instead.
+checkHeredocDelimiterRefusal(
+    "ANSI-C-quoted heredoc delimiter",
+    statement: """
+    alias doomed=cat <<$'EOF'
+    first payload
+    $EOF
+    second payload
+    EOF
+    alias ansiKeeper='22'
+    """)
+
+// 23. Inside a double-quoted delimiter a backslash-newline is a line continuation,
+// so the word carries onto the next physical line. The old scanner dropped the
+// operator entirely here, registering no heredoc at all.
+checkHeredocDelimiterRefusal(
+    "double-quoted delimiter continued across the newline",
+    statement: """
+    alias doomed=cat <<"EO\\
+    F"
+    first payload
+    EOF
+    alias quotedContinuationKeeper='23'
+    """)
+
+// 24. A quote still open at the newline continues the delimiter word across it.
+// The old scanner also dropped this operator silently. The fixture is not claimed
+// as valid zsh; refusal must hold regardless of what the file means.
+checkHeredocDelimiterRefusal(
+    "unterminated quote in heredoc delimiter",
+    statement: """
+    alias doomed=cat <<'EOF
+    payload
+    EOF
+    alias unterminatedKeeper='24'
+    """,
+    fixtureMustBeValidZsh: false)
+
+// 25. Command substitution in a delimiter word is outside the recognized set.
+checkHeredocDelimiterRefusal(
+    "backtick in heredoc delimiter",
+    statement: """
+    alias doomed=cat <<`EOF`
+    payload
+    EOF
+    alias backtickDelimiterKeeper='25'
+    """,
+    fixtureMustBeValidZsh: false)
+
+// 26. zsh accepts command-substitution syntax literally in a heredoc delimiter word.
+// Its spaces and parentheses belong to the delimiter; stopping at the first `(` invents
+// `$` as the delimiter and can balance the unresolved counter against a payload line.
+checkHeredocDelimiterRefusal(
+    "command-substitution syntax in heredoc delimiter",
+    statement: """
+    alias doomed=cat <<$(print EOF)
+    first payload
+    $
+    second payload
+    $(print EOF)
+    alias commandSubstitutionDelimiterKeeper='26'
+    """)
+
+// 27. Braced parameter syntax has the same trap: whitespace belongs to zsh's literal
+// delimiter, while a word-level scanner would stop early and invent `${value:-EOF`.
+checkHeredocDelimiterRefusal(
+    "parameter-expansion syntax in heredoc delimiter",
+    statement: """
+    alias doomed=cat <<${value:-EOF X}
+    first payload
+    ${value:-EOF
+    second payload
+    ${value:-EOF X}
+    alias parameterDelimiterKeeper='27'
+    """)
+
+// 28. Legacy arithmetic syntax around a delimiter is outside the recognized set too.
+// This malformed fixture is not assigned a zsh meaning; the safety property is that an
+// edit never guesses at its extent or changes a byte.
+checkHeredocDelimiterRefusal(
+    "arithmetic-substitution syntax in heredoc delimiter",
+    statement: """
+    alias doomed=cat <<$[1 + 2]
+    first payload
+    $[1
+    second payload
+    3
+    alias arithmeticDelimiterKeeper='28'
+    """,
+    fixtureMustBeValidZsh: false)
+
+// 29. Parentheses can be literal delimiter characters in zsh, so treating one as a
+// word boundary invents a shorter terminator and can expose the real payload.
+checkHeredocDelimiterRefusal(
+    "parenthesized heredoc delimiter suffix",
+    statement: """
+    alias doomed=cat <<foo(bar)
+    first payload
+    foo
+    second payload
+    foo(bar)
+    alias parenthesizedDelimiterKeeper='29'
+    """)
+
+// 30. zsh ends the delimiter word at a redirection, so `<<EOF>file` names EOF, not
+// `EOF>file`. Folding the redirect into the delimiter would never find the body's
+// real terminator.
+checkExactSpanDelete(
+    "redirect immediately after heredoc delimiter",
+    statement: """
+    alias doomed=cat <<EOF>/tmp/aliasbar-test-26-redirect
+    redirect payload
+    EOF
+    alias redirectKeeper='30'
+    """,
+    removes: ["alias doomed=", "redirect payload", "\nEOF\n"],
+    survives: ["alias redirectKeeper='30'"])
+
+// 31. `<<<` is a here-string, not a heredoc: nothing is deferred past the newline,
+// and its word must not be misread as a delimiter that never arrives.
+checkExactSpanDelete(
+    "here-string is not a heredoc",
+    statement: """
+    alias doomed=cat <<<'here payload'
+    alias hereStringKeeper='31'
+    """,
+    removes: ["alias doomed=", "here payload"],
+    survives: ["alias hereStringKeeper='31'"])
+
 
 // ===========================================================================
 // HISTORY

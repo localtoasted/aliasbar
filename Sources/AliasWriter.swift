@@ -826,6 +826,13 @@ enum AliasWriter {
                     last += 1
                     state = scan(lines[last], from: state)
                 }
+                // A delimiter outside the recognized set means the scanner cannot know
+                // where the heredoc body ends, so the span's extent is untrustworthy in
+                // both directions. Refuse with the honest reason.
+                if state.unsupportedHeredocDelimiter {
+                    throw WriteError.wouldBreakSyntax(
+                        "the definition of \"\(name)\" uses a heredoc delimiter this app cannot parse the way zsh does")
+                }
                 // This guard is intentionally independent of `continues`. If a future
                 // scanner change drops a frame or forgets to propagate continuation,
                 // unresolved heredoc input must turn into a refused edit, never a
@@ -907,11 +914,17 @@ enum AliasWriter {
             /// never make an unresolved heredoc disappear from span completion.
             var unresolvedHeredocs = 0
             var heredocStateInvalid = false
+            /// A heredoc operator was seen whose delimiter word falls outside the
+            /// recognized set (line continuation, `$'…'` quoting, an unterminated
+            /// quote, a backtick). Its terminator cannot be located the way zsh
+            /// would, so no span containing it may complete. Never cleared.
+            var unsupportedHeredocDelimiter = false
             /// Whether the statement continues onto the following line.
             var continues = false
 
             var hasUnconsumedHeredoc: Bool {
-                heredocStateInvalid || unresolvedHeredocs > 0 || frames.contains {
+                heredocStateInvalid || unsupportedHeredocDelimiter
+                    || unresolvedHeredocs > 0 || frames.contains {
                     $0.activeHeredoc != nil || !$0.pendingHeredocs.isEmpty
                 }
             }
@@ -980,19 +993,42 @@ enum AliasWriter {
             /// Reads the delimiter word after `<<` without treating its quotes as shell
             /// state. Heredoc delimiter quotes are removed by the shell, and the body is
             /// lexically opaque until that exact word appears on a line by itself.
-            func heredoc(after operatorEnd: String.Index) -> (Heredoc, String.Index)? {
+            ///
+            /// Only delimiter words whose quote removal resolves entirely on this
+            /// physical line are recognized. Everything else — a trailing backslash
+            /// that continues the word across the newline, `$'…'`/`$"…"` quoting, a
+            /// quote still open at the newline, a backtick — is reported as
+            /// `.unsupported` rather than guessed at. Round 4 proved the cost of
+            /// guessing: a delimiter identity that diverges from zsh lets the
+            /// unresolved-heredoc counter balance to zero against a false terminator,
+            /// and the deletion orphans live heredoc payload as executable input.
+            /// An unsupported delimiter must poison the whole span so the edit is
+            /// refused, never quietly dropped or approximated.
+            enum HeredocWord {
+                case heredoc(Heredoc, String.Index)
+                case hereString(String.Index)
+                case unsupported(String.Index)
+            }
+
+            func heredoc(after operatorEnd: String.Index) -> HeredocWord {
                 var cursor = operatorEnd
                 var stripsTabs = false
                 if cursor < line.endIndex, line[cursor] == "-" {
                     stripsTabs = true
                     cursor = line.index(after: cursor)
                 } else if cursor < line.endIndex, line[cursor] == "<" {
-                    return nil // here-string, not a heredoc
+                    // `<<<` is a here-string: its word is an ordinary argument, not
+                    // deferred input. Hand back the position past the operator so the
+                    // ordinary lexer reads the word and the loop cannot rediscover the
+                    // trailing `<<` as a phantom heredoc.
+                    return .hereString(line.index(after: cursor))
                 }
                 while cursor < line.endIndex, line[cursor] == " " || line[cursor] == "\t" {
                     cursor = line.index(after: cursor)
                 }
-                guard cursor < line.endIndex else { return nil }
+                // `<<` with no delimiter word on this line is not valid zsh; whatever
+                // the file means by it, this span's extent cannot be trusted.
+                guard cursor < line.endIndex else { return .unsupported(cursor) }
 
                 var delimiter = ""
                 var quote: Character?
@@ -1007,7 +1043,9 @@ enum AliasWriter {
                             continue
                         } else if activeQuote == "\"", ch == "\\" {
                             let next = line.index(after: cursor)
-                            guard next < line.endIndex else { break }
+                            // A backslash against the newline continues the word onto
+                            // the next physical line, outside the recognized set.
+                            guard next < line.endIndex else { return .unsupported(cursor) }
                             if line[next] == "$" || line[next] == "`" || line[next] == "\""
                                 || line[next] == "\\" {
                                 delimiter.append(line[next])
@@ -1024,8 +1062,27 @@ enum AliasWriter {
                             cursor = line.index(after: cursor)
                             continue
                         }
-                    } else if ch == " " || ch == "\t" || ch == ";" || ch == "|" || ch == "&" {
+                    } else if ch == "(" || ch == ")" {
+                        // Parentheses are not a safe word boundary here: zsh accepts
+                        // forms such as `foo(bar)` literally as the delimiter. In other
+                        // contexts a parenthesis can be shell grammar instead. Refuse
+                        // both rather than choosing an extent that can orphan payload.
+                        return .unsupported(cursor)
+                    } else if ch == " " || ch == "\t" || ch == ";" || ch == "|" || ch == "&"
+                                || ch == "<" || ch == ">" {
                         break
+                    } else if ch == "$",
+                              let next = character(after: cursor),
+                              next == "'" || next == "\"" || next == "("
+                                  || next == "{" || next == "[" {
+                        // `$'…'` and `$"…"` are quote-removal syntax whose result this
+                        // scanner does not model. zsh accepts `$(…)` and `${…}` as
+                        // delimiter syntax that can contain whitespace, while legacy
+                        // `$[…]` arithmetic syntax computes a different delimiter. The
+                        // ordinary token boundaries below cannot recover any of them.
+                        return .unsupported(cursor)
+                    } else if ch == "`" {
+                        return .unsupported(cursor)
                     } else if ch == "'" || ch == "\"" {
                         quote = ch
                         sawDelimiterWord = true
@@ -1033,15 +1090,22 @@ enum AliasWriter {
                         continue
                     } else if ch == "\\" {
                         let next = line.index(after: cursor)
-                        guard next < line.endIndex else { break }
+                        // Line continuation: the delimiter word carries onto the next
+                        // physical line, so its identity is not resolvable here.
+                        guard next < line.endIndex else { return .unsupported(cursor) }
                         cursor = next
                     }
                     delimiter.append(line[cursor])
                     sawDelimiterWord = true
                     cursor = line.index(after: cursor)
                 }
-                guard quote == nil, sawDelimiterWord else { return nil }
-                return (Heredoc(delimiter: delimiter, stripsTabs: stripsTabs), cursor)
+                // A quote still open at the newline continues the word across it, and a
+                // quoted-empty word (`<<''`) has no line a terminator scan could match
+                // the way zsh would.
+                guard quote == nil, sawDelimiterWord, !delimiter.isEmpty else {
+                    return .unsupported(cursor)
+                }
+                return .heredoc(Heredoc(delimiter: delimiter, stripsTabs: stripsTabs), cursor)
             }
 
             /// Expansions are active in unquoted and double-quoted text, but process
@@ -1146,12 +1210,27 @@ enum AliasWriter {
                         endedInComment = true
                         break
                     } else if state.frames[frameIndex].kind.allowsComments,
-                              ch == "<", character(after: index) == "<",
-                              let parsed = heredoc(after: advance(index, by: 2)) {
-                        finishToken(in: frameIndex)
-                        state.frames[frameIndex].pendingHeredocs.append(parsed.0)
-                        state.unresolvedHeredocs += 1
-                        index = parsed.1
+                              ch == "<", character(after: index) == "<" {
+                        switch heredoc(after: advance(index, by: 2)) {
+                        case .heredoc(let parsed, let end):
+                            finishToken(in: frameIndex)
+                            state.frames[frameIndex].pendingHeredocs.append(parsed)
+                            state.unresolvedHeredocs += 1
+                            index = end
+                        case .hereString(let end):
+                            finishToken(in: frameIndex)
+                            state.frames[frameIndex].atWordStart = true
+                            index = end
+                        case .unsupported(let end):
+                            // The operator is real but its delimiter is outside the
+                            // recognized set, so the end of this heredoc cannot be
+                            // located. Count it as forever-unresolved and mark the
+                            // state: every span containing it must refuse the edit.
+                            finishToken(in: frameIndex)
+                            state.unresolvedHeredocs += 1
+                            state.unsupportedHeredocDelimiter = true
+                            index = end
+                        }
                         continue
                     } else if ch == " " || ch == "\t" {
                         finishToken(in: frameIndex)
