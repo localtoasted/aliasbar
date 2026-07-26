@@ -36,6 +36,7 @@ enum SharedDocumentSchema {
 /// does could keep that promise.
 indirect enum JSONValue: Codable, Equatable {
     case string(String)
+    case int(Int64)
     case number(Double)
     case bool(Bool)
     case null
@@ -44,13 +45,22 @@ indirect enum JSONValue: Codable, Equatable {
 
     init(from decoder: Decoder) throws {
         let container = try decoder.singleValueContainer()
-        // Order matters: Bool must be tried before Double, because Foundation's
+        // Order matters. Bool must be tried before Int64/Double, because Foundation's
         // JSONDecoder will happily decode a JSON `1` or `0` as a Bool, which would
-        // silently turn a numeric field into a boolean on the next encode.
+        // silently turn a numeric field into a boolean on the next encode. Int64 must
+        // then be tried before Double: a whole-number field (a Unix timestamp, a
+        // database row id) can easily exceed 2^53, the largest integer a Double can
+        // represent exactly, and decoding it as Double first would silently round it
+        // to the nearest representable value before this type ever sees it. Int64
+        // decoding fails outright on a fractional number (`1.5`), so this never
+        // misclassifies an actual float — it only catches values that really are
+        // whole numbers.
         if container.decodeNil() {
             self = .null
         } else if let value = try? container.decode(Bool.self) {
             self = .bool(value)
+        } else if let value = try? container.decode(Int64.self) {
+            self = .int(value)
         } else if let value = try? container.decode(Double.self) {
             self = .number(value)
         } else if let value = try? container.decode(String.self) {
@@ -69,6 +79,7 @@ indirect enum JSONValue: Codable, Equatable {
         var container = encoder.singleValueContainer()
         switch self {
         case .string(let value): try container.encode(value)
+        case .int(let value): try container.encode(value)
         case .number(let value): try container.encode(value)
         case .bool(let value): try container.encode(value)
         case .null: try container.encodeNil()

@@ -21,29 +21,50 @@ struct PromptFrontmatter: Equatable {
 
     var entries: [Entry]
 
+    /// Whether this file's frontmatter delimiter lines (`---`) were followed by a
+    /// carriage return, i.e. the file uses CRLF line endings. Set once at parse time
+    /// so `serialize` can reproduce it: every other line already carries its own
+    /// trailing `\r` (if the file has one) inside `Entry.raw` or the body, because
+    /// parsing only ever splits on `"\n"` — but the two literal `---` delimiter lines
+    /// are synthesized fresh on write, so without this flag they alone would flip to
+    /// LF on a round trip of an otherwise all-CRLF file.
+    var delimiterUsesCRLF: Bool = false
+
     private func value(for key: String) -> String? {
         entries.first { $0.key == key }?.raw
     }
 
+    /// Strips one leading/trailing run of plain whitespace and, if present, one
+    /// trailing `\r` left over from a CRLF file (since parsing only splits on `"\n"`,
+    /// that `\r` is otherwise still attached to whatever came right before it on the
+    /// line). Every accessor below reads through this rather than the bare
+    /// `.trimmingCharacters(in: .whitespaces)` Foundation offers, because `\r` is not
+    /// itself whitespace and that call leaves it in place.
+    fileprivate static func trimmedValue(_ raw: String) -> String {
+        var value = raw.trimmingCharacters(in: .whitespaces)
+        if value.hasSuffix("\r") { value.removeLast() }
+        return value.trimmingCharacters(in: .whitespaces)
+    }
+
     var schema: Int? {
-        value(for: "schema").flatMap { Int($0.trimmingCharacters(in: .whitespaces)) }
+        value(for: "schema").flatMap { Int(PromptFrontmatter.trimmedValue($0)) }
     }
 
     var description: String? {
         guard let raw = value(for: "description") else { return nil }
-        let trimmed = raw.trimmingCharacters(in: .whitespaces)
+        let trimmed = PromptFrontmatter.trimmedValue(raw)
         return trimmed.isEmpty ? nil : trimmed
     }
 
     var delivery: Set<DeliveryTarget> {
         guard let raw = value(for: "delivery") else { return [] }
-        let tokens = raw.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+        let tokens = raw.split(separator: ",").map { PromptFrontmatter.trimmedValue(String($0)) }
         return Set(tokens.compactMap { DeliveryTarget(rawValue: $0.lowercased()) })
     }
 
     var edited: Date? {
         guard let raw = value(for: "edited") else { return nil }
-        return PromptFrontmatter.iso8601.date(from: raw.trimmingCharacters(in: .whitespaces))
+        return PromptFrontmatter.iso8601.date(from: PromptFrontmatter.trimmedValue(raw))
     }
 
     private static let iso8601 = ISO8601DateFormatter()
@@ -71,11 +92,11 @@ struct PromptFrontmatter: Equatable {
         } else {
             updated.append(entry)
         }
-        return PromptFrontmatter(entries: updated)
+        return PromptFrontmatter(entries: updated, delimiterUsesCRLF: delimiterUsesCRLF)
     }
 
     func removingEntry(for key: String) -> PromptFrontmatter {
-        PromptFrontmatter(entries: entries.filter { $0.key != key })
+        PromptFrontmatter(entries: entries.filter { $0.key != key }, delimiterUsesCRLF: delimiterUsesCRLF)
     }
 }
 
@@ -377,9 +398,15 @@ enum PromptStore {
         let targetURL = directory.appendingPathComponent("\(prompt.name).md")
         let newContent = serialize(prompt)
 
+        // Backed up from the raw bytes on disk, not a decoded String: a prompt file
+        // that isn't valid UTF-8 would fail `String(contentsOf:encoding:.utf8)`,
+        // silently skipping the backup entirely and letting the overwrite below
+        // proceed with no safety copy of what was there. Reading `Data` first can
+        // only fail if the file is genuinely unreadable (permissions, vanished
+        // mid-call), the same case that already has no backup to take.
         var backupPath: String?
-        if let priorContent = try? String(contentsOf: targetURL, encoding: .utf8) {
-            backupPath = try writeBackup(of: priorContent, name: prompt.name, in: directory)
+        if let priorData = try? Data(contentsOf: targetURL) {
+            backupPath = try writeBackup(of: priorData, name: prompt.name, in: directory)
         }
 
         try atomicWrite(newContent, to: targetURL)
@@ -423,14 +450,21 @@ enum PromptStore {
     /// a hand-written prompt that happens to open with a Markdown horizontal rule
     /// (`---`) as prose: without a valid `schema: 1` inside it, it is never mistaken
     /// for metadata.
+    ///
+    /// Splitting is always on `"\n"` alone, never `"\r\n"`, so a CRLF file's `\r`
+    /// stays attached to whatever line it ends — that is what lets `serialize` restore
+    /// it later without this code needing to special-case CRLF anywhere but here. A
+    /// delimiter line in a CRLF file therefore reads as `"---\r"`, not `"---"`; every
+    /// comparison against a literal `---` below goes through `strippingTrailingCR`
+    /// so that still counts as the delimiter.
     private static func parse(_ content: String, name: String) -> Prompt {
         let lines = content.components(separatedBy: "\n")
-        guard lines.first == "---", lines.count > 1 else {
+        guard let firstLine = lines.first, strippingTrailingCR(firstLine) == "---", lines.count > 1 else {
             return Prompt(name: name, frontmatter: nil, body: content)
         }
 
         var closeIndex: Int?
-        for idx in 1..<lines.count where lines[idx] == "---" {
+        for idx in 1..<lines.count where strippingTrailingCR(lines[idx]) == "---" {
             closeIndex = idx
             break
         }
@@ -450,15 +484,30 @@ enum PromptStore {
         }
 
         let hasValidSchema = entries.contains {
-            $0.key == "schema" && $0.raw.trimmingCharacters(in: .whitespaces) == "1"
+            $0.key == "schema" && PromptFrontmatter.trimmedValue($0.raw) == "1"
         }
         guard hasValidSchema else {
             return Prompt(name: name, frontmatter: nil, body: content)
         }
 
+        // Only trusted when both delimiters agree — the ordinary case for a real CRLF
+        // file. A file with mismatched delimiter endings (unusual enough to suggest
+        // hand-tampering) falls back to LF for the delimiters rather than guessing.
+        let delimiterUsesCRLF = hasTrailingCR(firstLine) && hasTrailingCR(lines[closeIdx])
+
         let bodyLines = lines[(closeIdx + 1)...]
         let body = bodyLines.joined(separator: "\n")
-        return Prompt(name: name, frontmatter: PromptFrontmatter(entries: entries), body: body)
+        return Prompt(name: name,
+                      frontmatter: PromptFrontmatter(entries: entries, delimiterUsesCRLF: delimiterUsesCRLF),
+                      body: body)
+    }
+
+    private static func hasTrailingCR(_ line: String) -> Bool {
+        line.hasSuffix("\r")
+    }
+
+    private static func strippingTrailingCR(_ line: String) -> String {
+        hasTrailingCR(line) ? String(line.dropLast()) : line
     }
 
     /// The inverse of `parse`. When `prompt.frontmatter` is nil this is just
@@ -473,7 +522,11 @@ enum PromptStore {
     /// which is the case this format exists for, round-trips exactly.
     private static func serialize(_ prompt: Prompt) -> String {
         guard let frontmatter = prompt.frontmatter else { return prompt.body }
-        var lines: [String] = ["---"]
+        // Every other line already carries its own trailing `\r`, if it has one,
+        // inside `entry.raw` or the body — only these two synthesized delimiter
+        // lines need to be told to match, from `delimiterUsesCRLF`.
+        let delimiter = frontmatter.delimiterUsesCRLF ? "---\r" : "---"
+        var lines: [String] = [delimiter]
         for entry in frontmatter.entries {
             if let key = entry.key {
                 lines.append("\(key):\(entry.raw)")
@@ -481,7 +534,7 @@ enum PromptStore {
                 lines.append(entry.raw)
             }
         }
-        lines.append("---")
+        lines.append(delimiter)
         lines.append(contentsOf: prompt.body.components(separatedBy: "\n"))
         return lines.joined(separator: "\n")
     }
@@ -492,7 +545,7 @@ enum PromptStore {
     /// microseconds, and a numeric suffix is appended on top of that if two backups
     /// still land on the same name — belt and suspenders against two writes in a tight
     /// loop landing in the same tick.
-    private static func writeBackup(of contents: String, name: String, in directory: URL) throws -> String {
+    private static func writeBackup(of contents: Data, name: String, in directory: URL) throws -> String {
         let backupsDir = directory.appendingPathComponent(".backups")
         try? fileManager.createDirectory(at: backupsDir, withIntermediateDirectories: true)
 
@@ -505,7 +558,7 @@ enum PromptStore {
         }
 
         do {
-            try contents.write(to: candidate, atomically: true, encoding: .utf8)
+            try contents.write(to: candidate, options: .atomic)
         } catch {
             throw WriteError.backupFailed(error.localizedDescription)
         }

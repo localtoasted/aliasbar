@@ -3134,6 +3134,55 @@ if case .success(var toEdit) = PromptStore.read(url: unknownKeyDir.appendingPath
     check("prompt reads for the field-edit test", false)
 }
 
+// --- CRLF frontmatter: delimiters and values with a trailing \r are recognized ---
+// Splitting on "\n" alone means a CRLF file's delimiter lines read as "---\r", not
+// "---", and a value like "schema: 1\r" carries that \r right through a plain
+// `.trimmingCharacters(in: .whitespaces)` — neither of which strips \r. Unhandled,
+// that means a CRLF file's frontmatter is never recognized at all.
+
+let crlfFixture = promptFixture([
+    "---",
+    "schema: 1",
+    "description: CRLF prompt",
+    "---",
+    "Summarize: {{notes}}",
+    "",
+]).replacingOccurrences(of: "\n", with: "\r\n")
+let crlfDir = promptScratchDir()
+writeRawPromptFile(crlfFixture, name: "crlf", in: crlfDir)
+if case .success(let parsed) = PromptStore.read(url: crlfDir.appendingPathComponent("crlf.md")) {
+    check("CRLF file: frontmatter is recognized despite the trailing \\r on its delimiters",
+          parsed.frontmatter != nil)
+    check("CRLF file: description reads with no stray \\r left in it",
+          parsed.description == "CRLF prompt")
+    check("CRLF file: slots still reach through to the body", parsed.slots == ["notes"])
+
+    let rtDir = promptScratchDir()
+    try! PromptStore.write(prompt: parsed, to: rtDir)
+    check("CRLF file round-trips byte-for-byte, preserving its original line endings",
+          read(rtDir.appendingPathComponent("crlf.md").path) == crlfFixture)
+} else {
+    check("CRLF frontmatter reads", false)
+}
+
+// Editing a known field on a CRLF file must not flip its delimiters to LF.
+if case .success(var toEditCRLF) = PromptStore.read(url: crlfDir.appendingPathComponent("crlf.md")) {
+    toEditCRLF.frontmatter = toEditCRLF.frontmatter?.setting("description", to: "Updated CRLF description")
+    let crlfEditDir = promptScratchDir()
+    try! PromptStore.write(prompt: toEditCRLF, to: crlfEditDir)
+    let editedCRLF = read(crlfEditDir.appendingPathComponent("crlf.md").path)
+    // The closing delimiter's own trailing \r is what `delimiterUsesCRLF` restores;
+    // what precedes it is always exactly one "\n" (from `lines.joined(separator:
+    // "\n")`) regardless of whether the line just edited happens to carry its own
+    // trailing \r, so the assertion checks for "\n---\r\n" rather than "\r\n---\r\n".
+    check("editing a known field on a CRLF file keeps its delimiters CRLF",
+          editedCRLF.hasPrefix("---\r\n") && editedCRLF.contains("\n---\r\n"))
+    check("editing a known field on a CRLF file updates the value",
+          editedCRLF.contains("description: Updated CRLF description"))
+} else {
+    check("prompt reads for the CRLF field-edit test", false)
+}
+
 // --- Scan outcome distinctions ------------------------------------------------
 
 let missingPromptsDir = URL(fileURLWithPath: "\(sandbox)/prompts-missing-\(UUID().uuidString)")
@@ -3229,6 +3278,23 @@ check("every overwrite left its own backup file", backupsListing.count == 2)
 let strayTempFiles = try! FileManager.default.contentsOfDirectory(atPath: backupDir.path)
     .filter { $0.hasPrefix(".aliasbar-prompt-write-") }
 check("no temp files are left behind after a write", strayTempFiles.isEmpty)
+
+// A prior version that isn't valid UTF-8 must still be backed up. The old
+// implementation read the prior file via `String(contentsOf:encoding:.utf8)`, which
+// throws on invalid UTF-8 — silently skipping the backup and letting the overwrite
+// proceed with no safety copy at all.
+let nonUTF8Dir = promptScratchDir()
+let nonUTF8Bytes = Data([0x2D, 0x2D, 0x2D, 0x0A, 0x62, 0x6F, 0x64, 0x79, 0xFF, 0xFE, 0x0A])
+try! nonUTF8Bytes.write(to: nonUTF8Dir.appendingPathComponent("binary.md"))
+let nonUTF8Backup = try! PromptStore.write(
+    prompt: Prompt(name: "binary", frontmatter: nil, body: "replacement body\n"), to: nonUTF8Dir)
+check("overwriting a non-UTF-8 prompt file still produces a backup", nonUTF8Backup != nil)
+if let backupPath = nonUTF8Backup {
+    check("the backup preserves the original bytes exactly, not a lossy re-decode",
+          (try? Data(contentsOf: URL(fileURLWithPath: backupPath))) == nonUTF8Bytes)
+}
+check("the live file now holds the new content",
+      read(nonUTF8Dir.appendingPathComponent("binary.md").path) == "replacement body\n")
 
 // --- PromptUsageCounter --------------------------------------------------------
 
@@ -3547,6 +3613,21 @@ check("restoreUserContent refuses when something else wrote in between",
       !clobberRestoreAttempt)
 check("a refused restore leaves the intervening content alone",
       clobberFake.string(forType: .string) == "a second, unrelated copy")
+
+// Bounded self-write history: only the most recent writes are remembered per
+// pasteboard, so a long-running session (or a recycled `ObjectIdentifier`) can't
+// grow this bookkeeping without bound.
+let boundedFake = FakePasteboard()
+var boundedWriteCounts: [Int] = []
+for i in 0..<20 {
+    boundedWriteCounts.append(PasteboardBroker.write(transient: "item \(i)", to: boundedFake))
+}
+check("no more than the capped number of changeCounts are retained per pasteboard",
+      PasteboardBroker.recordedChangeCountForTesting(on: boundedFake) <= 8)
+check("a changeCount older than the cap is forgotten",
+      !PasteboardBroker.isSelfWrite(changeCount: boundedWriteCounts[0], on: boundedFake))
+check("the most recent changeCount is still recognized",
+      PasteboardBroker.isSelfWrite(changeCount: boundedWriteCounts.last!, on: boundedFake))
 
 // ---------------------------------------------------------------------------
 print("\n33. ClipboardMonitor: the 248-D gate proof")
@@ -4062,6 +4143,40 @@ let reencoded = try! JSONEncoder.aliasBarDocument.encode(decoded1)
 let decoded2 = try! JSONDecoder.aliasBarDocument.decode(SharedDocument.self, from: reencoded)
 check("unknown field survives a decode-encode-decode cycle", decoded2 == decoded1)
 
+// A whole-number unknown field above 2^53 (the largest integer a Double can
+// represent exactly) must not lose precision on round-trip. 9007199254740993 is
+// 2^53 + 1 — the smallest integer a Double cannot represent exactly.
+let bigIntJSON = """
+{"schema":1,"settings":{},"records":{},"futureFeature":{"bigId":9007199254740993}}
+"""
+let bigIntDecoded = try! JSONDecoder.aliasBarDocument.decode(SharedDocument.self, from: Data(bigIntJSON.utf8))
+if case .object(let nested)? = bigIntDecoded.unknownFields["futureFeature"],
+   case .int(let value)? = nested["bigId"] {
+    check("an integer above 2^53 decodes as .int, exactly, not a rounded Double",
+          value == 9_007_199_254_740_993)
+} else {
+    check("an integer above 2^53 decodes as .int, exactly, not a rounded Double", false)
+}
+let bigIntReencoded = try! JSONEncoder.aliasBarDocument.encode(bigIntDecoded)
+let bigIntReencodedText = String(data: bigIntReencoded, encoding: .utf8) ?? ""
+check("re-encoding writes the integer back as a whole number, not 9007199254740993.0",
+      bigIntReencodedText.contains("9007199254740993") && !bigIntReencodedText.contains("9007199254740993.0"))
+let bigIntRedecoded = try! JSONDecoder.aliasBarDocument.decode(SharedDocument.self, from: bigIntReencoded)
+check("the big integer survives a full decode-encode-decode cycle", bigIntRedecoded == bigIntDecoded)
+
+// A genuine fractional number must still decode as .number, not be misrouted to .int.
+let fractionalJSON = """
+{"schema":1,"settings":{},"records":{},"futureFeature":{"ratio":1.5}}
+"""
+let fractionalDecoded = try! JSONDecoder.aliasBarDocument.decode(SharedDocument.self,
+                                                                  from: Data(fractionalJSON.utf8))
+if case .object(let nested)? = fractionalDecoded.unknownFields["futureFeature"] {
+    check("a fractional value still decodes as .number, not misrouted to .int",
+          nested["ratio"] == .number(1.5))
+} else {
+    check("a fractional value still decodes as .number, not misrouted to .int", false)
+}
+
 // -- Store basics -------------------------------------------------------------
 let dir1 = sharedStoreDir()
 let docURL1 = URL(fileURLWithPath: "\(dir1)/settings.json")
@@ -4429,6 +4544,62 @@ expectThrow("uninstall also refuses a dot-dot traversal to the right filename") 
         return rPath
     }())
 }
+
+// --- A tampered registry cannot redirect compile outside commandsDir either -----
+// The same rule uninstall enforces above must hold for compile: a registry entry
+// whose recorded path isn't commandsDir/<name>.md must be refused, not silently
+// repointed. Without this, and with nothing yet on disk at the expected destination
+// (so the collision/hash-mismatch checks never fire), compile would happily write a
+// fresh file there and overwrite the registry entry to match — orphaning whatever
+// the old entry actually pointed to, with nothing left recording it ever existed.
+
+(cDir, rPath) = promptFixture()
+let escapeTargetPath = (rPath as NSString).deletingLastPathComponent + "/elsewhere.md"
+try! "content the registry claims to own, elsewhere\n".write(
+    toFile: escapeTargetPath, atomically: true, encoding: .utf8)
+let escapeTargetHash = SHA256Digest.hex("content the registry claims to own, elsewhere\n")
+try! """
+{"escape3": {"path": "\(escapeTargetPath)", "sha256": "\(escapeTargetHash)", "installedAt": "2026-07-26T00:00:00Z"}}
+""".write(toFile: rPath, atomically: true, encoding: .utf8)
+
+expectThrow("compile refuses a registry entry pointing outside commandsDir instead of silently repointing it") {
+    _ = try PromptCompiler.compile(name: "escape3", description: nil, body: "new content\n",
+                                   commandsDir: cDir, registryPath: rPath)
+}
+check("nothing was written to commandsDir for the escaping name",
+      !FileManager.default.fileExists(atPath: cDir + "/escape3.md"))
+check("the file the registry pointed at outside commandsDir is untouched",
+      read(escapeTargetPath) == "content the registry claims to own, elsewhere\n")
+if case .ok(let installed) = PromptCompiler.installedCommands(registryPath: rPath) {
+    check("the tampered registry entry is left exactly as it was, not silently repointed",
+          installed.first(where: { $0.name == "escape3" })?.path == escapeTargetPath)
+} else {
+    check("registry is still readable after the refused compile", false)
+}
+
+// --- Ownership hashes are computed over raw bytes, not a lossy UTF-8 decode ------
+// Decoding the on-disk file as a `String` before hashing replaces any invalid UTF-8
+// byte with U+FFFD, changing what actually gets hashed. That turns an untouched
+// non-UTF-8 file into a false hash mismatch, refusing an update that should succeed.
+
+(cDir, rPath) = promptFixture()
+let invalidUTF8Bytes = Data([0x68, 0x69, 0x0A, 0xFF, 0xFE, 0x0A]) // "hi\n" + two invalid UTF-8 bytes + "\n"
+let invalidUTF8Path = cDir + "/binaryish.md"
+try! invalidUTF8Bytes.write(to: URL(fileURLWithPath: invalidUTF8Path))
+let rawContentHash = SHA256Digest.hex(invalidUTF8Bytes)
+try! """
+{"binaryish": {"path": "\(invalidUTF8Path)", "sha256": "\(rawContentHash)", "installedAt": "2026-07-26T00:00:00Z"}}
+""".write(toFile: rPath, atomically: true, encoding: .utf8)
+
+let hashFixResult = try! PromptCompiler.compile(name: "binaryish", description: nil, body: "updated body\n",
+                                                commandsDir: cDir, registryPath: rPath)
+check("a registry hash computed over raw bytes matches, so a non-UTF-8 file updates instead of falsely refusing",
+      hashFixResult.backup != nil)
+if let backup = hashFixResult.backup {
+    check("the backup preserves the original non-UTF-8 bytes exactly",
+          (try? Data(contentsOf: URL(fileURLWithPath: backup))) == invalidUTF8Bytes)
+}
+check("the file now holds the updated content", read(cDir + "/binaryish.md").contains("updated body"))
 
 // --- Atomicity: no stray temp files survive a run ---------------------------
 
@@ -5070,6 +5241,599 @@ func testAppearanceRoundTripsThroughSettingValue() {
           destination.appearance == Appearance.ultramarine)
 }
 testAppearanceRoundTripsThroughSettingValue()
+
+print("\n38. Snippets: model, store, trigger matcher (PRE-251)")
+
+// -- Trigger validation -------------------------------------------------------
+
+// `Result<Void, TriggerError>` isn't Equatable (Void isn't Equatable), so these
+// extract each side rather than comparing the Result itself.
+func isValidTrigger(_ result: Result<Void, SnippetTriggerValidation.TriggerError>) -> Bool {
+    if case .success = result { return true }
+    return false
+}
+func triggerFailure(_ result: Result<Void, SnippetTriggerValidation.TriggerError>) -> SnippetTriggerValidation.TriggerError? {
+    if case .failure(let error) = result { return error }
+    return nil
+}
+
+func testTriggerValidationEdges() {
+    check("a 1-character trigger is too short",
+          triggerFailure(SnippetTriggerValidation.validate("a", against: [])) == .tooShort)
+    check("a 2-character trigger is the shortest allowed",
+          isValidTrigger(SnippetTriggerValidation.validate("ab", against: [])))
+    check("a 64-character trigger is the longest allowed",
+          isValidTrigger(SnippetTriggerValidation.validate(String(repeating: "a", count: 64), against: [])))
+    check("a 65-character trigger is too long",
+          triggerFailure(SnippetTriggerValidation.validate(String(repeating: "a", count: 65), against: [])) == .tooLong)
+    check("a space anywhere in the trigger is rejected",
+          triggerFailure(SnippetTriggerValidation.validate(";si g", against: [])) == .containsWhitespaceOrControl)
+    check("a tab is rejected",
+          triggerFailure(SnippetTriggerValidation.validate(";si\tg", against: [])) == .containsWhitespaceOrControl)
+    check("a newline is rejected",
+          triggerFailure(SnippetTriggerValidation.validate(";si\ng", against: [])) == .containsWhitespaceOrControl)
+    check("a control character (NUL) is rejected",
+          triggerFailure(SnippetTriggerValidation.validate(";si\u{0000}g", against: [])) == .containsWhitespaceOrControl)
+    check("the ';' prefix convention is not enforced — a bare word is a valid trigger",
+          isValidTrigger(SnippetTriggerValidation.validate("sig", against: [])))
+
+    let existing = [Snippet(trigger: ";sig", template: "Best, Ada")]
+    check("an exact duplicate trigger is rejected",
+          triggerFailure(SnippetTriggerValidation.validate(";sig", against: existing)) == .duplicate(existing: ";sig"))
+    check("a case-insensitive duplicate is rejected",
+          triggerFailure(SnippetTriggerValidation.validate(";SIG", against: existing)) == .duplicate(existing: ";sig"))
+    check("a genuinely different trigger is accepted",
+          isValidTrigger(SnippetTriggerValidation.validate(";addr", against: existing)))
+    check("excluding a snippet's own id lets it keep validating against itself unchanged",
+          isValidTrigger(SnippetTriggerValidation.validate(";sig", against: existing, excluding: existing[0].id)))
+    check("excluding a *different* id still catches the collision",
+          triggerFailure(SnippetTriggerValidation.validate(";sig", against: existing, excluding: UUID()))
+              == .duplicate(existing: ";sig"))
+}
+testTriggerValidationEdges()
+
+// -- Rendering: reuses PromptSlotParser, never a second parser ----------------
+
+func testSnippetRenderingUsesSharedGrammar() {
+    let repeated = Snippet(trigger: ";sig", template: "Hi {{name}}, it's {{name}} again.")
+    check("renderPlan de-duplicates a repeated hole, matching PromptSlotParser.slots",
+          SnippetRenderer.renderPlan(snippet: repeated) == ["name"])
+    check("render fills a repeated hole with one shared value",
+          SnippetRenderer.render(snippet: repeated, values: ["name": "Ada"])
+              == "Hi Ada, it's Ada again.")
+
+    let literalOnly = Snippet(trigger: ";addr", template: "221B Baker Street, London")
+    check("a template with no holes has an empty render plan",
+          SnippetRenderer.renderPlan(snippet: literalOnly).isEmpty)
+    check("literal text round-trips through render untouched",
+          SnippetRenderer.render(snippet: literalOnly, values: [:]) == "221B Baker Street, London")
+
+    let unfilled = Snippet(trigger: ";todo", template: "{{task}} due {{when}}")
+    check("renderPlan orders holes left to right",
+          SnippetRenderer.renderPlan(snippet: unfilled) == ["task", "when"])
+    check("an unfilled hole is left exactly as written, not blanked",
+          SnippetRenderer.render(snippet: unfilled, values: ["task": "ship"]) == "ship due {{when}}")
+
+    let singleBraceLiteral = Snippet(trigger: ";py", template: "print(f\"{value}\")")
+    check("single braces stay literal, matching PromptSlotParser's f-string carve-out",
+          SnippetRenderer.renderPlan(snippet: singleBraceLiteral).isEmpty)
+}
+testSnippetRenderingUsesSharedGrammar()
+
+// -- TriggerMatcher: incremental feed, longest match, reset, buffer bound -----
+
+func feedString(_ matcher: TriggerMatcher, _ text: String) -> TriggerMatcher.Match? {
+    var last: TriggerMatcher.Match?
+    for character in text {
+        last = matcher.feed(character)
+    }
+    return last
+}
+
+func testTriggerMatcherIncrementalFeed() {
+    let sig = Snippet(trigger: ";sig", template: "Best, Ada")
+    let matcher = TriggerMatcher(snippets: [sig])
+
+    check("feeding fewer characters than the trigger never matches",
+          feedString(matcher, ";si") == nil)
+    check("completing the trigger on the next character matches",
+          matcher.feed("g") == TriggerMatcher.Match(snippet: sig, triggerLength: 4))
+    check("the match consumes the buffer — retyping the closing char alone doesn't re-match",
+          matcher.feed("g") == nil)
+}
+testTriggerMatcherIncrementalFeed()
+
+func testTriggerMatcherLongestMatchWins() {
+    // Genuine overlap: "sig" is a *suffix* of ";sig", so the character that completes
+    // ";sig" also, in that same instant, completes "sig" — both triggers become true
+    // simultaneous matches on the very same `feed` call. This is the case
+    // "longest-match-wins" actually governs (a sequential prefix relationship, like
+    // ";s" typed en route to ";sig", isn't overlap at all: ";s" would already have
+    // completed — and cleared the buffer — two characters earlier, before "sig" was
+    // even fully typed, which is a separate, expected behavior covered elsewhere).
+    let short = Snippet(trigger: "sig", template: "short")
+    let long = Snippet(trigger: ";sig", template: "long")
+    let matcher = TriggerMatcher(snippets: [short, long])
+
+    check("neither trigger has completed partway through typing the longer one",
+          feedString(matcher, ";si") == nil)
+    check("when both complete on the same character, the longer trigger wins",
+          matcher.feed("g") == TriggerMatcher.Match(snippet: long, triggerLength: 4))
+}
+testTriggerMatcherLongestMatchWins()
+
+func testTriggerMatcherShorterTriggerFiresBeforeLongerOneCanForm() {
+    // The flip side of the overlap case above: when a shorter registered trigger is
+    // merely a *prefix* of a longer one — not a suffix relationship — the shorter
+    // one completes and fires (clearing the buffer) before the longer one can ever
+    // be finished. This is expected, not a bug: the matcher has no way to know more
+    // typing is coming, and documenting it here pins down the behavior rather than
+    // leaving it as an accidental side effect of the overlap test above.
+    let short = Snippet(trigger: ";s", template: "short")
+    let long = Snippet(trigger: ";sig", template: "long")
+    let matcher = TriggerMatcher(snippets: [short, long])
+
+    check("the shorter trigger fires as soon as it's complete",
+          feedString(matcher, ";s") == TriggerMatcher.Match(snippet: short, triggerLength: 2))
+    check("its match cleared the buffer, so finishing 'ig' afterward starts fresh, no match",
+          feedString(matcher, "ig") == nil)
+}
+testTriggerMatcherShorterTriggerFiresBeforeLongerOneCanForm()
+
+func testTriggerMatcherResetSemantics() {
+    let sig = Snippet(trigger: ";sig", template: "Best, Ada")
+    let matcher = TriggerMatcher(snippets: [sig])
+
+    _ = feedString(matcher, ";si")
+    matcher.reset()
+    check("reset discards a partial buffer — finishing the trigger afterward does not match",
+          matcher.feed("g") == nil)
+    check("a full retype after reset matches normally",
+          feedString(matcher, ";sig") == TriggerMatcher.Match(snippet: sig, triggerLength: 4))
+}
+testTriggerMatcherResetSemantics()
+
+func testTriggerMatcherBufferBoundedToLongestTrigger() {
+    let short = Snippet(trigger: ";hi", template: "hello")
+    let matcher = TriggerMatcher(snippets: [short])
+
+    // Feed far more filler than the longest trigger's length (3) before ever typing
+    // a real trigger — if the buffer weren't bounded, it would grow without limit
+    // over a long typing session.
+    _ = feedString(matcher, String(repeating: "x", count: 500))
+    check("long unrelated garbage does not itself cause a false match",
+          matcher.feed("z") == nil)
+    check("typing the real trigger right after a long unrelated run still matches",
+          feedString(matcher, ";hi") == TriggerMatcher.Match(snippet: short, triggerLength: 3))
+
+    // Grow the bound so a longer trigger can complete...
+    let long = Snippet(trigger: ";signature", template: "long one")
+    matcher.updateSnippets([short, long])
+    check("updateSnippets grows the bound so a longer trigger can complete",
+          feedString(matcher, ";signature") == TriggerMatcher.Match(snippet: long, triggerLength: 10))
+
+    // ...then remove it again: it must never match again no matter how completely
+    // it's retyped, and the remaining short trigger keeps working exactly as before.
+    matcher.updateSnippets([short])
+    check("a trigger removed by updateSnippets never matches again, even fully retyped",
+          feedString(matcher, ";signature") == nil)
+    check("a still-registered trigger keeps matching normally after the bound shrinks",
+          feedString(matcher, ";hi") == TriggerMatcher.Match(snippet: short, triggerLength: 3))
+}
+testTriggerMatcherBufferBoundedToLongestTrigger()
+
+func testTriggerMatcherUnicode() {
+    // A trigger built from a multi-scalar grapheme cluster (flag emoji = two Unicode
+    // scalars, one Character) must be matched and bounded in Characters, not scalars —
+    // otherwise this either never completes or the buffer bound miscounts its length.
+    let flagTrigger = Snippet(trigger: ";🇯🇵sig", template: "よろしくお願いします")
+    let matcher = TriggerMatcher(snippets: [flagTrigger])
+    check("a trigger containing a multi-scalar grapheme cluster matches as one unit",
+          feedString(matcher, ";🇯🇵sig") == TriggerMatcher.Match(snippet: flagTrigger, triggerLength: 5))
+
+    let accented = Snippet(trigger: ";café", template: "espresso")
+    let matcher2 = TriggerMatcher(snippets: [accented])
+    check("a composed-accent trigger matches",
+          feedString(matcher2, ";café") == TriggerMatcher.Match(snippet: accented, triggerLength: 5))
+}
+testTriggerMatcherUnicode()
+
+func testTriggerMatcherEmptySnippetListNeverMatches() {
+    let matcher = TriggerMatcher(snippets: [])
+    check("an empty snippet set never matches, no matter what's typed",
+          feedString(matcher, ";sig") == nil)
+}
+testTriggerMatcherEmptySnippetListNeverMatches()
+
+// -- SnippetStore: round trip, dual-write mirror, tombstone on delete --------
+
+func snippetStorePath() -> String {
+    caseIndex += 1
+    let dir = "\(sandbox)/snippet-store-case\(caseIndex)"
+    try! FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+    return "\(dir)/snippets.json"
+}
+
+func testSnippetStoreRoundTrip() {
+    let path = snippetStorePath()
+    let store = SnippetStore(localPath: path)
+    check("a fresh store with no file yet reads as empty", store.all().isEmpty)
+
+    let sig = Snippet(trigger: ";sig", template: "Best, {{name}}")
+    let addr = Snippet(trigger: ";addr", template: "221B Baker Street")
+    store.upsert(sig)
+    store.upsert(addr)
+
+    let all = store.all()
+    check("both saved snippets round-trip", all.count == 2)
+    check("the local file is readable JSON on disk",
+          FileManager.default.fileExists(atPath: path))
+
+    let reopened = SnippetStore(localPath: path)
+    check("a second store instance at the same path reads what the first wrote",
+          Set(reopened.all().map(\.trigger)) == Set([";sig", ";addr"]))
+
+    var edited = sig
+    edited.template = "Warmly, {{name}}"
+    edited.modifiedAt = Date(timeIntervalSince1970: 1) // whatever the caller passes in...
+    let stampedNow = Date(timeIntervalSince1970: 1_700_000_999)
+    let saved = store.upsert(edited, now: stampedNow)
+    check("upsert on an existing id replaces it rather than duplicating it",
+          store.all().count == 2)
+    check("the replaced snippet carries the new template",
+          store.all().first { $0.id == sig.id }?.template == "Warmly, {{name}}")
+    check("upsert stamps modifiedAt with the save time, overriding whatever the caller's copy carried",
+          saved.modifiedAt == stampedNow && store.all().first { $0.id == sig.id }?.modifiedAt == stampedNow)
+}
+testSnippetStoreRoundTrip()
+
+func testSnippetStoreCorruptFileToleration() {
+    let path = snippetStorePath()
+    try! "{ not valid json at all".write(toFile: path, atomically: true, encoding: .utf8)
+    let store = SnippetStore(localPath: path)
+    check("a corrupt snippets file reads as empty rather than crashing", store.all().isEmpty)
+}
+testSnippetStoreCorruptFileToleration()
+
+func testSnippetStoreDualWriteMirror() {
+    let path = snippetStorePath()
+    let docURL = URL(fileURLWithPath: "\(sharedStoreDir())/doc.json")
+    let sharedStore = SharedDocumentStore(url: docURL)
+    let store = SnippetStore(localPath: path, sharedStore: sharedStore)
+
+    let sig = Snippet(trigger: ";sig", template: "Best, Ada")
+    let now = Date(timeIntervalSince1970: 1_700_000_500)
+    let saved = store.upsert(sig, now: now)
+
+    // Compare against `saved`, not `sig`: upsert stamps its own modifiedAt (proven
+    // above in the round-trip test), so `sig`'s construction-time timestamp no
+    // longer matches what's actually on disk.
+    check("the snippet is saved locally", store.all().contains(saved))
+
+    guard case .success(let doc) = sharedStore.read() else {
+        check("the shared document is readable after a dual-write upsert", false)
+        return
+    }
+    let mirrored = doc.records[SnippetStore.RecordCollection.snippets]?.first { $0.id == sig.id.uuidString }
+    check("the upsert is mirrored into the shared document's snippets collection",
+          mirrored != nil)
+    check("the mirrored record is not a tombstone", mirrored?.deleted == false)
+
+    guard let payload = mirrored?.payload,
+          let decoded = try? JSONDecoder.aliasBarDocument.decode(Snippet.self, from: payload) else {
+        check("the mirrored record's payload decodes back to the saved snippet", false)
+        return
+    }
+    check("the mirrored payload matches what was saved locally, trigger and template",
+          decoded.trigger == sig.trigger && decoded.template == sig.template)
+}
+testSnippetStoreDualWriteMirror()
+
+func testSnippetStoreTombstoneOnDelete() {
+    let path = snippetStorePath()
+    let docURL = URL(fileURLWithPath: "\(sharedStoreDir())/doc.json")
+    let sharedStore = SharedDocumentStore(url: docURL)
+    let store = SnippetStore(localPath: path, sharedStore: sharedStore)
+
+    let sig = Snippet(trigger: ";sig", template: "Best, Ada")
+    store.upsert(sig, now: Date(timeIntervalSince1970: 1_700_000_500))
+    store.delete(id: sig.id, now: Date(timeIntervalSince1970: 1_700_000_600))
+
+    check("a deleted snippet is gone from the local file", store.all().isEmpty)
+
+    guard case .success(let doc) = sharedStore.read() else {
+        check("the shared document is readable after a dual-write delete", false)
+        return
+    }
+    let mirrored = doc.records[SnippetStore.RecordCollection.snippets]?.first { $0.id == sig.id.uuidString }
+    check("the delete is mirrored as a tombstone, not a removed record",
+          mirrored?.deleted == true)
+}
+testSnippetStoreTombstoneOnDelete()
+
+func testSnippetStoreDeleteWithoutSharedStoreNeverCrashes() {
+    let path = snippetStorePath()
+    let store = SnippetStore(localPath: path)
+    let sig = Snippet(trigger: ";sig", template: "Best, Ada")
+    store.upsert(sig)
+    store.delete(id: sig.id)
+    check("delete with no shared store configured just removes locally, no crash",
+          store.all().isEmpty)
+}
+testSnippetStoreDeleteWithoutSharedStoreNeverCrashes()
+
+// -- Snippet Codable round trip, independent of the store --------------------
+
+func testSnippetCodableRoundTrip() {
+    let sig = Snippet(trigger: ";sig", template: "Best, {{name}}",
+                      modifiedAt: Date(timeIntervalSince1970: 1_700_000_000))
+    let data = try! JSONEncoder.aliasBarDocument.encode(sig)
+    let decoded = try! JSONDecoder.aliasBarDocument.decode(Snippet.self, from: data)
+    check("Snippet round-trips through JSON with the same id, trigger, template, and modifiedAt",
+          decoded == sig)
+}
+testSnippetCodableRoundTrip()
+
+// -- SnippetPaths: environment override vs. default -------------------------
+
+func testSnippetPathsResolution() {
+    check("with no override, the local path defaults under the home directory",
+          SnippetPaths.resolveLocalPath(environmentOverride: nil, homeDirectory: "/Users/test")
+              == "/Users/test/.aliasbar/snippets.json")
+    check("an empty override string is treated as absent",
+          SnippetPaths.resolveLocalPath(environmentOverride: "", homeDirectory: "/Users/test")
+              == "/Users/test/.aliasbar/snippets.json")
+    // Not tested with a "~/..." override: expandingTildeInPath resolves against the
+    // real machine's home directory (NSHomeDirectory()), not the `homeDirectory`
+    // parameter passed in here — the same reason AppPaths.resolveRcPath's own tests
+    // only exercise it with already-absolute paths.
+    check("a non-empty override wins outright over the default",
+          SnippetPaths.resolveLocalPath(environmentOverride: "/tmp/fixture-snippets.json", homeDirectory: "/Users/test")
+              == "/tmp/fixture-snippets.json")
+}
+testSnippetPathsResolution()
+
+// ---------------------------------------------------------------------------
+print("\n38. SuggestionEngine: history-mined alias suggestions (PRE-264)")
+
+func suggestionIgnoresFixturePath() -> String {
+    caseIndex += 1
+    let dir = "\(sandbox)/suggestion-ignores-case\(caseIndex)"
+    try! FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+    return dir + "/suggestion-ignores.json"
+}
+
+// --- Path resolution ---------------------------------------------------------
+
+check("CorePaths resolves the suggestion-ignores path from an override",
+      CorePaths.resolveSuggestionIgnoresPath(environmentOverride: "/tmp/custom-ignores.json",
+                                             homeDirectory: "/Users/x")
+          == "/tmp/custom-ignores.json")
+check("CorePaths falls back to ~/.aliasbar/suggestion-ignores.json with no override",
+      CorePaths.resolveSuggestionIgnoresPath(environmentOverride: nil, homeDirectory: "/Users/x")
+          == "/Users/x/.aliasbar/suggestion-ignores.json")
+
+setenv("ALIASBAR_SUGGESTION_IGNORES", "/tmp/env-override-ignores.json", 1)
+check("AppPaths.suggestionIgnoresPath honors the environment override",
+      AppPaths.suggestionIgnoresPath == "/tmp/env-override-ignores.json")
+unsetenv("ALIASBAR_SUGGESTION_IGNORES")
+
+// --- Frequency normalization: whitespace variants of one command merge -------
+
+let freqFile = scratch("""
+git  status
+git\tstatus
+git status
+git status
+git status
+""")
+let normalizedFreq = HistoryScanner.normalizedCommands(path: freqFile)
+check("frequency normalization collapses whitespace variants into a single command",
+      normalizedFreq.count == 1 && normalizedFreq.first?.text == "git status",
+      normalizedFreq.map(\.text).joined(separator: " | "))
+check("frequency normalization sums counts across the collapsed variants",
+      normalizedFreq.first?.count == 5)
+
+// --- Secret-filtered commands are never suggested, even at high frequency ----
+
+let secretFile = scratch("""
+curl -H 'Authorization: Bearer abc.def.ghi' https://api.example.com
+curl -H 'Authorization: Bearer abc.def.ghi' https://api.example.com
+curl -H 'Authorization: Bearer abc.def.ghi' https://api.example.com
+curl -H 'Authorization: Bearer abc.def.ghi' https://api.example.com
+curl -H 'Authorization: Bearer abc.def.ghi' https://api.example.com
+curl -H 'Authorization: Bearer abc.def.ghi' https://api.example.com
+git status
+git status
+git status
+git status
+git status
+""")
+let secretSuggestions = SuggestionEngine.suggest(history: secretFile, existingEntries: [],
+                                                 ignores: [], pathLookup: { _ in false })
+check("a secret-shaped command is never suggested even repeated 6 times",
+      !secretSuggestions.contains { $0.command.contains("Authorization") },
+      secretSuggestions.map(\.command).joined(separator: " | "))
+check("an ordinary command alongside a filtered one is still suggested",
+      secretSuggestions.contains { $0.command == "git status" })
+
+// --- Coverage: an existing alias, exact or with a trailing-args suffix -------
+
+let coverageFile = scratch("""
+git status
+git status
+git status
+git status
+git status
+git log --oneline
+git log --oneline
+git log --oneline
+git log --oneline
+git log --oneline
+git log
+git log
+git log
+git log
+git log
+""")
+let coverageAliases = [
+    ShellEntry(kind: .alias, name: "gs", command: "git status", comment: nil,
+              sourceFile: "fixture-rc", line: 1, managed: true),
+    ShellEntry(kind: .alias, name: "gl", command: "git log", comment: nil,
+              sourceFile: "fixture-rc", line: 2, managed: true),
+]
+let coverageSuggestions = SuggestionEngine.suggest(history: coverageFile, existingEntries: coverageAliases,
+                                                   ignores: [], pathLookup: { _ in false })
+check("an exact alias command match is excluded from suggestions",
+      !coverageSuggestions.contains { $0.command == "git status" })
+check("an existing alias's command plus a trailing-args suffix is excluded",
+      !coverageSuggestions.contains { $0.command == "git log --oneline" })
+check("both covered commands leave nothing left to suggest",
+      coverageSuggestions.isEmpty, coverageSuggestions.map(\.command).joined(separator: " | "))
+
+// --- Ignore exclusion, and un-ignoring restores the candidate ----------------
+
+let ignoreCandidateFile = scratch("""
+docker ps -a
+docker ps -a
+docker ps -a
+docker ps -a
+docker ps -a
+""")
+let ignoredSuggestions = SuggestionEngine.suggest(history: ignoreCandidateFile, existingEntries: [],
+                                                  ignores: ["docker ps -a"], pathLookup: { _ in false })
+check("an ignored command is excluded from suggestions",
+      !ignoredSuggestions.contains { $0.command == "docker ps -a" })
+let unignoredSuggestions = SuggestionEngine.suggest(history: ignoreCandidateFile, existingEntries: [],
+                                                    ignores: [], pathLookup: { _ in false })
+check("the same command is offered again once it's no longer ignored",
+      unignoredSuggestions.contains { $0.command == "docker ps -a" })
+
+// --- Thresholds: single words and under-frequent commands are never offered --
+
+let thresholdFile = scratch("""
+status
+status
+status
+status
+status
+status
+git status
+git status
+git status
+git status
+""")
+let thresholdSuggestions = SuggestionEngine.suggest(history: thresholdFile, existingEntries: [],
+                                                    ignores: [], pathLookup: { _ in false })
+check("a single-word command is never suggested no matter how often it recurs",
+      !thresholdSuggestions.contains { $0.command == "status" })
+check("a multi-word command below the occurrence threshold is not suggested",
+      !thresholdSuggestions.contains { $0.command == "git status" })
+check("both thresholds together leave nothing to suggest",
+      thresholdSuggestions.isEmpty, thresholdSuggestions.map(\.command).joined(separator: " | "))
+
+// --- Name dedupe against existing names and PATH binaries --------------------
+
+let nameDedupPathDir = sandbox + "/suggestion-path-case1"
+try! FileManager.default.createDirectory(atPath: nameDedupPathDir, withIntermediateDirectories: true)
+let shadowedBinaryPath = nameDedupPathDir + "/gis"
+FileManager.default.createFile(atPath: shadowedBinaryPath, contents: Data())
+try! FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: shadowedBinaryPath)
+
+let nameDedupHistory = scratch("""
+git status
+git status
+git status
+git status
+git status
+git status
+""")
+let nameDedupExisting = [
+    ShellEntry(kind: .alias, name: "gs", command: "totally unrelated command", comment: nil,
+              sourceFile: "fixture-rc", line: 1, managed: true),
+]
+let nameDedupSuggestions = SuggestionEngine.suggest(
+    history: nameDedupHistory, existingEntries: nameDedupExisting, ignores: [],
+    pathLookup: { ConflictDetector.isShadowed($0, searchPaths: [nameDedupPathDir]) })
+check("exactly one suggestion comes back for the one repeated command",
+      nameDedupSuggestions.count == 1, "\(nameDedupSuggestions)")
+check("the proposed name skips a name an existing alias already uses ('gs')",
+      nameDedupSuggestions.first?.proposedName != "gs")
+check("the proposed name skips a name shadowed by a PATH binary ('gis')",
+      nameDedupSuggestions.first?.proposedName != "gis")
+check("the proposed name settles on the next candidate that's neither taken nor shadowed",
+      nameDedupSuggestions.first?.proposedName == "gist",
+      nameDedupSuggestions.first?.proposedName ?? "<none>")
+
+// The default (no-pathLookup-argument) overload wires PATH lookups through
+// ConflictDetector.isShadowed against the real machine's PATH. Exercised only
+// against a fixture with nothing anywhere near the occurrence threshold, so the
+// assertion never depends on what's actually installed.
+let convenienceFile = scratch("echo hi\n")
+check("the PATH-lookup convenience overload runs without a caller-supplied closure",
+      SuggestionEngine.suggest(history: convenienceFile, existingEntries: [], ignores: []).isEmpty)
+
+// --- Determinism, including name dedup *within* one suggest() call -----------
+
+let batchDedupHistory = scratch("""
+git status
+git status
+git status
+git status
+git status
+git status
+git stash
+git stash
+git stash
+git stash
+git stash
+""")
+let batchSuggestions = SuggestionEngine.suggest(history: batchDedupHistory, existingEntries: [],
+                                                ignores: [], pathLookup: { _ in false })
+check("two candidates that would naturally get the same first-choice name both appear",
+      batchSuggestions.count == 2, "\(batchSuggestions)")
+check("deterministic order: the higher-count candidate (git status, 6) comes first",
+      batchSuggestions.first?.command == "git status")
+check("the first candidate claims the name both would naturally propose first ('gs')",
+      batchSuggestions.first?.proposedName == "gs")
+check("the second candidate does not reuse the name just claimed within the same batch",
+      batchSuggestions.last?.proposedName != "gs" && batchSuggestions.last?.proposedName == "gis")
+
+let determinismRunA = SuggestionEngine.suggest(history: batchDedupHistory, existingEntries: [],
+                                               ignores: [], pathLookup: { _ in false })
+let determinismRunB = SuggestionEngine.suggest(history: batchDedupHistory, existingEntries: [],
+                                               ignores: [], pathLookup: { _ in false })
+check("suggest() is byte-for-byte deterministic across repeated runs on identical input",
+      determinismRunA == determinismRunB)
+
+// --- SuggestionIgnoreStore: round-trip, corrupt tolerance, atomicity ---------
+
+let ignoresPath1 = suggestionIgnoresFixturePath()
+check("a missing ignores file reads as empty", SuggestionIgnoreStore.all(path: ignoresPath1).isEmpty)
+
+SuggestionIgnoreStore.ignore("git status", path: ignoresPath1)
+SuggestionIgnoreStore.ignore("docker ps -a", path: ignoresPath1)
+check("ignoring two commands round-trips both",
+      SuggestionIgnoreStore.all(path: ignoresPath1) == Set(["git status", "docker ps -a"]))
+
+SuggestionIgnoreStore.unignore("git status", path: ignoresPath1)
+check("unignoring removes only that command",
+      SuggestionIgnoreStore.all(path: ignoresPath1) == Set(["docker ps -a"]))
+
+let ignoresPath2 = suggestionIgnoresFixturePath()
+try! "not json at all".write(toFile: ignoresPath2, atomically: true, encoding: .utf8)
+check("a corrupt ignores file reads as empty rather than crashing",
+      SuggestionIgnoreStore.all(path: ignoresPath2).isEmpty)
+SuggestionIgnoreStore.ignore("git status", path: ignoresPath2)
+check("writing after a corrupt read replaces the file with valid content",
+      SuggestionIgnoreStore.all(path: ignoresPath2) == Set(["git status"]))
+
+let ignoresPath3 = suggestionIgnoresFixturePath()
+SuggestionIgnoreStore.ignore("npm run build", path: ignoresPath3)
+let ignoresDir3 = (ignoresPath3 as NSString).deletingLastPathComponent
+let strayIgnoreTemps = (try? FileManager.default.contentsOfDirectory(atPath: ignoresDir3))?
+    .filter { $0.hasPrefix(".aliasbar-suggestion-ignores-") } ?? []
+check("no stray temp files survive an ignore-store write", strayIgnoreTemps.isEmpty)
 
 // ---------------------------------------------------------------------------
 print("\n38. AuditPrompt: ⌘I audit prompt generator (PRE-265)")
