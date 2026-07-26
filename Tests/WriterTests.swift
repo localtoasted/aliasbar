@@ -2905,6 +2905,416 @@ for forbiddenAPI in [
 }
 
 // ---------------------------------------------------------------------------
+print("\n31. Shortcut model + PromptStore (PRE-258)")
+
+func promptFixture(_ ls: [String]) -> String { ls.joined(separator: "\n") }
+
+var promptDirIndex = 0
+func promptScratchDir() -> URL {
+    promptDirIndex += 1
+    let dir = URL(fileURLWithPath: "\(sandbox)/prompts\(promptDirIndex)")
+    try! FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    return dir
+}
+
+@discardableResult
+func writeRawPromptFile(_ contents: String, name: String, in dir: URL) -> URL {
+    let url = dir.appendingPathComponent("\(name).md")
+    try! contents.write(to: url, atomically: true, encoding: .utf8)
+    return url
+}
+
+// --- Slot grammar -----------------------------------------------------------
+
+check("basic slot", PromptSlotParser.slots(in: "Hello {{name}}") == ["name"])
+check("repeated slot is one shared value",
+      PromptSlotParser.slots(in: "{{name}}, is that really {{name}}?") == ["name"])
+check("distinct slots keep first-seen order",
+      PromptSlotParser.slots(in: "{{b}} then {{a}} then {{b}} then {{c}}") == ["b", "a", "c"])
+check("single braces are always literal",
+      PromptSlotParser.slots(in: "an f-string: {value}").isEmpty)
+check("unclosed double brace is literal",
+      PromptSlotParser.slots(in: "{{name} and {{ other").isEmpty)
+check("Jinja-style spaced/dotted braces stay literal",
+      PromptSlotParser.slots(in: "{{ user.name }} said hi").isEmpty)
+check("JSON braces are literal",
+      PromptSlotParser.slots(in: #"{"key": "value", "nested": {"a": 1}}"#).isEmpty)
+check("empty slot name is literal", PromptSlotParser.slots(in: "{{}}").isEmpty)
+check("a name with an embedded space breaks the match",
+      PromptSlotParser.slots(in: "{{na me}}").isEmpty)
+check("hyphens, underscores, and digits are valid name characters",
+      PromptSlotParser.slots(in: "{{my-slot_1}}") == ["my-slot_1"])
+check("a slot name cannot contain non-ASCII characters",
+      PromptSlotParser.slots(in: "{{café}}").isEmpty)
+check("unicode prose around a slot does not disturb the scan",
+      PromptSlotParser.slots(in: "こんにちは {{name}} 世界 🎉") == ["name"])
+check("an extra leading brace still finds the slot inside",
+      PromptSlotParser.slots(in: "{{{name}}}") == ["name"])
+
+check("render substitutes every occurrence",
+      PromptSlotParser.render("{{name}}, meet {{name}}.", values: ["name": "Ada"])
+          == "Ada, meet Ada.")
+check("render leaves an unfilled slot exactly as written",
+      PromptSlotParser.render("{{a}} and {{b}}", values: ["a": "X"]) == "X and {{b}}")
+check("render is a no-op on a body with no slots",
+      PromptSlotParser.render("plain text, no slots here", values: ["name": "Ada"])
+          == "plain text, no slots here")
+check("render preserves literal spans exactly, including unicode",
+      PromptSlotParser.render("héllo {{name}} 🎉", values: ["name": "world"])
+          == "héllo world 🎉")
+
+// --- Frontmatter parse + the byte-faithful round trip ------------------------
+
+let fullFixture = promptFixture([
+    "---",
+    "schema: 1",
+    "description: Summarize the daily standup",
+    "delivery: claude-code, popover",
+    "edited: 2026-07-20T12:00:00Z",
+    "---",
+    "Summarize: {{notes}}",
+    "",
+])
+let fullFixtureDir = promptScratchDir()
+writeRawPromptFile(fullFixture, name: "standup", in: fullFixtureDir)
+let fullFixtureRead = PromptStore.read(url: fullFixtureDir.appendingPathComponent("standup.md"))
+if case .success(let parsed) = fullFixtureRead {
+    check("full frontmatter: description", parsed.description == "Summarize the daily standup")
+    check("full frontmatter: delivery", parsed.deliveryTargets == [.claudeCode, .popover])
+    check("full frontmatter: edited parses as a date", parsed.editedAt != nil)
+    check("full frontmatter: body excludes the frontmatter block",
+          parsed.body == "Summarize: {{notes}}\n")
+    check("full frontmatter: slots reach through to the body",
+          parsed.slots == ["notes"])
+
+    let rtDir = promptScratchDir()
+    try! PromptStore.write(prompt: parsed, to: rtDir)
+    check("full frontmatter round-trips byte-for-byte",
+          read(rtDir.appendingPathComponent("standup.md").path) == fullFixture)
+} else {
+    check("full frontmatter reads", false)
+}
+
+let minimalFixture = promptFixture(["---", "schema: 1", "---", "Just a body.", ""])
+let minimalDir = promptScratchDir()
+writeRawPromptFile(minimalFixture, name: "minimal", in: minimalDir)
+if case .success(let parsed) = PromptStore.read(url: minimalDir.appendingPathComponent("minimal.md")) {
+    check("minimal frontmatter: missing optionals read as nil/empty",
+          parsed.description == nil && parsed.deliveryTargets.isEmpty && parsed.editedAt == nil)
+    check("minimal frontmatter: body", parsed.body == "Just a body.\n")
+    let rtDir = promptScratchDir()
+    try! PromptStore.write(prompt: parsed, to: rtDir)
+    check("minimal frontmatter round-trips byte-for-byte",
+          read(rtDir.appendingPathComponent("minimal.md").path) == minimalFixture)
+} else {
+    check("minimal frontmatter reads", false)
+}
+
+let unknownKeyFixture = promptFixture([
+    "---",
+    "schema: 1",
+    "custom-field: some hand-added metadata",
+    "description: Has an unknown neighbor",
+    "---",
+    "Body text.",
+    "",
+])
+let unknownKeyDir = promptScratchDir()
+writeRawPromptFile(unknownKeyFixture, name: "unknown", in: unknownKeyDir)
+if case .success(let parsed) = PromptStore.read(url: unknownKeyDir.appendingPathComponent("unknown.md")) {
+    check("unknown key: known field still recognized",
+          parsed.description == "Has an unknown neighbor")
+    let rtDir = promptScratchDir()
+    try! PromptStore.write(prompt: parsed, to: rtDir)
+    check("unknown frontmatter key round-trips byte-for-byte, in its original position",
+          read(rtDir.appendingPathComponent("unknown.md").path) == unknownKeyFixture)
+} else {
+    check("unknown key frontmatter reads", false)
+}
+
+// The property the packet calls out hardest: a hand-written prompt full of JSON,
+// an f-string, and Jinja used as literal prose must come back byte-for-byte, with
+// no frontmatter silently added underneath it.
+let handWrittenFixture = promptFixture([
+    "You are a helpful assistant. Return JSON like:",
+    #"{"key": "value", "nested": {"a": 1}}"#,
+    "",
+    #"Python f-string example: f"Hello {name}, you have {count} items""#,
+    "",
+    "Jinja example used as literal prose: {{ user.name }} and {{ user.email }}",
+    "",
+    "A real slot for this prompt: {{topic}}",
+    "",
+])
+let handWrittenDir = promptScratchDir()
+writeRawPromptFile(handWrittenFixture, name: "handwritten", in: handWrittenDir)
+if case .success(let parsed) = PromptStore.read(url: handWrittenDir.appendingPathComponent("handwritten.md")) {
+    check("hand-written prompt has no frontmatter", parsed.frontmatter == nil)
+    check("hand-written prompt body is the entire file",
+          parsed.body == handWrittenFixture)
+    check("hand-written prompt: JSON/f-string/Jinja braces are not slots, only the real one is",
+          parsed.slots == ["topic"])
+    let rtDir = promptScratchDir()
+    try! PromptStore.write(prompt: parsed, to: rtDir)
+    check("hand-written prompt round-trips byte-for-byte with no frontmatter added",
+          read(rtDir.appendingPathComponent("handwritten.md").path) == handWrittenFixture)
+} else {
+    check("hand-written prompt reads", false)
+}
+
+let codeBlockFixture = promptFixture([
+    "Explain this function:",
+    "",
+    "```python",
+    "def greet(name):",
+    "    return f\"Hello, {name}!\"",
+    "```",
+    "",
+    "Then answer: {{question}}",
+    "",
+])
+let codeBlockDir = promptScratchDir()
+writeRawPromptFile(codeBlockFixture, name: "codeblock", in: codeBlockDir)
+if case .success(let parsed) = PromptStore.read(url: codeBlockDir.appendingPathComponent("codeblock.md")) {
+    check("prompt with a fenced code block keeps its braces literal",
+          parsed.slots == ["question"])
+    let rtDir = promptScratchDir()
+    try! PromptStore.write(prompt: parsed, to: rtDir)
+    check("fenced-code-block prompt round-trips byte-for-byte",
+          read(rtDir.appendingPathComponent("codeblock.md").path) == codeBlockFixture)
+} else {
+    check("code block prompt reads", false)
+}
+
+// A hand-written file that opens with a Markdown rule and never declares a schema
+// must never be mistaken for frontmatter, however `---`-shaped it looks.
+let decorativeFixture = promptFixture([
+    "---",
+    "This is not frontmatter, just a horizontal rule as prose.",
+    "---",
+    "",
+    "Rest of the body.",
+    "",
+])
+let decorativeDir = promptScratchDir()
+writeRawPromptFile(decorativeFixture, name: "decorative", in: decorativeDir)
+if case .success(let parsed) = PromptStore.read(url: decorativeDir.appendingPathComponent("decorative.md")) {
+    check("a `---` block with no schema is not treated as frontmatter",
+          parsed.frontmatter == nil)
+    check("its body is the entire original file",
+          parsed.body == decorativeFixture)
+} else {
+    check("decorative-rule prompt reads", false)
+}
+
+let unclosedFixture = promptFixture([
+    "---", "schema: 1", "Some prose that never closes the block.", "",
+])
+let unclosedDir = promptScratchDir()
+writeRawPromptFile(unclosedFixture, name: "unclosed", in: unclosedDir)
+if case .success(let parsed) = PromptStore.read(url: unclosedDir.appendingPathComponent("unclosed.md")) {
+    check("a frontmatter block with no closing delimiter is not frontmatter at all",
+          parsed.frontmatter == nil && parsed.body == unclosedFixture)
+} else {
+    check("unclosed frontmatter prompt reads", false)
+}
+
+// Editing one known field through the typed API preserves the unknown neighbor and
+// leaves the body untouched — "preserving unknown frontmatter" in practice.
+if case .success(var toEdit) = PromptStore.read(url: unknownKeyDir.appendingPathComponent("unknown.md")) {
+    toEdit.frontmatter = toEdit.frontmatter?.setting("description", to: "Updated description")
+    let editDir = promptScratchDir()
+    try! PromptStore.write(prompt: toEdit, to: editDir)
+    let editedContent = read(editDir.appendingPathComponent("unknown.md").path)
+    check("editing a known field updates it", editedContent.contains("description: Updated description"))
+    check("editing a known field preserves the unknown neighbor",
+          editedContent.contains("custom-field: some hand-added metadata"))
+    check("editing a known field leaves the body untouched", editedContent.hasSuffix("Body text.\n"))
+} else {
+    check("prompt reads for the field-edit test", false)
+}
+
+// --- Scan outcome distinctions ------------------------------------------------
+
+let missingPromptsDir = URL(fileURLWithPath: "\(sandbox)/prompts-missing-\(UUID().uuidString)")
+let missingScan = PromptStore.scan(directory: missingPromptsDir)
+check("scan of a missing directory is ok and empty, not unreadable",
+      missingScan.prompts.isEmpty && missingScan.errorMessage == nil)
+
+let emptyPromptsDir = promptScratchDir()
+let emptyScan = PromptStore.scan(directory: emptyPromptsDir)
+check("scan of an empty existing directory is ok and empty",
+      emptyScan.prompts.isEmpty && emptyScan.errorMessage == nil)
+
+let populatedDir = promptScratchDir()
+writeRawPromptFile(promptFixture(["Body one.", ""]), name: "beta", in: populatedDir)
+writeRawPromptFile(promptFixture(["Body two.", ""]), name: "alpha", in: populatedDir)
+try! FileManager.default.createDirectory(at: populatedDir.appendingPathComponent(".backups"),
+                                         withIntermediateDirectories: true)
+let populatedScan = PromptStore.scan(directory: populatedDir)
+check("scan finds every .md file, sorted by name, and skips .backups",
+      populatedScan.prompts.map(\.name) == ["alpha", "beta"])
+
+let promptsPathIsAFile = URL(fileURLWithPath: "\(sandbox)/prompts-as-file-\(UUID().uuidString)")
+try! "not a directory".write(to: promptsPathIsAFile, atomically: true, encoding: .utf8)
+let fileScan = PromptStore.scan(directory: promptsPathIsAFile)
+if case .unreadable = fileScan {
+    check("scan of a path that is a file, not a directory, is unreadable", true)
+} else {
+    check("scan of a path that is a file, not a directory, is unreadable", false)
+}
+
+// --- Name validation + case-collision refusal ---------------------------------
+
+check("valid prompt name", PromptStore.isValidName("daily-standup_v2"))
+check("a name with a space is invalid", !PromptStore.isValidName("daily standup"))
+check("an empty name is invalid", !PromptStore.isValidName(""))
+check("a name with a dot is invalid", !PromptStore.isValidName("daily.standup"))
+
+let collisionDir = promptScratchDir()
+try! PromptStore.write(prompt: Prompt(name: "Report", frontmatter: nil, body: "Body."),
+                       to: collisionDir)
+do {
+    try PromptStore.write(prompt: Prompt(name: "report", frontmatter: nil, body: "Other body."),
+                          to: collisionDir)
+    check("a name differing only by case is refused", false)
+} catch PromptStore.WriteError.caseCollision {
+    check("a name differing only by case is refused", true)
+} catch {
+    check("a name differing only by case is refused", false, "\(error)")
+}
+do {
+    try PromptStore.write(prompt: Prompt(name: "Report", frontmatter: nil, body: "Updated body."),
+                          to: collisionDir)
+    check("an exact same-case name is a normal overwrite, not a collision", true)
+} catch {
+    check("an exact same-case name is a normal overwrite, not a collision", false, "\(error)")
+}
+do {
+    try PromptStore.write(prompt: Prompt(name: "bad name", frontmatter: nil, body: "x"),
+                          to: collisionDir)
+    check("an invalid name is refused at write time", false)
+} catch PromptStore.WriteError.invalidName {
+    check("an invalid name is refused at write time", true)
+} catch {
+    check("an invalid name is refused at write time", false, "\(error)")
+}
+
+// --- Write: backup + atomicity -------------------------------------------------
+
+let backupDir = promptScratchDir()
+let firstVersion = Prompt(name: "note", frontmatter: nil, body: "Version one.")
+let firstWriteBackup = try! PromptStore.write(prompt: firstVersion, to: backupDir)
+check("writing a brand-new prompt has nothing to back up", firstWriteBackup == nil)
+
+let secondVersion = Prompt(name: "note", frontmatter: nil, body: "Version two.")
+let secondWriteBackup = try! PromptStore.write(prompt: secondVersion, to: backupDir)
+check("overwriting an existing prompt produces a backup path", secondWriteBackup != nil)
+if let backupPath = secondWriteBackup {
+    check("the backup lives under .backups", backupPath.contains("/.backups/"))
+    check("the backup captured the prior version, not the new one",
+          read(backupPath) == "Version one.")
+}
+check("the live file holds the newest content",
+      read(backupDir.appendingPathComponent("note.md").path) == "Version two.")
+
+let thirdVersion = Prompt(name: "note", frontmatter: nil, body: "Version three.")
+let thirdWriteBackup = try! PromptStore.write(prompt: thirdVersion, to: backupDir)
+check("two overwrites in immediate succession still produce two distinct backups",
+      thirdWriteBackup != nil && thirdWriteBackup != secondWriteBackup)
+let backupsListing = try! FileManager.default.contentsOfDirectory(
+    atPath: backupDir.appendingPathComponent(".backups").path)
+check("every overwrite left its own backup file", backupsListing.count == 2)
+
+let strayTempFiles = try! FileManager.default.contentsOfDirectory(atPath: backupDir.path)
+    .filter { $0.hasPrefix(".aliasbar-prompt-write-") }
+check("no temp files are left behind after a write", strayTempFiles.isEmpty)
+
+// --- PromptUsageCounter --------------------------------------------------------
+
+let usagePath = "\(sandbox)/usage-\(UUID().uuidString).json"
+check("usage reads as empty when the file doesn't exist yet",
+      PromptUsageCounter.all(path: usagePath).isEmpty)
+
+let usageFixedNow = Date(timeIntervalSince1970: 1_700_000_000)
+let firstUse = PromptUsageCounter.recordUse(of: "standup", path: usagePath, now: usageFixedNow)
+check("a prompt's first recorded use has count 1", firstUse.count == 1)
+let secondUse = PromptUsageCounter.recordUse(of: "standup", path: usagePath,
+                                             now: usageFixedNow.addingTimeInterval(60))
+check("a second use bumps the count", secondUse.count == 2)
+check("a second use updates lastUsed", secondUse.lastUsed == usageFixedNow.addingTimeInterval(60))
+check("usage persists across reads",
+      PromptUsageCounter.all(path: usagePath)["standup"]?.count == 2)
+
+try! "not valid json {{{".write(toFile: usagePath, atomically: true, encoding: .utf8)
+check("a corrupt usage file reads as empty rather than crashing",
+      PromptUsageCounter.all(path: usagePath).isEmpty)
+let recoveredUse = PromptUsageCounter.recordUse(of: "recovered", path: usagePath)
+check("usage recovers and starts fresh after corruption", recoveredUse.count == 1)
+check("the recovered usage file is valid JSON again",
+      PromptUsageCounter.all(path: usagePath)["recovered"]?.count == 1)
+
+// --- Shortcut adapters ----------------------------------------------------------
+
+let shortcutFixtureFile = scratch("# fixture\n")
+let shellEntryForShortcut = ShellEntry(kind: .alias, name: "gst", command: "git status",
+                                       comment: "status shortcut",
+                                       sourceFile: shortcutFixtureFile, line: 3, managed: true)
+let aliasShortcut = Shortcut(entry: shellEntryForShortcut)
+check("Shortcut(entry:) carries the alias kind", aliasShortcut.kind == .alias)
+check("Shortcut(entry:) carries name, body, and comment",
+      aliasShortcut.name == "gst" && aliasShortcut.body == "git status"
+          && aliasShortcut.comment == "status shortcut")
+check("Shortcut(entry:) carries shell source metadata",
+      aliasShortcut.sourceFile == shellEntryForShortcut.sourceFile
+          && aliasShortcut.line == 3 && aliasShortcut.managed)
+check("Shortcut(entry:) leaves every prompt-only field empty",
+      aliasShortcut.slots.isEmpty && aliasShortcut.description == nil
+          && aliasShortcut.deliveryTargets.isEmpty && aliasShortcut.editedAt == nil)
+
+let functionEntryForShortcut = ShellEntry(kind: .function, name: "mkcd",
+                                          command: "mkdir -p \"$1\" && cd \"$1\"",
+                                          comment: nil, sourceFile: shortcutFixtureFile,
+                                          line: 10, managed: false)
+check("Shortcut(entry:) maps the function kind",
+      Shortcut(entry: functionEntryForShortcut).kind == .function)
+
+let promptForShortcut = Prompt(
+    name: "standup",
+    frontmatter: PromptFrontmatter.empty()
+        .setting("description", to: "Summarize the standup")
+        .setting("delivery", to: PromptFrontmatter.deliveryValue([.claudeCode])),
+    body: "Notes: {{notes}}"
+)
+let promptShortcut = Shortcut(prompt: promptForShortcut)
+check("Shortcut(prompt:) carries the prompt kind", promptShortcut.kind == .prompt)
+check("Shortcut(prompt:) carries name and body",
+      promptShortcut.name == "standup" && promptShortcut.body == "Notes: {{notes}}")
+check("Shortcut(prompt:) surfaces slots parsed from the body",
+      promptShortcut.slots == ["notes"])
+check("Shortcut(prompt:) surfaces description and delivery targets",
+      promptShortcut.description == "Summarize the standup"
+          && promptShortcut.deliveryTargets == [.claudeCode])
+check("Shortcut(prompt:) leaves every shell-only field empty",
+      promptShortcut.sourceFile == nil && promptShortcut.line == nil && !promptShortcut.managed)
+
+let collidingNameEntry = ShellEntry(kind: .alias, name: "standup", command: "x", comment: nil,
+                                    sourceFile: shortcutFixtureFile, line: 1, managed: false)
+check("an alias and a prompt that happen to share a name still get distinct ids",
+      Shortcut(entry: collidingNameEntry).id != promptShortcut.id)
+
+// --- Foundation core seam: the new files stay dependency-free, like Model.swift ---
+
+let shortcutSource = read(projectRoot.appendingPathComponent("Sources/Shortcut.swift").path)
+let promptStoreSource = read(projectRoot.appendingPathComponent("Sources/PromptStore.swift").path)
+check("Shortcut.swift and PromptStore.swift are readable",
+      shortcutSource != "<unreadable>" && promptStoreSource != "<unreadable>")
+for forbidden in ["import SwiftUI", "import AppKit", "UserDefaults", "AppSettings"] {
+    check("Shortcut.swift excludes \(forbidden)", !shortcutSource.contains(forbidden))
+    check("PromptStore.swift excludes \(forbidden)", !promptStoreSource.contains(forbidden))
+}
+
+// ---------------------------------------------------------------------------
 print("\n31. Clipboard capture: quarantine routing and store")
 
 let quarantineBase = Date(timeIntervalSince1970: 1_700_000_000)
@@ -3578,6 +3988,541 @@ for sample in malformedClipSamples {
 let hugeGarbage = String(repeating: "x", count: 200_000) + "!!!not-base64-or-anything"
 check("a large, non-matching input completes without crashing",
       ClipTransformer.actions(for: hugeGarbage, now: transformNow, timeZone: transformTZ).isEmpty)
+print("\n31. SharedDocumentStore")
+
+func sharedStoreDir() -> String {
+    caseIndex += 1
+    let dir = "\(sandbox)/shared-store-case\(caseIndex)"
+    try! FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+    return dir
+}
+
+struct DummyPreset: SharedRecordConvertible, Equatable {
+    var name: String
+    var body: String
+}
+
+// -- SHA-256, cross-checked against the system implementation ---------------
+func systemSHA256(_ data: Data) -> String? {
+    let task = Process()
+    task.executableURL = URL(fileURLWithPath: "/usr/bin/shasum")
+    task.arguments = ["-a", "256"]
+    let inPipe = Pipe()
+    let outPipe = Pipe()
+    task.standardInput = inPipe
+    task.standardOutput = outPipe
+    task.standardError = Pipe()
+    guard (try? task.run()) != nil else { return nil }
+    inPipe.fileHandleForWriting.write(data)
+    inPipe.fileHandleForWriting.closeFile()
+    let out = outPipe.fileHandleForReading.readDataToEndOfFile()
+    task.waitUntilExit()
+    guard let text = String(data: out, encoding: .utf8) else { return nil }
+    return text.split(separator: " ").first.map(String.init)
+}
+
+for input in ["", "abc", "The quick brown fox jumps over the lazy dog",
+              String(repeating: "x", count: 5000)] {
+    let data = Data(input.utf8)
+    let ours = SHA256Digest.hexString(data)
+    if let system = systemSHA256(data) {
+        check("SHA-256 matches system shasum (\(data.count) bytes)", ours == system,
+              "ours=\(ours) system=\(system)")
+    } else {
+        check("shasum available to cross-check", false, "could not run /usr/bin/shasum")
+    }
+}
+check("known vector: SHA-256(\"\")",
+      SHA256Digest.hexString(Data())
+          == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+check("known vector: SHA-256(\"abc\")",
+      SHA256Digest.hexString(Data("abc".utf8))
+          == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+
+// -- Round trip and unknown-field passthrough --------------------------------
+let t0 = Date(timeIntervalSince1970: 1_700_000_000)
+var doc = SharedDocument()
+doc.settings["theme"] = SettingRecord(value: .string("dark"), modifiedAt: t0)
+doc.settings["fontSize"] = SettingRecord(value: .number(13), modifiedAt: t0)
+doc.settings["betaFeatures"] = SettingRecord(value: .bool(true), modifiedAt: t0)
+let presetPayload = try! JSONEncoder.aliasBarDocument.encode(DummyPreset(name: "p1", body: "echo hi"))
+doc.records["presets"] = [SyncedRecord(id: "p1", modifiedAt: t0, deleted: false, payload: presetPayload)]
+
+let docEncoded = try! JSONEncoder.aliasBarDocument.encode(doc)
+let docDecoded = try! JSONDecoder.aliasBarDocument.decode(SharedDocument.self, from: docEncoded)
+check("round trip preserves settings and records", docDecoded == doc)
+
+let unknownFieldJSON = """
+{"schema":1,"settings":{},"records":{},"futureFeature":{"nested":[1,2,"three",null,true]}}
+"""
+let decoded1 = try! JSONDecoder.aliasBarDocument.decode(SharedDocument.self,
+                                                         from: Data(unknownFieldJSON.utf8))
+check("unknown top-level field is captured", decoded1.unknownFields["futureFeature"] != nil)
+let reencoded = try! JSONEncoder.aliasBarDocument.encode(decoded1)
+let decoded2 = try! JSONDecoder.aliasBarDocument.decode(SharedDocument.self, from: reencoded)
+check("unknown field survives a decode-encode-decode cycle", decoded2 == decoded1)
+
+// -- Store basics -------------------------------------------------------------
+let dir1 = sharedStoreDir()
+let docURL1 = URL(fileURLWithPath: "\(dir1)/settings.json")
+let store1 = SharedDocumentStore(url: docURL1)
+
+switch store1.read() {
+case .success(let d): check("missing file reads as a fresh empty document", d == SharedDocument())
+case .failure: check("missing file reads as a fresh empty document", false)
+}
+
+let afterUpsert = try! store1.upsert(DummyPreset(name: "p1", body: "ls -la"),
+                                     id: "p1", in: "presets", modifiedAt: t0)
+check("upsert returns the merged document", afterUpsert.records["presets"]?.count == 1)
+switch store1.read() {
+case .success(let d):
+    check("upsert persisted to disk", d.records["presets"]?.first?.id == "p1")
+case .failure:
+    check("upsert persisted to disk", false)
+}
+
+_ = try! store1.setSetting(.string("dark"), forKey: "theme", modifiedAt: t0)
+switch store1.read() {
+case .success(let d): check("setting persisted", d.settings["theme"]?.value == .string("dark"))
+case .failure: check("setting persisted", false)
+}
+
+// -- Tombstones and last-writer-wins -----------------------------------------
+let tA = Date(timeIntervalSince1970: 1_700_000_100)
+let tB = tA.addingTimeInterval(10)
+
+let dir2 = sharedStoreDir()
+let store2 = SharedDocumentStore(url: URL(fileURLWithPath: "\(dir2)/doc.json"))
+_ = try! store2.upsert(DummyPreset(name: "a", body: "one"), id: "a", in: "presets", modifiedAt: tA)
+let afterDelete = try! store2.tombstone(id: "a", in: "presets", modifiedAt: tB)
+check("a newer tombstone beats an older live record",
+      afterDelete.records["presets"]?.first(where: { $0.id == "a" })?.deleted == true)
+
+// An older tombstone must not undo a newer live write.
+let dir3 = sharedStoreDir()
+let store3 = SharedDocumentStore(url: URL(fileURLWithPath: "\(dir3)/doc.json"))
+_ = try! store3.tombstone(id: "b", in: "presets", modifiedAt: tA)
+let afterRevive = try! store3.upsert(DummyPreset(name: "b", body: "two"), id: "b", in: "presets", modifiedAt: tB)
+check("a newer live write beats an older tombstone",
+      afterRevive.records["presets"]?.first(where: { $0.id == "b" })?.deleted == false)
+
+// -- Two-writer race: exact-timestamp tie between a tombstone and a live edit ---
+let dir4 = sharedStoreDir()
+let racePath4 = "\(dir4)/doc.json"
+let store4 = SharedDocumentStore(url: URL(fileURLWithPath: racePath4))
+_ = try! store4.upsert(DummyPreset(name: "c", body: "three"), id: "c", in: "presets", modifiedAt: tA)
+SharedDocumentStore.testRaceHook = {
+    // A second writer lands a live edit at the exact instant our tombstone commits.
+    let raw = try! Data(contentsOf: URL(fileURLWithPath: racePath4))
+    var current = try! JSONDecoder.aliasBarDocument.decode(SharedDocument.self, from: raw)
+    let payload = try! JSONEncoder.aliasBarDocument.encode(
+        DummyPreset(name: "c", body: "edited-concurrently"))
+    current.records["presets"] = [SyncedRecord(id: "c", modifiedAt: tA, deleted: false, payload: payload)]
+    try! JSONEncoder.aliasBarDocument.encode(current)
+        .write(to: URL(fileURLWithPath: racePath4), options: .atomic)
+}
+let afterTie = try! store4.tombstone(id: "c", in: "presets", modifiedAt: tA)
+check("an exact-timestamp tie between a live record and a tombstone favors the tombstone",
+      afterTie.records["presets"]?.first(where: { $0.id == "c" })?.deleted == true)
+
+// -- Two-writer race: an unrelated concurrent write must survive the retry -----
+let dir5 = sharedStoreDir()
+let racePath5 = "\(dir5)/doc.json"
+let store5 = SharedDocumentStore(url: URL(fileURLWithPath: racePath5))
+_ = try! store5.upsert(DummyPreset(name: "seed", body: "seed"), id: "seed", in: "presets", modifiedAt: tA)
+SharedDocumentStore.testRaceHook = {
+    let raw = try! Data(contentsOf: URL(fileURLWithPath: racePath5))
+    var current = try! JSONDecoder.aliasBarDocument.decode(SharedDocument.self, from: raw)
+    let payload = try! JSONEncoder.aliasBarDocument.encode(
+        DummyPreset(name: "other", body: "from another writer"))
+    current.records["presets", default: []]
+        .append(SyncedRecord(id: "other", modifiedAt: tB, deleted: false, payload: payload))
+    try! JSONEncoder.aliasBarDocument.encode(current)
+        .write(to: URL(fileURLWithPath: racePath5), options: .atomic)
+}
+let afterRace = try! store5.upsert(DummyPreset(name: "seed", body: "seed-updated"),
+                                    id: "seed", in: "presets", modifiedAt: tB)
+check("a concurrent unrelated write survives the retry",
+      afterRace.records["presets"]?.contains(where: { $0.id == "other" }) == true)
+check("our own write also landed",
+      afterRace.records["presets"]?.first(where: { $0.id == "seed" })?.deleted == false)
+switch store5.read() {
+case .success(let d):
+    check("both records are present on disk after the race",
+          Set((d.records["presets"] ?? []).map(\.id)) == Set(["seed", "other"]))
+case .failure:
+    check("both records are present on disk after the race", false)
+}
+
+// -- Corruption and schema refusal --------------------------------------------
+let dir6 = sharedStoreDir()
+let corruptPath = "\(dir6)/doc.json"
+let garbage = "{ this is not valid json"
+try! garbage.write(toFile: corruptPath, atomically: true, encoding: .utf8)
+let store6 = SharedDocumentStore(url: URL(fileURLWithPath: corruptPath))
+
+var corruptError: SharedDocumentStore.StoreError?
+do {
+    _ = try store6.upsert(DummyPreset(name: "x", body: "y"), id: "x", in: "presets", modifiedAt: tA)
+} catch let error as SharedDocumentStore.StoreError {
+    corruptError = error
+} catch {}
+
+if case .corrupt(let original, let copy, _) = corruptError {
+    check("corrupt document is refused with the right error", true)
+    check("original path reported matches", original == corruptPath)
+    check("original file is untouched", read(corruptPath) == garbage)
+    if let copy {
+        check("a conflict copy was written", FileManager.default.fileExists(atPath: copy))
+        check("the conflict copy preserves the bad bytes", read(copy) == garbage)
+    } else {
+        check("a conflict copy was written", false)
+    }
+} else {
+    check("corrupt document is refused with the right error", false, "\(String(describing: corruptError))")
+}
+
+let dir7 = sharedStoreDir()
+let futurePath = "\(dir7)/doc.json"
+let futureSchemaJSON = #"{"schema":999,"settings":{},"records":{}}"#
+try! futureSchemaJSON.write(toFile: futurePath, atomically: true, encoding: .utf8)
+let store7 = SharedDocumentStore(url: URL(fileURLWithPath: futurePath))
+
+var schemaError: SharedDocumentStore.StoreError?
+do {
+    _ = try store7.setSetting(.bool(true), forKey: "x", modifiedAt: tA)
+} catch let error as SharedDocumentStore.StoreError {
+    schemaError = error
+} catch {}
+
+if case .unknownSchema(let found, let original, let copy) = schemaError {
+    check("unknown schema is refused", found == 999)
+    check("original path reported matches", original == futurePath)
+    check("original file is untouched", read(futurePath) == futureSchemaJSON)
+    check("a conflict copy exists for the unknown-schema file",
+          copy.map { FileManager.default.fileExists(atPath: $0) } == true)
+} else {
+    check("unknown schema is refused", false, "\(String(describing: schemaError))")
+}
+
+// A bare read also refuses an unknown schema, but writes no conflict copy: nothing
+// was about to be written, so there is nothing at risk of being lost.
+switch store7.read() {
+case .failure(.unknownSchema(_, _, let copy)):
+    check("a bare read does not manufacture a conflict copy", copy == nil)
+default:
+    check("a bare read refuses the unknown schema too", false)
+}
+
+// -- Atomicity ------------------------------------------------------------------
+let dir8 = sharedStoreDir()
+let atomicPath = "\(dir8)/doc.json"
+let store8 = SharedDocumentStore(url: URL(fileURLWithPath: atomicPath))
+_ = try! store8.setSetting(.string("baseline"), forKey: "k", modifiedAt: tA)
+
+// A stray temp file left behind by a hypothetical crashed writer (temp write
+// succeeded, rename never ran) must not corrupt a later, unrelated write: the
+// target is only ever replaced by `rename`, never assembled from a temp sibling.
+let strayTemp = "\(dir8)/.aliasbar-shared-\(UUID().uuidString)"
+try! "not a real document".write(toFile: strayTemp, atomically: true, encoding: .utf8)
+_ = try! store8.setSetting(.string("next"), forKey: "k", modifiedAt: tB)
+let afterStray = read(atomicPath)
+check("a stray leftover temp file does not leak into the committed document",
+      !afterStray.contains("not a real document"))
+check("the real write still landed", afterStray.contains("\"next\""))
+try? FileManager.default.removeItem(atPath: strayTemp)
+
+// Making the directory unwritable forces the temp-file write itself to fail, before
+// any rename is attempted. The target must be provably unaffected, byte for byte.
+let beforeFailedAttempt = try! Data(contentsOf: URL(fileURLWithPath: atomicPath))
+try! FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: dir8)
+var writeFailed = false
+do {
+    _ = try store8.setSetting(.string("should-not-land"), forKey: "k",
+                              modifiedAt: tA.addingTimeInterval(20))
+} catch {
+    writeFailed = true
+}
+try! FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: dir8)
+check("a write that cannot create its temp file throws", writeFailed)
+let afterFailedAttempt = try! Data(contentsOf: URL(fileURLWithPath: atomicPath))
+check("the target file is byte-for-byte unchanged after a failed write",
+      afterFailedAttempt == beforeFailedAttempt)
+check("the target file does not contain the failed write's value",
+      !read(atomicPath).contains("should-not-land"))
+
+// -- Watcher ----------------------------------------------------------------------
+let dir9 = sharedStoreDir()
+let watchedPath = "\(dir9)/doc.json"
+let store9 = SharedDocumentStore(url: URL(fileURLWithPath: watchedPath))
+_ = try! store9.setSetting(.string("v1"), forKey: "k", modifiedAt: tA)
+
+let watcherQueue = DispatchQueue(label: "aliasbar-watcher-test")
+let fired = DispatchSemaphore(value: 0)
+var reloadResult: Result<SharedDocument, SharedDocumentStore.StoreError>?
+let watcher = SharedDocumentWatcher(url: URL(fileURLWithPath: watchedPath), queue: watcherQueue,
+                                    debounceInterval: 0.3) { result in
+    reloadResult = result
+    fired.signal()
+}
+try! watcher.start()
+Thread.sleep(forTimeInterval: 0.2) // let the DispatchSource install before acting
+
+// Simulate another process (an iCloud sync, a second Mac) replacing the file
+// wholesale, the same way this store's own atomic write does.
+let replacement = try! JSONEncoder.aliasBarDocument.encode(
+    SharedDocument(settings: ["k": SettingRecord(value: .string("from-elsewhere"), modifiedAt: tB)]))
+let replacementTemp = "\(dir9)/.replacement-\(UUID().uuidString)"
+try! replacement.write(to: URL(fileURLWithPath: replacementTemp))
+_ = rename(replacementTemp, watchedPath)
+
+let waited = fired.wait(timeout: .now() + 3.0)
+watcher.stop()
+check("the watcher fires after a file replace", waited == .success)
+if case .success(let watchedDoc)? = reloadResult {
+    check("the watcher's reload sees the replaced content",
+          watchedDoc.settings["k"]?.value == .string("from-elsewhere"))
+} else {
+    check("the watcher's reload sees the replaced content", false, "\(String(describing: reloadResult))")
+}
+
+// ---------------------------------------------------------------------------
+print("\n31. PromptCompiler: siloed prompt installer")
+
+// Each fixture gets its own commandsDir and registry, both under the shared sandbox,
+// so no case can observe another's files.
+func promptFixture() -> (commandsDir: String, registryPath: String) {
+    caseIndex += 1
+    let base = "\(sandbox)/prompt-case\(caseIndex)"
+    let commandsDir = "\(base)/commands"
+    let registryPath = "\(base)/.aliasbar/compiled.json"
+    try! FileManager.default.createDirectory(atPath: commandsDir, withIntermediateDirectories: true)
+    try! FileManager.default.createDirectory(
+        atPath: (registryPath as NSString).deletingLastPathComponent,
+        withIntermediateDirectories: true)
+    return (commandsDir, registryPath)
+}
+
+// --- Fresh install, with and without a description -------------------------
+
+var (cDir, rPath) = promptFixture()
+let result1 = try! PromptCompiler.compile(name: "standup", description: "Daily standup summary",
+                                          body: "Summarize what shipped yesterday.\n",
+                                          commandsDir: cDir, registryPath: rPath)
+let written1 = read(result1.path)
+check("destination is commandsDir/name.md", result1.path == cDir + "/standup.md")
+check("frontmatter present", written1.hasPrefix("---\ndescription: Daily standup summary\n---\n"))
+check("provenance comment present", written1.contains("<!-- managed by AliasBar -->"))
+check("body present verbatim", written1.contains("Summarize what shipped yesterday."))
+check("no backup on a fresh install", result1.backup == nil)
+
+if case .ok(let installed) = PromptCompiler.installedCommands(registryPath: rPath) {
+    check("registry lists the new command", installed.contains { $0.name == "standup" })
+    check("registry hash matches the file actually on disk",
+          installed.first(where: { $0.name == "standup" })?.sha256 == SHA256Digest.hex(written1))
+} else {
+    check("registry is readable right after an install", false)
+}
+
+(cDir, rPath) = promptFixture()
+let result2 = try! PromptCompiler.compile(name: "nofm", description: nil, body: "just the body\n",
+                                          commandsDir: cDir, registryPath: rPath)
+let written2 = read(result2.path)
+check("no frontmatter block when description is nil", !written2.contains("---"))
+check("provenance comment still present without frontmatter",
+      written2.hasPrefix("<!-- managed by AliasBar -->\n"))
+
+// --- Update in place produces a backup --------------------------------------
+
+(cDir, rPath) = promptFixture()
+_ = try! PromptCompiler.compile(name: "iter", description: "v1", body: "first version\n",
+                                commandsDir: cDir, registryPath: rPath)
+let firstContent = read(cDir + "/iter.md")
+let result3 = try! PromptCompiler.compile(name: "iter", description: "v2", body: "second version\n",
+                                          commandsDir: cDir, registryPath: rPath)
+check("updating a command AliasBar owns produces a backup", result3.backup != nil)
+if let backup = result3.backup {
+    check("the backup holds exactly the prior content", read(backup) == firstContent)
+    check("the backup lives under .backups/commands next to the registry",
+          backup.contains("/.backups/commands/iter-"))
+}
+check("the file now holds the new content", read(cDir + "/iter.md").contains("second version"))
+
+// --- Refusals: the two ways an overwrite can be unsafe ----------------------
+
+(cDir, rPath) = promptFixture()
+try! "# a command I wrote myself\n".write(toFile: cDir + "/mine.md", atomically: true, encoding: .utf8)
+expectThrow("refuses to overwrite a pre-existing file the registry never recorded") {
+    _ = try PromptCompiler.compile(name: "mine", description: nil, body: "replacement\n",
+                                   commandsDir: cDir, registryPath: rPath)
+}
+check("the user's unregistered file is untouched",
+      read(cDir + "/mine.md") == "# a command I wrote myself\n")
+
+(cDir, rPath) = promptFixture()
+_ = try! PromptCompiler.compile(name: "edited", description: nil, body: "original\n",
+                                commandsDir: cDir, registryPath: rPath)
+try! "hand edit, not through AliasBar\n".write(toFile: cDir + "/edited.md", atomically: true, encoding: .utf8)
+expectThrow("refuses to overwrite a registry-owned file whose hash no longer matches") {
+    _ = try PromptCompiler.compile(name: "edited", description: nil, body: "replacement\n",
+                                   commandsDir: cDir, registryPath: rPath)
+}
+check("the hand edit survives the refused write",
+      read(cDir + "/edited.md") == "hand edit, not through AliasBar\n")
+
+// --- Uninstall removes only what it wrote -----------------------------------
+
+(cDir, rPath) = promptFixture()
+_ = try! PromptCompiler.compile(name: "keep", description: nil, body: "keep me\n",
+                                commandsDir: cDir, registryPath: rPath)
+_ = try! PromptCompiler.compile(name: "drift", description: nil, body: "drifted\n",
+                                commandsDir: cDir, registryPath: rPath)
+try! "someone hand-edited this after install\n".write(toFile: cDir + "/drift.md", atomically: true, encoding: .utf8)
+
+expectThrow("uninstall refuses a hash-mismatched file rather than deleting it") {
+    _ = try PromptCompiler.uninstall(name: "drift", commandsDir: cDir, registryPath: rPath)
+}
+check("the hash-mismatched file was not deleted", FileManager.default.fileExists(atPath: cDir + "/drift.md"))
+
+let backupOfKeep = try! PromptCompiler.uninstall(name: "keep", commandsDir: cDir, registryPath: rPath)
+check("the hash-matching file was removed", !FileManager.default.fileExists(atPath: cDir + "/keep.md"))
+check("uninstall's backup holds the removed content", read(backupOfKeep).contains("keep me"))
+check("the untouched sibling file still exists", FileManager.default.fileExists(atPath: cDir + "/drift.md"))
+
+if case .ok(let installed) = PromptCompiler.installedCommands(registryPath: rPath) {
+    check("registry no longer lists the uninstalled command", !installed.contains { $0.name == "keep" })
+    check("registry still lists the hash-mismatched one (never silently dropped)",
+          installed.contains { $0.name == "drift" })
+} else {
+    check("registry is readable after a partial uninstall", false)
+}
+
+expectThrow("uninstalling a name the registry never had refuses") {
+    _ = try PromptCompiler.uninstall(name: "never-installed", commandsDir: cDir, registryPath: rPath)
+}
+
+// --- Atomicity: no stray temp files survive a run ---------------------------
+
+(cDir, rPath) = promptFixture()
+for i in 0..<5 {
+    _ = try! PromptCompiler.compile(name: "atomic\(i)", description: nil, body: "body \(i)\n",
+                                    commandsDir: cDir, registryPath: rPath)
+}
+let leftoverCommandTemps = (try? FileManager.default.contentsOfDirectory(atPath: cDir))?
+    .filter { $0.hasPrefix(".aliasbar-tmp-") } ?? ["<directory listing failed>"]
+check("no stray temp files left in commandsDir", leftoverCommandTemps.isEmpty,
+      leftoverCommandTemps.joined(separator: ", "))
+let registryDir = (rPath as NSString).deletingLastPathComponent
+let leftoverRegistryTemps = (try? FileManager.default.contentsOfDirectory(atPath: registryDir))?
+    .filter { $0.hasPrefix(".aliasbar-tmp-") } ?? ["<directory listing failed>"]
+check("no stray temp files left next to the registry", leftoverRegistryTemps.isEmpty,
+      leftoverRegistryTemps.joined(separator: ", "))
+
+// --- Builtin collisions warn; they never block ------------------------------
+
+check("collides(name:) recognizes a builtin", BuiltinSlashCommands.collides(name: "review") == .builtin)
+check("collides(name:) is case-insensitive", BuiltinSlashCommands.collides(name: "REVIEW") == .builtin)
+check("collides(name:) returns nil for a custom name",
+      BuiltinSlashCommands.collides(name: "totally-custom") == nil)
+
+(cDir, rPath) = promptFixture()
+let reviewResult = try! PromptCompiler.compile(name: "review", description: nil,
+                                               body: "shadow the builtin on purpose\n",
+                                               commandsDir: cDir, registryPath: rPath)
+check("compiling a builtin-shadowing name still succeeds",
+      FileManager.default.fileExists(atPath: reviewResult.path))
+check("compile surfaces the builtin collision as a warning rather than blocking",
+      reviewResult.builtinCollision == .builtin)
+
+// --- Name validation ---------------------------------------------------------
+
+(cDir, rPath) = promptFixture()
+expectThrow("refuses a name containing a space") {
+    _ = try PromptCompiler.compile(name: "not valid", description: nil, body: "x\n",
+                                   commandsDir: cDir, registryPath: rPath)
+}
+expectThrow("refuses a name containing a slash") {
+    _ = try PromptCompiler.compile(name: "not/valid", description: nil, body: "x\n",
+                                   commandsDir: cDir, registryPath: rPath)
+}
+check("nothing was written for any invalid name",
+      (try? FileManager.default.contentsOfDirectory(atPath: cDir))?.isEmpty ?? true)
+
+(cDir, rPath) = promptFixture()
+_ = try! PromptCompiler.compile(name: "foo", description: nil, body: "x\n",
+                                commandsDir: cDir, registryPath: rPath)
+expectThrow("refuses a name that differs only in case from an existing file") {
+    _ = try PromptCompiler.compile(name: "Foo", description: nil, body: "y\n",
+                                   commandsDir: cDir, registryPath: rPath)
+}
+var sameNameAgainSucceeded = false
+if let _ = try? PromptCompiler.compile(name: "foo", description: nil, body: "updated\n",
+                                       commandsDir: cDir, registryPath: rPath) {
+    sameNameAgainSucceeded = true
+}
+check("re-compiling the exact same name is an update, not a case collision",
+      sameNameAgainSucceeded)
+
+// --- A corrupt registry is refused, never repaired by overwriting -----------
+
+(cDir, rPath) = promptFixture()
+try! "{ this is not valid json".write(toFile: rPath, atomically: true, encoding: .utf8)
+let corruptRegistryBefore = read(rPath)
+expectThrow("compile refuses outright when the registry is corrupt") {
+    _ = try PromptCompiler.compile(name: "anything", description: nil, body: "x\n",
+                                   commandsDir: cDir, registryPath: rPath)
+}
+check("the corrupt registry file is byte-for-byte untouched", read(rPath) == corruptRegistryBefore)
+check("nothing was written to commandsDir when the registry was corrupt",
+      (try? FileManager.default.contentsOfDirectory(atPath: cDir))?.isEmpty ?? true)
+expectThrow("uninstall also refuses outright when the registry is corrupt") {
+    _ = try PromptCompiler.uninstall(name: "anything", commandsDir: cDir, registryPath: rPath)
+}
+if case .corrupt = PromptCompiler.installedCommands(registryPath: rPath) {
+    check("installedCommands reports corruption rather than pretending the registry is empty", true)
+} else {
+    check("installedCommands reports corruption rather than pretending the registry is empty", false)
+}
+
+// A registry file that simply does not exist yet is the pre-first-install state,
+// not corruption, and must read back as empty.
+(cDir, rPath) = promptFixture()
+if case .ok(let installed) = PromptCompiler.installedCommands(registryPath: rPath) {
+    check("a registry that doesn't exist yet reads as empty, not corrupt", installed.isEmpty)
+} else {
+    check("a missing registry file is not reported as corrupt", false)
+}
+
+// --- SHA-256 sanity: the hash-mismatch protection is only as good as this ---
+
+check("SHA-256 of the empty string matches the published test vector",
+      SHA256Digest.hex("") == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+check("SHA-256 of \"abc\" matches the published test vector",
+      SHA256Digest.hex("abc") == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+check("SHA-256 handles multi-block input (1,000,000 x 'a')",
+      SHA256Digest.hex(String(repeating: "a", count: 1_000_000))
+        == "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0")
+
+// --- Zero shared code with AliasWriter --------------------------------------
+
+let promptCompilerSource = read(projectRoot.appendingPathComponent("Sources/PromptCompiler.swift").path)
+check("PromptCompiler source is readable", promptCompilerSource != "<unreadable>")
+// The header comment explains in prose *why* PromptCompiler shares nothing with
+// AliasWriter, and names it while doing so — that is documentation, not coupling.
+// The boundary this checks is code coupling, so comment lines are stripped first;
+// a genuine reference would show up as actual Swift code (a member access such as
+// `AliasWriter.`, or the bare type name used as a value) and survive the strip.
+let promptCompilerCodeOnly = promptCompilerSource
+    .components(separatedBy: "\n")
+    .filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }
+    .joined(separator: "\n")
+for forbiddenSymbol in [
+    "AliasWriter", "ManagedBlock", "ZshrcParser", "ShellEntry", "AppKit", "SwiftUI", "UserDefaults",
+] {
+    check("PromptCompiler shares no code-level reference to \(forbiddenSymbol)",
+          !promptCompilerCodeOnly.contains(forbiddenSymbol))
+}
 
 // ---------------------------------------------------------------------------
 print("\n" + String(repeating: "-", count: 60))
