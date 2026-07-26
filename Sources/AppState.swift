@@ -29,6 +29,13 @@ enum Bucket: String, CaseIterable, Identifiable {
         case .conflicts: return "exclamationmark.triangle"
         }
     }
+
+    /// FIND and BOARD need a header warning only when a bucket removes entries.
+    /// MANAGE names every bucket in its sidebar, while `byFile` changes order without
+    /// narrowing the pool.
+    func showsHeaderFilter(in mode: ViewMode) -> Bool {
+        mode != .manage && self != .all && self != .byFile
+    }
 }
 
 /// What the editor sheet is currently doing.

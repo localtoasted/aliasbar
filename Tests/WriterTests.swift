@@ -2401,6 +2401,18 @@ check("no secondary crosses the paste/copy line",
           $0.secondary.needsAccessibility == $0.needsAccessibility
       })
 
+// ---------------------------------------------------------------------------
+print("\n27. Bucket filter chip semantics")
+
+for mode in ViewMode.allCases {
+    check("All has no header filter in \(mode.label)",
+          !Bucket.all.showsHeaderFilter(in: mode))
+    check("By file has no header filter in \(mode.label)",
+          !Bucket.byFile.showsHeaderFilter(in: mode))
+    check("Functions header filter matches \(mode.label) surface",
+          Bucket.functions.showsHeaderFilter(in: mode) == (mode != .manage))
+}
+
 
 // ---------------------------------------------------------------------------
 print("\n" + String(repeating: "-", count: 60))
