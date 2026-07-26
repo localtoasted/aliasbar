@@ -4945,10 +4945,24 @@ check("flipDialect preserves the query", dialectState.query == "findm")
 dialectState.flipDialect()
 check("flipDialect toggles back to the original dialect", dialectState.dialect == dialectBefore)
 
+// PRE-261 supersedes this: BOARD gained a second, prompt-shaped deck, and ⇥ now flips
+// `dialect` there too (see PromptBoardView.swift and the "Board prompt deck" section
+// below) — so BOARD is no longer one of the modes flipDialect no-ops in. MANAGE still
+// is, since it has no dialect to flip.
 dialectState.mode = .board
-let dialectBoardDialect = dialectState.dialect
+let dialectBoardDialectBefore = dialectState.dialect
 dialectState.flipDialect()
-check("flipDialect is a no-op outside FIND", dialectState.dialect == dialectBoardDialect)
+check("flipDialect also flips in BOARD (PRE-261: BOARD's deck flip reuses this field)",
+      dialectState.dialect != dialectBoardDialectBefore)
+dialectState.flipDialect()
+check("flipping BOARD's dialect twice returns to where it started",
+      dialectState.dialect == dialectBoardDialectBefore)
+
+dialectState.mode = .manage
+let dialectManageDialect = dialectState.dialect
+dialectState.flipDialect()
+check("flipDialect is a no-op in MANAGE, which has no dialect to flip",
+      dialectState.dialect == dialectManageDialect)
 dialectState.mode = .find
 
 dialectState.query = ""
@@ -5836,6 +5850,143 @@ let strayIgnoreTemps = (try? FileManager.default.contentsOfDirectory(atPath: ign
 check("no stray temp files survive an ignore-store write", strayIgnoreTemps.isEmpty)
 
 // ---------------------------------------------------------------------------
+print("\n39. Board prompt deck (PRE-261)")
+
+setenv("ALIASBAR_DEFAULTS_SUITE", "aliasbar-tests-pre261-\(UUID().uuidString)", 1)
+
+let boardSandbox = "\(sandbox)/pre261"
+try! FileManager.default.createDirectory(atPath: boardSandbox, withIntermediateDirectories: true)
+
+let boardRcPath = "\(boardSandbox)/zshrc"
+try! """
+# >>> aliasbar managed block >>>
+# Edited by AliasBar. Anything outside these markers is never touched.
+alias gs='git status'
+# <<< aliasbar managed block <<<
+""".write(toFile: boardRcPath, atomically: true, encoding: .utf8)
+
+let boardHistoryPath = "\(boardSandbox)/history"
+try! "git status\n".write(toFile: boardHistoryPath, atomically: true, encoding: .utf8)
+
+let boardPromptsDirURL = URL(fileURLWithPath: "\(boardSandbox)/prompts")
+try! FileManager.default.createDirectory(at: boardPromptsDirURL, withIntermediateDirectories: true)
+
+// alpha: frontmatter with a description and one slot — the ordinary case.
+writeRawPromptFile(
+    promptFixture(["---", "schema: 1", "description: Alpha's own description", "---",
+                   "Write about {{topic}}.", ""]),
+    name: "alpha", in: boardPromptsDirURL)
+// beta: no frontmatter, so its gist falls back to the first non-empty body line — with
+// blank lines first, to prove the fallback actually skips them.
+writeRawPromptFile(promptFixture(["", "  ", "First real line of beta.", "Second line."]),
+                    name: "beta", in: boardPromptsDirURL)
+// gamma: nothing at all to show — proves the fallback has a floor rather than
+// surfacing an empty string as a card's gist.
+writeRawPromptFile("", name: "gamma", in: boardPromptsDirURL)
+
+setenv("ALIASBAR_ZSHRC", boardRcPath, 1)
+setenv("ALIASBAR_HISTORY", boardHistoryPath, 1)
+setenv("ALIASBAR_PROMPTS_DIR", boardPromptsDirURL.path, 1)
+
+let boardUsagePath = (boardPromptsDirURL.path as NSString).deletingLastPathComponent + "/usage.json"
+_ = PromptUsageCounter.recordUse(of: "alpha", path: boardUsagePath)
+_ = PromptUsageCounter.recordUse(of: "alpha", path: boardUsagePath)
+_ = PromptUsageCounter.recordUse(of: "beta", path: boardUsagePath)
+
+let boardSettings = AppSettings.shared
+let boardStore = EntryStore()
+let boardState = AppState(store: boardStore, settings: boardSettings)
+boardState.prepareForShow()
+boardState.mode = .board
+
+// --- Gist fallback: description, then first non-empty body line, then a floor -----
+
+let boardAlpha = boardState.boardPrompts.first { $0.name == "alpha" }!
+let boardBeta = boardState.boardPrompts.first { $0.name == "beta" }!
+let boardGamma = boardState.boardPrompts.first { $0.name == "gamma" }!
+
+check("PromptGist prefers a written description",
+      PromptGist.line(for: boardAlpha) == "Alpha's own description")
+check("PromptGist falls back to the first non-empty body line, skipping blank ones",
+      PromptGist.line(for: boardBeta) == "First real line of beta.")
+check("PromptGist has a floor for a prompt with nothing to show",
+      PromptGist.line(for: boardGamma) == "No description")
+
+// --- Slot count (shared PromptSlotParser, not a second one) + usage surfacing -----
+
+check("slot count reads through the shared PromptSlotParser", boardAlpha.slots == ["topic"])
+check("a prompt with no slots reports zero", boardBeta.slots.isEmpty)
+check("usage surfaces from PromptUsageCounter", boardState.promptUsage(for: "alpha") == 2)
+check("a never-used prompt reads as zero usage", boardState.promptUsage(for: "gamma") == 0)
+
+// --- Dialect-based deck routing: BOARD opens on the deck AppState.dialect names ---
+
+boardState.dialect = .shell
+boardState.selection = 0
+check("with dialect .shell, selectedPrompt is nil — the prompt deck isn't showing",
+      boardState.selectedPrompt == nil)
+
+boardState.dialect = .prompt
+boardState.selection = 0
+check("with dialect .prompt, selectedEntry is nil — BOARD's prompt deck has no RankedEntry to select",
+      boardState.selectedEntry == nil)
+check("with dialect .prompt, selectedPrompt resolves the same index into boardPrompts",
+      boardState.selectedPrompt?.name == boardState.boardPrompts.first?.name)
+
+// --- Stable positions across query changes: order identical, dimmed set changes ---
+
+let boardPromptOrderBefore = boardState.boardPrompts.map(\.name)
+boardState.query = "alpha"
+check("typing narrows what matches without touching the pool's order",
+      boardState.boardPrompts.map(\.name) == boardPromptOrderBefore)
+check("the query dims a non-matching card (beta doesn't match \"alpha\")",
+      !boardState.boardPromptMatches(boardBeta))
+check("the query does not dim the matching card",
+      boardState.boardPromptMatches(boardAlpha))
+
+boardState.query = ""
+check("clearing the query un-dims every card again",
+      boardState.boardPrompts.allSatisfy { boardState.boardPromptMatches($0) })
+check("the pool's order survived the whole round trip",
+      boardState.boardPrompts.map(\.name) == boardPromptOrderBefore)
+
+// --- Deck flip (⇥): preserves query, resets selection, same as FIND's flip ---------
+
+boardState.dialect = .shell
+boardState.query = "gs"
+boardState.selection = 2
+let boardFlipDialectBefore = boardState.dialect
+boardState.flipDialect()
+check("BOARD's ⇥ flips the deck (dialect toggles)", boardState.dialect != boardFlipDialectBefore)
+check("BOARD's ⇥ preserves the query", boardState.query == "gs")
+check("BOARD's ⇥ resets the selection", boardState.selection == 0)
+
+boardState.selection = 1
+boardState.flipDialect()
+check("flipping a second time restores the original deck",
+      boardState.dialect == boardFlipDialectBefore)
+check("flipping resets the selection even when it wasn't already 0", boardState.selection == 0)
+
+// --- Enter on a card: the interim copy-raw-body-and-close action ------------------
+
+boardState.dialect = .prompt
+boardState.selection = 0
+let boardUsageBeforeEnter = PromptUsageCounter.all(path: boardUsagePath)["beta"]?.count ?? 0
+boardState.performBoardPrompt(boardBeta)
+check("Enter on a prompt card records a use through PromptUsageCounter",
+      (PromptUsageCounter.all(path: boardUsagePath)["beta"]?.count ?? 0) == boardUsageBeforeEnter + 1)
+
+// --- Column metrics differ per deck (cards are wider than keycaps) ---------------
+
+boardState.dialect = .shell
+let boardShellColumns = boardState.boardColumns
+boardState.dialect = .prompt
+let boardPromptColumns = boardState.boardColumns
+check("the prompt deck fits no more columns than the keycap deck at the same density",
+      boardPromptColumns <= boardShellColumns)
+check("PromptCardMetrics is in fact wider than a keycap at both densities",
+      PromptCardMetrics.width(for: .comfortable) > BoardDensity.comfortable.keyWidth
+          && PromptCardMetrics.width(for: .dense) > BoardDensity.dense.keyWidth)
 print("\n38. AuditPrompt: ⌘I audit prompt generator (PRE-265)")
 
 let emptyLibraryPrompt = AuditPrompt.generate(library: [], ending: .localAgent)
