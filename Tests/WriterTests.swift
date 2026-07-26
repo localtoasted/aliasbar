@@ -8156,6 +8156,9 @@ do {
     state.commitEditor()
     check("an unrelated save afterwards does not also mark the abandoned item handled",
           state.inboxPendingCount == 1)
+}
+
+// ---------------------------------------------------------------------------
 print("\n40. Clipboard Find source, persistence, and sync mirror (PRE-247-C/D)")
 
 func freshClipboardFixtures() -> (settings: AppSettings, clipsPath: String) {
