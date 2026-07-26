@@ -41,6 +41,15 @@ enum AppPaths {
         (promptsDirectory as NSString).deletingLastPathComponent + "/usage.json"
     }
 
+    /// Where `PromptCompiler` records what it has installed to `~/.claude/commands`.
+    /// FIND's delivery chip (PRE-260) is the one app-side reader of this — it never
+    /// writes here, only asks `PromptCompiler.installedCommands(registryPath:)`.
+    static var compiledRegistryPath: String {
+        CorePaths.resolveCompiledRegistryPath(
+            environmentOverride: ProcessInfo.processInfo.environment["ALIASBAR_COMPILED_REGISTRY"],
+            homeDirectory: NSHomeDirectory())
+    }
+
     /// Where `SuggestionIgnoreStore` records dismissed suggestions.
     static var suggestionIgnoresPath: String {
         CorePaths.resolveSuggestionIgnoresPath(

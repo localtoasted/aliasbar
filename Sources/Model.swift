@@ -677,6 +677,18 @@ enum CorePaths {
         return homeDirectory + "/.aliasbar/prompts"
     }
 
+    /// Where `PromptCompiler`'s ownership registry lives. Same reasoning as
+    /// `resolvePromptsDirectory`: no per-app setting redirects this, only the
+    /// environment override, which exists purely so FIND's delivery-chip check can be
+    /// tested against a fixture registry instead of a real `~/.aliasbar/compiled.json`.
+    static func resolveCompiledRegistryPath(environmentOverride: String?,
+                                            homeDirectory: String) -> String {
+        if let environmentOverride, !environmentOverride.isEmpty {
+            return (environmentOverride as NSString).expandingTildeInPath
+        }
+        return homeDirectory + "/.aliasbar/compiled.json"
+    }
+
     /// Where `SuggestionIgnoreStore` records suggestions the user has dismissed.
     /// Same shape as `resolvePromptsDirectory`: no per-app stored setting, just an
     /// environment override for testability.

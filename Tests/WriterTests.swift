@@ -6345,6 +6345,291 @@ func testDoneFileLifecycle() {
 testDoneFileLifecycle()
 
 // ---------------------------------------------------------------------------
+print("\n38. Prompt Find: fill-in, delivery pipeline, delivery chip (PRE-260)")
+
+// --- SlotFillState: the reusable fill-in logic, independent of any view --------
+
+let basicFill = SlotFillState(slots: ["name", "place"])
+check("a fresh SlotFillState starts every slot at an empty value",
+      basicFill.value(for: "name") == "" && basicFill.value(for: "place") == "")
+check("a fresh SlotFillState starts focused on the first slot", basicFill.focusedIndex == 0)
+check("focusedSlot names the field focus is actually on", basicFill.focusedSlot == "name")
+
+var advanceFill = SlotFillState(slots: ["a", "b", "c"])
+advanceFill.advance(forward: true)
+check("advance(forward:) moves to the next slot", advanceFill.focusedIndex == 1)
+advanceFill.advance(forward: true)
+advanceFill.advance(forward: true)
+check("advance(forward:) wraps past the last slot back to the first",
+      advanceFill.focusedIndex == 0)
+advanceFill.advance(forward: false)
+check("advance(forward: false) wraps past the first slot back to the last",
+      advanceFill.focusedIndex == 2)
+
+var noSlotsFill = SlotFillState(slots: [])
+noSlotsFill.advance(forward: true)
+check("advance on a slotless state is a no-op, not a crash", noSlotsFill.focusedIndex == 0)
+check("focusedSlot is nil when there are no slots", noSlotsFill.focusedSlot == nil)
+
+var ignoredWriteFill = SlotFillState(slots: ["known"])
+ignoredWriteFill.setValue("x", for: "unknown-slot")
+check("setValue for a name outside `slots` is ignored, not silently added",
+      ignoredWriteFill.value(for: "unknown-slot").isEmpty)
+
+// --- Repeats share one value, and literal/escaped text survives rendering ------
+
+var repeatFill = SlotFillState(slots: PromptSlotParser.slots(in: "Hi {{name}}, glad {{name}} is here"))
+repeatFill.setValue("Ada", for: "name")
+check("SlotFillState.rendered fills every occurrence of a repeated slot from one value",
+      repeatFill.rendered("Hi {{name}}, glad {{name}} is here") == "Hi Ada, glad Ada is here")
+
+var unfilledFill = SlotFillState(slots: PromptSlotParser.slots(in: "{{a}} and {{b}}"))
+unfilledFill.setValue("X", for: "a")
+check("an unfilled slot renders exactly as written, matching PromptSlotParser's own rule",
+      unfilledFill.rendered("{{a}} and {{b}}") == "X and {{b}}")
+
+let literalBody = #"an f-string {value}, JSON {"key": "{{notaslot}}"} and a real slot {{who}}"#
+var literalFill = SlotFillState(slots: PromptSlotParser.slots(in: literalBody))
+check("single-brace and JSON-shaped text never become fields to fill in",
+      literalFill.slots == ["notaslot", "who"])
+literalFill.setValue("Ada", for: "who")
+check("literal single-brace and JSON spans survive rendering untouched",
+      literalFill.rendered(literalBody).contains(#"an f-string {value}, JSON {"key": "#))
+check("only the real slot is substituted; the JSON-shaped look-alike is literal text",
+      literalFill.rendered(literalBody).contains(#""key": "{{notaslot}}""#)
+          && literalFill.rendered(literalBody).hasSuffix("a real slot Ada"))
+
+// --- AppState.promptDeliveryStatus: installed / stale / notInstalled -----------
+
+func deliveryFixturePrompt(name: String, description: String? = nil, body: String) -> Shortcut {
+    Shortcut(prompt: Prompt(name: name, frontmatter: nil, body: body))
+}
+
+let (deliveryCommandsDir, deliveryRegistryPath) = promptFixture()
+
+let neverCompiled = deliveryFixturePrompt(name: "never-compiled", body: "not installed yet")
+check("a prompt never compiled reads as notInstalled",
+      AppState.promptDeliveryStatus(for: neverCompiled, registryPath: deliveryRegistryPath) == .notInstalled)
+
+let deliveryStandup = deliveryFixturePrompt(name: "standup", description: "Daily standup summary",
+                                          body: "Summarize: {{notes}}")
+_ = try! PromptCompiler.compile(name: deliveryStandup.name, description: deliveryStandup.description,
+                                body: deliveryStandup.body, commandsDir: deliveryCommandsDir,
+                                registryPath: deliveryRegistryPath)
+check("a freshly compiled prompt whose current content matches the registry reads as installed",
+      AppState.promptDeliveryStatus(for: deliveryStandup, registryPath: deliveryRegistryPath) == .installed)
+
+let editedStandupPrompt = deliveryFixturePrompt(name: "standup", description: "Daily standup summary",
+                                                body: "Summarize, but longer now: {{notes}}")
+check("editing the prompt body after compiling makes the chip go stale, not stay installed",
+      AppState.promptDeliveryStatus(for: editedStandupPrompt, registryPath: deliveryRegistryPath) == .stale)
+
+let shellKindShortcut = Shortcut(entry: ShellEntry(kind: .alias, name: "standup", command: "echo hi",
+                                                   comment: nil, sourceFile: "/tmp/x.zshrc",
+                                                   line: 1, managed: true))
+check("promptDeliveryStatus only ever answers for a prompt-kind Shortcut",
+      AppState.promptDeliveryStatus(for: shellKindShortcut, registryPath: deliveryRegistryPath) == .notInstalled)
+
+check("a nonexistent registry path (nothing compiled anywhere) reads as notInstalled, never crashes",
+      AppState.promptDeliveryStatus(for: deliveryStandup, registryPath: "\(sandbox)/no-such-registry.json")
+          == .notInstalled)
+
+// --- AppState prompt delivery: broker seam, usage recording, fill-in flow ------
+
+setenv("ALIASBAR_DEFAULTS_SUITE", "aliasbar-tests-pre260-\(UUID().uuidString)", 1)
+
+let pre260Sandbox = "\(sandbox)/pre260"
+try! FileManager.default.createDirectory(atPath: pre260Sandbox, withIntermediateDirectories: true)
+
+let pre260RcPath = "\(pre260Sandbox)/zshrc"
+try! """
+# >>> aliasbar managed block >>>
+# Edited by AliasBar. Anything outside these markers is never touched.
+alias shellone='echo shellone'
+# <<< aliasbar managed block <<<
+""".write(toFile: pre260RcPath, atomically: true, encoding: .utf8)
+
+let pre260HistoryPath = "\(pre260Sandbox)/history"
+try! "echo shellone\n".write(toFile: pre260HistoryPath, atomically: true, encoding: .utf8)
+
+let pre260PromptsDirURL = URL(fileURLWithPath: "\(pre260Sandbox)/prompts")
+try! FileManager.default.createDirectory(at: pre260PromptsDirURL, withIntermediateDirectories: true)
+
+let plainMultilineBody = "Line one of the prompt.\nLine two, still the same prompt.\nLine three.\n"
+writeRawPromptFile(promptFixture(["---", "schema: 1", "---", plainMultilineBody]),
+                    name: "plainprompt", in: pre260PromptsDirURL)
+writeRawPromptFile(promptFixture(["---", "schema: 1", "---", "Copy-only body, no slots here."]),
+                    name: "copyonlyprompt", in: pre260PromptsDirURL)
+let slottedBody = "Hi {{name}}, welcome to {{place}}! Enjoy your stay, {{name}}."
+writeRawPromptFile(promptFixture(["---", "schema: 1", "---", slottedBody]),
+                    name: "slottedprompt", in: pre260PromptsDirURL)
+
+setenv("ALIASBAR_ZSHRC", pre260RcPath, 1)
+setenv("ALIASBAR_HISTORY", pre260HistoryPath, 1)
+setenv("ALIASBAR_PROMPTS_DIR", pre260PromptsDirURL.path, 1)
+
+let pre260UsagePath = (pre260PromptsDirURL.path as NSString).deletingLastPathComponent + "/usage.json"
+
+func usageCount(_ name: String) -> Int {
+    PromptUsageCounter.all(path: pre260UsagePath)[name]?.count ?? 0
+}
+
+func freshPre260State(enterAction: EnterAction = .copyName,
+                      afterAction: AfterAction = .close) -> (AppState, FakePasteboard) {
+    let (settings, _) = freshTestSettings()
+    settings.enterAction = enterAction
+    settings.afterAction = afterAction
+    let state = AppState(store: EntryStore(), settings: settings)
+    let fake = FakePasteboard()
+    state.pasteboard = fake
+    state.prepareForShow()
+    return (state, fake)
+}
+
+func shortcut(named name: String, in state: AppState) -> Shortcut {
+    state.findResults.first { $0.name == name }!
+}
+
+// A plain, multiline prompt, delivered through `deliver`'s copy branch — the one
+// route that is never gated behind Accessibility trust (whose real state this test
+// process cannot control, and must not depend on: the paste branch's own fallback
+// path is exercised implicitly whenever trust happens to be absent, but asserting
+// on that here would make the test's outcome depend on the *machine's* permission
+// state rather than on this code). The copy branch still goes through the exact
+// same `PasteboardBroker.write(transient:to:)` call the paste branch's fallback
+// uses, so it proves what matters: a multiline body reaches the broker as one
+// write, byte-exact, never split into lines or otherwise mangled.
+do {
+    let (state, fake) = freshPre260State(enterAction: .copyName, afterAction: .close)
+    let before = usageCount("plainprompt")
+    let plain = shortcut(named: "plainprompt", in: state)
+    state.performFind(plain, secondary: false)
+    check("a multiline prompt body reaches the broker byte-exact, never mangled",
+          fake.string(forType: .string) == plainMultilineBody)
+    check("delivering a plain prompt records exactly one use",
+          usageCount("plainprompt") == before + 1)
+}
+
+// A plain prompt, copy-mode enterAction: `afterAction` decides whether the window
+// closes — same as it already does for a shell entry's copy actions.
+do {
+    let (state, fake) = freshPre260State(enterAction: .copyName, afterAction: .close)
+    var dismissed = false
+    state.onDismiss = { dismissed = true }
+    let before = usageCount("copyonlyprompt")
+    let copyOnly = shortcut(named: "copyonlyprompt", in: state)
+    state.performFind(copyOnly, secondary: false)
+    check("copy-mode delivers the exact body to the broker",
+          fake.string(forType: .string) == "Copy-only body, no slots here.")
+    check("copy-mode honors afterAction == .close",  dismissed)
+    check("copying a prompt records a use", usageCount("copyonlyprompt") == before + 1)
+}
+
+do {
+    let (state, fake) = freshPre260State(enterAction: .copyName, afterAction: .stayOpen)
+    var dismissed = false
+    state.onDismiss = { dismissed = true }
+    let copyOnly = shortcut(named: "copyonlyprompt", in: state)
+    state.performFind(copyOnly, secondary: false)
+    _ = fake
+    check("copy-mode honors afterAction == .stayOpen (no dismiss)", !dismissed)
+}
+
+// ⌘⏎ on a slotted prompt: always a raw, slots-intact copy — never opens FillInSheet,
+// never pastes, regardless of enterAction.
+do {
+    let (state, fake) = freshPre260State(enterAction: .pasteCommand, afterAction: .close)
+    let before = usageCount("slottedprompt")
+    let slotted = shortcut(named: "slottedprompt", in: state)
+    state.performFind(slotted, secondary: true)
+    check("⌘⏎ on a slotted prompt copies the raw body with {{slots}} intact",
+          fake.string(forType: .string) == slottedBody)
+    check("⌘⏎'s raw copy never opens FillInSheet", state.fillIn == nil)
+    check("⌘⏎'s raw copy records a use", usageCount("slottedprompt") == before + 1)
+}
+
+// Plain Enter on a slotted prompt: opens FillInSheet instead of delivering anything,
+// and records nothing until something is actually confirmed. Usage is a real,
+// persistent, per-Mac counter (`~/.aliasbar/usage.json`, here a fixture path shared
+// by every scenario in this section), so every check below compares against this
+// block's own starting count rather than assuming a fresh zero.
+do {
+    let (state, fake) = freshPre260State(enterAction: .copyName, afterAction: .close)
+    let before = usageCount("slottedprompt")
+    let slotted = shortcut(named: "slottedprompt", in: state)
+    state.performFind(slotted, secondary: false)
+    check("a slotted prompt's plain Enter opens FillInSheet instead of delivering",
+          state.fillIn?.shortcut.name == "slottedprompt")
+    check("opening FillInSheet touches nothing on the pasteboard yet",
+          fake.string(forType: .string) == nil)
+    check("opening FillInSheet records no usage yet", usageCount("slottedprompt") == before)
+    check("FillInSheet is seeded with the prompt's own ordered, deduplicated slots",
+          state.fillIn?.fill.slots == ["name", "place"])
+
+    // Confirm: repeats share the one typed value, delivered through the same broker
+    // seam, and usage is recorded exactly once — at confirmation, not at Enter.
+    state.fillIn?.fill.setValue("Ada", for: "name")
+    state.fillIn?.fill.setValue("Wonderland", for: "place")
+    state.confirmFillIn()
+    check("confirming FillInSheet renders repeats from the one shared value",
+          fake.string(forType: .string) == "Hi Ada, welcome to Wonderland! Enjoy your stay, Ada.")
+    check("confirming FillInSheet closes it", state.fillIn == nil)
+    check("confirming FillInSheet records exactly one use",
+          usageCount("slottedprompt") == before + 1)
+}
+
+// Esc (both directly and through the real keyboard entry point) cancels with
+// nothing delivered and no usage recorded.
+do {
+    let (state, fake) = freshPre260State(enterAction: .copyName, afterAction: .close)
+    let before = usageCount("slottedprompt")
+    let slotted = shortcut(named: "slottedprompt", in: state)
+    state.performFind(slotted, secondary: false)
+    state.cancelFillIn()
+    check("cancelFillIn clears the sheet", state.fillIn == nil)
+    check("cancelFillIn delivers nothing to the pasteboard", fake.string(forType: .string) == nil)
+    check("cancelFillIn records no usage", usageCount("slottedprompt") == before)
+}
+
+do {
+    let (state, fake) = freshPre260State(enterAction: .copyName, afterAction: .close)
+    let before = usageCount("slottedprompt")
+    let slotted = shortcut(named: "slottedprompt", in: state)
+    state.performFind(slotted, secondary: false)
+    let escapeEvent = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [],
+                                       timestamp: 0, windowNumber: 0, context: nil,
+                                       characters: "", charactersIgnoringModifiers: "",
+                                       isARepeat: false, keyCode: 53 /* kVK_Escape */)!
+    let consumed = state.handleKey(escapeEvent)
+    check("Esc through the real keyboard entry point is consumed", consumed)
+    check("Esc through handleKey cancels FillInSheet the same way cancelFillIn does",
+          state.fillIn == nil)
+    check("Esc through handleKey records no usage", usageCount("slottedprompt") == before)
+    _ = fake
+}
+
+// --- Selection preview state transitions: selectedShortcut tracks kind, not index --
+
+do {
+    let (state, _) = freshPre260State()
+    let results = state.findResults
+    guard let promptIndex = results.firstIndex(where: { $0.kind == .prompt }),
+          let shellIndex = results.firstIndex(where: { $0.kind == .alias }) else {
+        check("the mixed pool has both a prompt and a shell row to select between", false)
+        fatalError("unreachable — check() above already failed")
+    }
+    state.selection = promptIndex
+    check("selecting a prompt row surfaces a prompt in selectedShortcut",
+          state.selectedShortcut?.kind == .prompt)
+    state.selection = shellIndex
+    check("selecting a shell row surfaces a shell shortcut in selectedShortcut",
+          state.selectedShortcut?.kind == .alias)
+    state.selection = results.count + 50
+    check("an out-of-range selection previews nothing, rather than falling back to the first row",
+          state.selectedShortcut == nil)
+}
+
+// ---------------------------------------------------------------------------
 print("\n" + String(repeating: "-", count: 60))
 print("\(passes) passed, \(failures) failed")
 exit(failures == 0 ? 0 : 1)
