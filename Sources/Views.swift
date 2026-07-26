@@ -1256,4 +1256,3 @@ struct RemovalConfirmSheet: View {
         line.trimmingCharacters(in: .whitespaces) == confirmation.suspect
     }
 }
-                                                     

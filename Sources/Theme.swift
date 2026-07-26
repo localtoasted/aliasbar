@@ -271,4 +271,31 @@ struct LiveButtonStyle: ButtonStyle {
                 .brightness(brightness)
                 .scaleEffect(motion.movesThings && configuration.isPressed ? 0.985 : 1)
                 .offset(y: motion.movesThings && configuration.isPressed ? pressDrop : 0)
-                .animation(motion(configuration.isPressed
+                .animation(motion(configuration.isPressed ? Motion.press : Motion.hover),
+                           value: configuration.isPressed)
+                .animation(motion(Motion.hover), value: hovering)
+                .onHover { hovering = $0 }
+        }
+
+        /// Brightness rather than an overlay, so it works over a material, a paper ground,
+        /// and a tinted keycap without any of them needing to know about it.
+        private var brightness: Double {
+            guard motion.fades else { return 0 }
+            if configuration.isPressed { return -0.04 }
+            return hovering ? 0.06 : 0
+        }
+    }
+}
+
+/// Reads the current theme once and hands it down, so views never touch Settings
+/// directly for appearance.
+private struct ThemeKey: EnvironmentKey {
+    static let defaultValue = Theme.derive(from: .graphite)
+}
+
+extension EnvironmentValues {
+    var theme: Theme {
+        get { self[ThemeKey.self] }
+        set { self[ThemeKey.self] = newValue }
+    }
+}

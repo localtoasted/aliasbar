@@ -966,4 +966,5 @@ final class HotkeyRecorder {
 }
 
 extension Notification.Name {
-    static let aliasBarHotkeyFired = Notification.Name("ali
+    static let aliasBarHotkeyFired = Notification.Name("aliasBarHotkeyFired")
+}
