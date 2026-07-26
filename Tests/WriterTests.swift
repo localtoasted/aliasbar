@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import Carbon.HIToolbox
 
 // Test harness for AliasWriter. Runs against scratch files only.
 
@@ -6944,8 +6945,12 @@ print("\n39. Manage: prompt dialect buckets + Suggested (PRE-262)")
 
 // --- Bucket / PromptBucket shapes ---------------------------------------------
 
-check("Bucket gained exactly one new case for the shell sidebar: suggested",
-      Bucket.allCases.contains(.suggested) && Bucket.allCases.count == 8)
+check("Bucket gained a new case for the shell sidebar: suggested (PRE-262)",
+      Bucket.allCases.contains(.suggested))
+// Count bumped to 9 by PRE-251's `snippets` case, landing after this one — see
+// section 41 below for its own membership/routing tests.
+check("Bucket carries exactly the shell sidebar's known set of cases",
+      Bucket.allCases.count == 9)
 check("PromptBucket is exactly library, delivery, health, in that order",
       PromptBucket.allCases == [.library, .delivery, .health])
 
@@ -7806,6 +7811,223 @@ do {
           (try? String(contentsOfFile: promptsDir.appendingPathComponent("alpha.md").path))?.contains("A") == true)
     check("the colliding file is untouched by the refused rename",
           (try? String(contentsOfFile: promptsDir.appendingPathComponent("beta.md").path))?.contains("B") == true)
+}
+
+print("\n41. Inline expansion: ExpansionLogic pure paths + settings-gated CRUD (PRE-251 UI)")
+
+// --- Typing gap ---------------------------------------------------------------
+
+let gapNow = Date()
+check("well within the typing gap is not a reset",
+      !ExpansionLogic.exceededTypingGap(previous: gapNow, now: gapNow.addingTimeInterval(1.0)))
+check("exactly at the boundary is not yet a reset",
+      !ExpansionLogic.exceededTypingGap(previous: gapNow, now: gapNow.addingTimeInterval(ExpansionLogic.typingGapSeconds)))
+check("past the boundary is a reset",
+      ExpansionLogic.exceededTypingGap(previous: gapNow, now: gapNow.addingTimeInterval(ExpansionLogic.typingGapSeconds + 0.01)))
+
+// --- Reset keys -----------------------------------------------------------
+
+check("Return is a reset key", ExpansionLogic.isResetKey(keyCode: CGKeyCode(kVK_Return)))
+check("Tab is a reset key", ExpansionLogic.isResetKey(keyCode: CGKeyCode(kVK_Tab)))
+check("Escape is a reset key", ExpansionLogic.isResetKey(keyCode: CGKeyCode(kVK_Escape)))
+check("Delete/backspace is a reset key", ExpansionLogic.isResetKey(keyCode: CGKeyCode(kVK_Delete)))
+check("the left arrow is a reset key", ExpansionLogic.isResetKey(keyCode: CGKeyCode(kVK_LeftArrow)))
+check("an ordinary letter key is not a reset key", !ExpansionLogic.isResetKey(keyCode: CGKeyCode(kVK_ANSI_A)))
+
+// --- Secure input: fail-closed decision ----------------------------------
+
+check("secure input enabled always means drop-and-reset",
+      ExpansionLogic.shouldDropAndReset(secureInputEnabled: true))
+check("secure input disabled never means drop-and-reset",
+      !ExpansionLogic.shouldDropAndReset(secureInputEnabled: false))
+
+// --- Self-tagging: round-trips through a real (unposted) CGEvent ------------
+//
+// Constructing a `CGEvent` needs no permission and posts nothing anywhere — only
+// `.post(tap:)` touches the system event stream, which this suite never calls,
+// matching the packet's own "unit-test the tagging calc, not real event posting."
+
+if let source = CGEventSource(stateID: .combinedSessionState),
+   let tagged = CGEvent(keyboardEventSource: source, virtualKey: CGKeyCode(kVK_Delete), keyDown: true),
+   let untagged = CGEvent(keyboardEventSource: source, virtualKey: CGKeyCode(kVK_ANSI_A), keyDown: true) {
+    check("an untagged event does not read as self-synthesized",
+          !ExpansionLogic.isSelfSynthesized(untagged))
+    ExpansionLogic.tag(tagged)
+    check("a tagged event round-trips as self-synthesized",
+          ExpansionLogic.isSelfSynthesized(tagged))
+    check("tagging one event never marks a different, untagged event",
+          !ExpansionLogic.isSelfSynthesized(untagged))
+} else {
+    check("CGEvent construction available for the self-tag round-trip test", false)
+}
+
+// --- Injection planning ----------------------------------------------------
+
+let sigSnippet = Snippet(trigger: ";sig", template: "Best, Ada")
+let planSig = ExpansionLogic.backspacePlan(for: TriggerMatcher.Match(snippet: sigSnippet, triggerLength: 4))
+check("the backspace plan is exactly the matched trigger length, not the trigger string's own length",
+      planSig.count == 4)
+
+let longerTrigger = Snippet(trigger: ";signature", template: "x")
+check("backspace plan reads the match's triggerLength, independent of the snippet's own trigger",
+      ExpansionLogic.backspacePlan(for: TriggerMatcher.Match(snippet: longerTrigger, triggerLength: 4)).count == 4)
+
+check("a snippet with no holes plans a direct paste of its rendered (unchanged) template",
+      ExpansionLogic.action(for: sigSnippet) == .pasteRendered("Best, Ada"))
+
+let holeySnippet = Snippet(trigger: ";todo", template: "{{task}} due {{when}}")
+check("a snippet with holes plans presenting the fill-in sheet, not a direct paste",
+      ExpansionLogic.action(for: holeySnippet) == .presentHoles)
+
+check("retype text is exactly the trigger, verbatim",
+      ExpansionLogic.retypeText(for: sigSnippet) == ";sig")
+
+// --- Structural gate: no tap is ever constructed while the feature is off -----
+//
+// Mirrors `ClipboardMonitor`'s own settings-gating shape: merely constructing
+// `ExpansionMonitor` — which is all `.shared`'s first access or a disabled-setting
+// launch ever does — must never bring a real `CGEventTap` into existence. `start()`
+// itself is never called anywhere in this suite, so this also can't depend on
+// whatever Accessibility trust state happens to be true of the machine running it.
+
+caseIndex += 1
+let expansionSnippetsPath = "\(sandbox)/expansion-case\(caseIndex)/snippets.json"
+let freshExpansionMonitor = ExpansionMonitor(snippetStore: SnippetStore(localPath: expansionSnippetsPath))
+check("a freshly constructed ExpansionMonitor has no tap — nothing is watched while disabled",
+      !freshExpansionMonitor.isTapActiveForTesting)
+check("status starts .off", freshExpansionMonitor.status == .off)
+freshExpansionMonitor.refreshSnippets()
+check("refreshSnippets is safe to call with no tap running (a no-op, not a crash)",
+      !freshExpansionMonitor.isTapActiveForTesting)
+
+// --- Snippet CRUD wiring through AppState, against a fixture snippet file ----
+
+func freshSnippetFixture() -> (state: AppState, snippetsPath: String) {
+    caseIndex += 1
+    let base = "\(sandbox)/snippet-ui-case\(caseIndex)"
+    try! FileManager.default.createDirectory(atPath: base, withIntermediateDirectories: true)
+    let snippetsPath = "\(base)/snippets.json"
+    let rcPath = "\(base)/zshrc"
+    try! """
+    # >>> aliasbar managed block >>>
+    # Edited by AliasBar. Anything outside these markers is never touched.
+    # <<< aliasbar managed block <<<
+    """.write(toFile: rcPath, atomically: true, encoding: .utf8)
+    let historyPath = "\(base)/history"
+    try! "".write(toFile: historyPath, atomically: true, encoding: .utf8)
+    let promptsDir = "\(base)/prompts"
+    try! FileManager.default.createDirectory(atPath: promptsDir, withIntermediateDirectories: true)
+
+    setenv("ALIASBAR_ZSHRC", rcPath, 1)
+    setenv("ALIASBAR_HISTORY", historyPath, 1)
+    setenv("ALIASBAR_PROMPTS_DIR", promptsDir, 1)
+    setenv("ALIASBAR_SNIPPETS_PATH", snippetsPath, 1)
+
+    let (settings, _) = freshTestSettings()
+    let state = AppState(store: EntryStore(), settings: settings)
+    return (state, snippetsPath)
+}
+
+do {
+    let (state, snippetsPath) = freshSnippetFixture()
+    state.prepareForShow()
+    check("a fresh snippet file starts with no snippets in the Manage bucket",
+          state.snippetManageResults.isEmpty)
+
+    state.beginCreateSnippet()
+    check("beginCreateSnippet opens the sheet in create mode",
+          state.snippetEditor?.mode == .create)
+    check("a brand-new (empty) trigger is not save-able yet",
+          !state.canSaveSnippet(state.snippetEditor!))
+
+    var target = state.snippetEditor!
+    target.trigger = ";sig"
+    target.template = "Best, {{name}}"
+    state.snippetEditor = target
+    check("a valid trigger with a non-empty template is save-able",
+          state.canSaveSnippet(state.snippetEditor!))
+    state.commitSnippetEditor()
+
+    check("committing closes the sheet", state.snippetEditor == nil)
+    check("the new snippet is written to the local snippet file",
+          FileManager.default.fileExists(atPath: snippetsPath))
+    check("the new snippet appears in Manage's Snippets bucket",
+          state.snippetManageResults.map(\.trigger) == [";sig"])
+    check("the stored template round-trips exactly, holes included",
+          state.snippetManageResults.first?.template == "Best, {{name}}")
+}
+
+do {
+    let (state, _) = freshSnippetFixture()
+    state.prepareForShow()
+    state.beginCreateSnippet()
+    var first = state.snippetEditor!
+    first.trigger = ";sig"
+    first.template = "Best, Ada"
+    state.snippetEditor = first
+    state.commitSnippetEditor()
+
+    state.beginCreateSnippet()
+    var second = state.snippetEditor!
+    second.trigger = ";sig"
+    second.template = "anything"
+    state.snippetEditor = second
+    check("a duplicate trigger (case-insensitive) is refused as a validation error",
+          state.snippetTriggerValidation(trigger: ";SIG", excluding: nil) != nil)
+    check("the sheet's own Save gating agrees — a colliding trigger is not save-able",
+          !state.canSaveSnippet(second))
+    state.commitSnippetEditor()
+    check("the refused save left the sheet open rather than silently writing",
+          state.snippetEditor != nil)
+    check("the refused save did not create a second snippet",
+          state.snippetManageResults.count == 1)
+}
+
+do {
+    let (state, _) = freshSnippetFixture()
+    state.prepareForShow()
+    state.beginCreateSnippet()
+    var target = state.snippetEditor!
+    target.trigger = ";addr"
+    target.template = "221B Baker Street"
+    state.snippetEditor = target
+    state.commitSnippetEditor()
+
+    guard let saved = state.snippetManageResults.first else {
+        check("a snippet exists to edit", false)
+        fatalError("unreachable — check() above already failed")
+    }
+    state.beginEditSnippet(saved)
+    check("editing seeds the sheet from the stored snippet",
+          state.snippetEditor?.trigger == ";addr" && state.snippetEditor?.template == "221B Baker Street")
+    check("editing a snippet's own trigger against itself is not a collision",
+          state.snippetTriggerValidation(trigger: ";addr", excluding: saved.id) == nil)
+
+    var edited = state.snippetEditor!
+    edited.template = "221B Baker Street, London"
+    state.snippetEditor = edited
+    state.commitSnippetEditor()
+
+    check("editing replaces the same record rather than adding a second one",
+          state.snippetManageResults.count == 1)
+    check("the edited template is the one now stored",
+          state.snippetManageResults.first?.template == "221B Baker Street, London")
+
+    state.deleteSnippet(saved)
+    check("deleting removes the snippet from the Manage bucket",
+          state.snippetManageResults.isEmpty)
+}
+
+do {
+    let (state, _) = freshSnippetFixture()
+    state.prepareForShow()
+    state.mode = .manage
+    state.dialect = .shell
+    state.bucket = .snippets
+    check("Snippets is a real Bucket case reachable from MANAGE's shell sidebar",
+          Bucket.allCases.contains(.snippets))
+    check("bucketSubset never leaks RankedEntry rows for the Snippets bucket",
+          state.bucketEntries.isEmpty)
 }
 
 // ---------------------------------------------------------------------------

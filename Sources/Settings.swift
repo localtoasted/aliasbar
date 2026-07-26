@@ -272,6 +272,7 @@ final class AppSettings: ObservableObject {
         static let clipboardPersistence = "clipboardPersistence"
         static let clipboardInSyncFile = "clipboardInSyncFile"
         static let syncFileURL = "syncFileURL"
+        static let inlineExpansionEnabled = "inlineExpansionEnabled"
     }
 
     // MARK: Behaviour
@@ -453,6 +454,17 @@ final class AppSettings: ObservableObject {
         didSet { defaults.set(clipboardInSyncFile, forKey: Key.clipboardInSyncFile) }
     }
 
+    // MARK: Inline expansion
+
+    /// Whether `ExpansionMonitor` runs a `CGEventTap` watching for snippet triggers at
+    /// all. Off by default — the trust posture this whole feature is built on: no tap
+    /// is ever created while this is false, not merely a disabled one sitting idle.
+    /// Toggling it live starts or stops the real tap (see `SettingsView`'s Expansion
+    /// section); this property only ever records the user's choice.
+    @Published var inlineExpansionEnabled: Bool {
+        didSet { defaults.set(inlineExpansionEnabled, forKey: Key.inlineExpansionEnabled) }
+    }
+
     // MARK: Sync
 
     /// Where settings and presets roam to, if anywhere. `nil` means sync is off.
@@ -594,6 +606,11 @@ final class AppSettings: ObservableObject {
         clipboardMonitoring = store.object(forKey: Key.clipboardMonitoring) as? Bool ?? false
         clipboardPersistence = store.object(forKey: Key.clipboardPersistence) as? Bool ?? false
         clipboardInSyncFile = store.object(forKey: Key.clipboardInSyncFile) as? Bool ?? false
+
+        // Off until the user turns it on, for the same reason clipboard monitoring is:
+        // a global keystroke tap is this feature's trust wedge, and starting it
+        // silently on launch would undercut the whole point of asking first.
+        inlineExpansionEnabled = store.object(forKey: Key.inlineExpansionEnabled) as? Bool ?? false
 
         if let path = store.string(forKey: Key.syncFileURL), !path.isEmpty {
             syncFileURL = URL(fileURLWithPath: path)

@@ -50,6 +50,16 @@ enum AppPaths {
             homeDirectory: NSHomeDirectory())
     }
 
+    /// Where `SnippetStore` reads and writes this machine's local snippet file.
+    /// `ALIASBAR_SNIPPETS_PATH` exists purely for testability, matching every other
+    /// override in this file — there is no per-app setting for this, since (unlike
+    /// the rc path) there is nothing for a user to choose here.
+    static var snippetsPath: String {
+        SnippetPaths.resolveLocalPath(
+            environmentOverride: ProcessInfo.processInfo.environment["ALIASBAR_SNIPPETS_PATH"],
+            homeDirectory: NSHomeDirectory())
+    }
+
     /// Where `SuggestionIgnoreStore` records dismissed suggestions.
     static var suggestionIgnoresPath: String {
         CorePaths.resolveSuggestionIgnoresPath(

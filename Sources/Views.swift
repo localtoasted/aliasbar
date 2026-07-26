@@ -75,6 +75,9 @@ struct RootView: View {
         .sheet(item: $state.editor) { _ in
             ComposerSheet(state: state).environment(\.theme, theme)
         }
+        .sheet(item: $state.snippetEditor) { _ in
+            SnippetEditorSheet(state: state).environment(\.theme, theme)
+        }
         .sheet(item: $state.confirmRemoval) { confirmation in
             RemovalConfirmSheet(state: state, confirmation: confirmation)
                 .environment(\.theme, theme)
@@ -1231,6 +1234,8 @@ struct ManageView: View {
                 PromptManageView(state: state, settings: settings)
             } else if state.bucket == .suggested {
                 SuggestedManageView(state: state, settings: settings)
+            } else if state.bucket == .snippets {
+                SnippetManageView(state: state, settings: settings)
             } else {
                 list
                 Rectangle().fill(theme.rule.opacity(0.5)).frame(width: 1)
@@ -1357,6 +1362,7 @@ struct ManageView: View {
         case .byFile: return state.store.byFile.count
         case .conflicts: return state.store.conflicts.count
         case .suggested: return state.suggestedEntries.count
+        case .snippets: return state.snippetManageResults.count
         }
     }
 

@@ -40,6 +40,7 @@ swiftc -target "$(uname -m)-apple-macos13.0" \
     "${PROJECT_DIR}/Sources/ClipTransforms.swift" \
     "${PROJECT_DIR}/Sources/PasteboardBroker.swift" \
     "${PROJECT_DIR}/Sources/ClipboardMonitor.swift" \
+    "${PROJECT_DIR}/Sources/ExpansionMonitor.swift" \
     "${PROJECT_DIR}/Sources/Settings.swift" \
     "${PROJECT_DIR}/Sources/Theme.swift" \
     "${PROJECT_DIR}/Sources/Appearance.swift" \
