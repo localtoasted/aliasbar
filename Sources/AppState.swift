@@ -581,6 +581,12 @@ final class AppState: ObservableObject {
             // The target app has to be frontmost before the keystroke is sent, so the
             // popover closes and focus is handed back first, and the paste goes out a
             // beat later once that has actually taken effect.
+            //
+            // Deliberately not `finish()`: "Keep it open" cannot apply here. A paste
+            // exists only by surrendering focus, and summoning the window back after
+            // the paste would steal focus from the app the user just pasted into —
+            // exactly where they are about to keep typing. So paste modes always
+            // close, and the Afterwards setting says so instead of pretending.
             onDismiss?()
             PreviousApp.restore()
             // Recorded here, at the moment a paste is actually possible — it is what
