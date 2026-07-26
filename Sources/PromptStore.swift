@@ -386,6 +386,32 @@ enum PromptStore {
         return backupPath
     }
 
+    // MARK: Deletion
+
+    /// Removes `<directory>/<name>.md`, after backing it up exactly the way `write`
+    /// backs up whatever it replaces. Returns the backup path, or nil when there was
+    /// nothing at that name to delete.
+    ///
+    /// This is the only way a prompt file is ever removed from a directory `PromptStore`
+    /// manages — in particular, `PromptInbox`'s merge-approval flow (PRE-265) routes a
+    /// merge's losing names through here rather than `FileManager.removeItem` directly,
+    /// so a deletion driven by untrusted inbox content always leaves a recoverable copy
+    /// behind, the same guarantee every other write in this file carries.
+    @discardableResult
+    static func delete(name: String, from directory: URL) throws -> String? {
+        let targetURL = directory.appendingPathComponent("\(name).md")
+        guard let priorContent = try? String(contentsOf: targetURL, encoding: .utf8) else {
+            return nil
+        }
+        let backupPath = try writeBackup(of: priorContent, name: name, in: directory)
+        do {
+            try fileManager.removeItem(at: targetURL)
+        } catch {
+            throw WriteError.writeFailed(error.localizedDescription)
+        }
+        return backupPath
+    }
+
     // MARK: Frontmatter parsing / serialization
 
     /// Splits `content` into frontmatter (if any) and body.

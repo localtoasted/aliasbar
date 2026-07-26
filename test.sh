@@ -24,6 +24,8 @@ swiftc -parse-as-library -emit-module \
     "${PROJECT_DIR}/Sources/Shortcut.swift" \
     "${PROJECT_DIR}/Sources/PromptStore.swift" \
     "${PROJECT_DIR}/Sources/PromptCompiler.swift" \
+    "${PROJECT_DIR}/Sources/AuditPrompt.swift" \
+    "${PROJECT_DIR}/Sources/PromptInbox.swift" \
     -emit-module-path "${BUILD_DIR}/AliasBarCore.swiftmodule"
 
 swiftc -target "$(uname -m)-apple-macos13.0" \
@@ -42,6 +44,8 @@ swiftc -target "$(uname -m)-apple-macos13.0" \
     "${PROJECT_DIR}/Sources/Shortcut.swift" \
     "${PROJECT_DIR}/Sources/PromptStore.swift" \
     "${PROJECT_DIR}/Sources/PromptCompiler.swift" \
+    "${PROJECT_DIR}/Sources/AuditPrompt.swift" \
+    "${PROJECT_DIR}/Sources/PromptInbox.swift" \
     "${PROJECT_DIR}/Sources/SharedDocument.swift" \
     "${PROJECT_DIR}/Sources/SettingsSync.swift" \
     "${PROJECT_DIR}/Sources/Store.swift" \
