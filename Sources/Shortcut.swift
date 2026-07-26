@@ -101,4 +101,20 @@ extension Shortcut {
         self.deliveryTargets = prompt.deliveryTargets
         self.editedAt = prompt.editedAt
     }
+
+    /// The inverse of `init(entry:)`, for callers (FIND's union ranking) that need to
+    /// hand a shell-kind `Shortcut` back to code built around `ShellEntry`/`RankedEntry`
+    /// without duplicating their delivery logic. Prompts have no shell-file identity to
+    /// reconstruct, so this is nil whenever `kind == .prompt`.
+    var shellEntry: ShellEntry? {
+        guard kind == .alias || kind == .function,
+              let sourceFile, let line else { return nil }
+        return ShellEntry(kind: kind == .alias ? .alias : .function,
+                           name: name,
+                           command: body,
+                           comment: comment,
+                           sourceFile: sourceFile,
+                           line: line,
+                           managed: managed)
+    }
 }

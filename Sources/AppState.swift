@@ -68,6 +68,15 @@ final class AppState: ObservableObject {
     @Published var query = ""
     @Published var selection = 0
     @Published var bucket: Bucket = .all
+    /// Which kind of thing FIND currently favors when there isn't enough query yet to
+    /// know: `.shell` for a terminal-shaped previous app, `.prompt` for an AI-native
+    /// one. Recomputed fresh on every summon by `ContextDetector`; ⇥ flips it by hand
+    /// from there, independent of whatever the guess said.
+    @Published var dialect: Dialect = .shell
+    /// The inference copy the title bar shows, or nil when the guess has nothing worth
+    /// saying (an unrecognized app). Frozen at the guess made when the popover opened —
+    /// it describes where you came from, not where ⇥ has since taken you.
+    @Published private(set) var contextChip: String?
     @Published var editor: EditTarget?
     @Published var toast: String?
     @Published var errorMessage: String?
@@ -97,6 +106,13 @@ final class AppState: ObservableObject {
 
     let store: EntryStore
     let settings: AppSettings
+
+    /// Every prompt on disk, read once per summon in `prepareForShow` — a directory
+    /// scan on every keystroke would be felt, the same reasoning `EntryStore` already
+    /// applies to shell history.
+    private var promptCache: [Prompt] = []
+    /// Usage counts for those prompts, loaded alongside them for the same reason.
+    private var promptUsageCache: [String: PromptUsageCounter.Entry] = [:]
 
     /// Set by the app delegate. Lets actions close the popover without the state layer
     /// knowing anything about AppKit.
@@ -152,6 +168,80 @@ final class AppState: ObservableObject {
             ? max(settings.resultLimit, WindowLayout.restRows)
             : settings.resultLimit
         return Array(ranked.prefix(limit))
+    }
+
+    // MARK: - FIND: shell + prompt union
+
+    /// FIND's pool: the shell entries the current bucket admits, plus every stored
+    /// prompt — always both, per the boost-not-wall rule; ranking (`ShortcutRanker`)
+    /// is what makes one kind easier to reach, never what removes the other.
+    ///
+    /// Prompts skip a non-`.all` bucket. A bucket (functions, never-run, conflicts...)
+    /// is a shell-specific facet with no meaning for a prompt, so narrowing to one
+    /// reads as narrowing to shell, not as hiding prompts on principle.
+    private var findPool: [Shortcut] {
+        var shortcuts = pool.map { ranked -> Shortcut in
+            var shortcut = Shortcut(entry: ranked.entry)
+            shortcut.uses = ranked.uses
+            return shortcut
+        }
+        if bucket == .all {
+            shortcuts += promptCache.map { prompt -> Shortcut in
+                var shortcut = Shortcut(prompt: prompt)
+                shortcut.uses = promptUsageCache[prompt.name]?.count ?? 0
+                return shortcut
+            }
+        }
+        return shortcuts
+    }
+
+    /// FIND's ranked, capped results — the union of shell entries and prompts. The cap
+    /// mirrors `results`: don't make the user read more than the window has room for.
+    var findResults: [Shortcut] {
+        let ranked = ShortcutRanker.rank(findPool, query: query,
+                                         scope: settings.searchScope, dialect: dialect)
+        let limit = query.isEmpty
+            ? max(settings.resultLimit, WindowLayout.restRows)
+            : settings.resultLimit
+        return Array(ranked.prefix(limit))
+    }
+
+    /// FIND's counterpart to `selectedEntry` — the highlighted shortcut, shell or
+    /// prompt. Same "no fallback to first" rule: an index that has drifted off the end
+    /// of a reranked list should act on nothing, not on whatever slid under it.
+    var selectedShortcut: Shortcut? {
+        let list = findResults
+        guard list.indices.contains(selection) else { return nil }
+        return list[selection]
+    }
+
+    /// ⇥ in FIND: swap which dialect is favored, without touching the query. A no-op
+    /// everywhere else — BOARD and MANAGE have nothing to flip.
+    func flipDialect() {
+        guard mode == .find, !historyMode else { return }
+        dialect = dialect == .shell ? .prompt : .shell
+        selection = 0
+    }
+
+    /// FIND's Enter/⌘⏎, for a shortcut that might be either kind. A shell shortcut is
+    /// rebuilt into the `RankedEntry` `perform` already knows how to deliver, so the
+    /// shell delivery path is byte-for-byte what it was before FIND grew a second kind
+    /// of row. A prompt is new: straight-to-clipboard is deliberately the whole story
+    /// until PRE-260's paste flows and slot-filling composer land — Enter and ⌘⏎ do the
+    /// same thing today (copy the raw body, slots and all, then close), so only one of
+    /// them needs to change later, not both.
+    func performFind(_ shortcut: Shortcut, secondary: Bool) {
+        switch shortcut.kind {
+        case .alias, .function:
+            guard let entry = shortcut.shellEntry else { return }
+            perform(secondary ? settings.enterAction.secondary : settings.enterAction,
+                    on: RankedEntry(entry: entry, uses: shortcut.uses))
+        case .prompt:
+            PasteboardBroker.write(transient: shortcut.body)
+            PromptUsageCounter.recordUse(of: shortcut.name, path: AppPaths.promptUsagePath)
+            show(toast: "Copied \(shortcut.name)")
+            dismiss(restoringFocus: true)
+        }
     }
 
     // MARK: - History
@@ -252,12 +342,24 @@ final class AppState: ObservableObject {
     }
 
     /// The list the selection cursor is currently moving through.
+    ///
+    /// Kept `[RankedEntry]` for BOARD and MANAGE, which never gained a second kind of
+    /// row. FIND did — see `findResults` — so `activeList.count` for FIND undercounts
+    /// once prompts are in the mix; `activeCount` below is what actually tracks the
+    /// cursor and the header's live counter.
     var activeList: [RankedEntry] {
         switch mode {
         case .find: return results
         case .board: return boardEntries
         case .manage: return bucketEntries
         }
+    }
+
+    /// The count `move`, `clampSelection`, and the header's live counter share:
+    /// FIND's own shell+prompt union while in FIND, `activeList`'s count everywhere
+    /// else.
+    var activeCount: Int {
+        mode == .find ? findResults.count : activeList.count
     }
 
     /// The selected entry, or nil when the selection no longer points at anything.
@@ -295,11 +397,23 @@ final class AppState: ObservableObject {
         query = ""
         selection = 0
         editor = nil
+
+        // The one place dialect is ever guessed: from the app that was frontmost right
+        // before this summon, which `PreviousApp.remember()` already captured on the
+        // way in. No new tracking, and no look at anything but that app's bundle ID.
+        let guess = ContextDetector.guess(for: PreviousApp.stored)
+        dialect = guess.dialect ?? .shell
+        contextChip = guess.chip
+
+        let promptsDirectory = URL(fileURLWithPath: AppPaths.promptsDirectory)
+        promptCache = PromptStore.scan(directory: promptsDirectory).prompts
+        promptUsageCache = PromptUsageCounter.all(path: AppPaths.promptUsagePath)
+
         showCount += 1
     }
 
     func clampSelection() {
-        let count = historyMode ? historyResults.count : activeList.count
+        let count = historyMode ? historyResults.count : activeCount
         if count == 0 { selection = 0 }
         else if selection >= count { selection = count - 1 }
         else if selection < 0 { selection = 0 }
@@ -361,6 +475,22 @@ final class AppState: ObservableObject {
         case kVK_Return where historyMode:
             guard let entry = selectedHistory else { return true }
             if command { promoteToAlias(entry) } else { run(entry) }
+            return true
+
+        // FIND's rows are the shell+prompt union, so its Enter goes through
+        // `performFind` rather than the RankedEntry-only path below.
+        case kVK_Return where mode == .find:
+            guard let shortcut = selectedShortcut else {
+                if !query.isEmpty { editor = .create(name: query) }
+                return true
+            }
+            performFind(shortcut, secondary: command)
+            return true
+
+        // ⇥ in FIND flips the dialect boost instead of cycling the view — BOARD and
+        // MANAGE keep ⇥ as a view switch below, since neither has a dialect to flip.
+        case kVK_Tab where mode == .find && !historyMode:
+            flipDialect()
             return true
 
         // Buckets are the folders, and ⌘↑ ⌘↓ walk them the way ⌘↑ walks Finder's — in
@@ -442,7 +572,15 @@ final class AppState: ObservableObject {
             return true
 
         case kVK_ANSI_E where command:
-            if let entry = selectedEntry { beginEdit(entry.entry) }
+            // FIND's selection is a `Shortcut`, which might be a prompt — those have
+            // no shell-file identity for `beginEdit` to touch, and no editor of their
+            // own yet, so ⌘E on one is a quiet no-op rather than a crash or a
+            // mis-targeted edit.
+            if mode == .find {
+                if let entry = selectedShortcut?.shellEntry { beginEdit(entry) }
+            } else if let entry = selectedEntry {
+                beginEdit(entry.entry)
+            }
             return true
 
         case kVK_ANSI_Comma where command:
@@ -482,7 +620,7 @@ final class AppState: ObservableObject {
     }
 
     private func move(by delta: Int) {
-        let count = historyMode ? historyResults.count : activeList.count
+        let count = historyMode ? historyResults.count : activeCount
         guard count > 0 else { selection = 0; return }
         // Wraps, because in a capped list the fastest way to the last item is up.
         selection = ((selection + delta) % count + count) % count

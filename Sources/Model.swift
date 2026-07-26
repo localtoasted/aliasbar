@@ -663,4 +663,15 @@ enum CorePaths {
         }
         return homeDirectory + "/.zsh_history"
     }
+
+    /// No `stored:` parameter here — unlike the rc path, there is no per-app setting
+    /// that redirects where prompts live, only the environment override that makes
+    /// this testable.
+    static func resolvePromptsDirectory(environmentOverride: String?,
+                                        homeDirectory: String) -> String {
+        if let environmentOverride, !environmentOverride.isEmpty {
+            return (environmentOverride as NSString).expandingTildeInPath
+        }
+        return homeDirectory + "/.aliasbar/prompts"
+    }
 }
