@@ -9,12 +9,17 @@ final class EntryStore: ObservableObject {
     /// from a file that simply defines nothing.
     @Published private(set) var loadError: String?
 
+    /// Read only to decide whether `usage` ever reaches `ranked` — see `reload`.
+    private let settings: AppSettings
     private var usage: [String: Int] = [:]
     /// History is far larger than an rc file and changes far less meaningfully, so it
     /// is scanned once per launch rather than on every popover open.
     private var usageLoaded = false
 
-    init() { reload() }
+    init(settings: AppSettings = .shared) {
+        self.settings = settings
+        reload()
+    }
 
     func reload() {
         if !usageLoaded {
@@ -24,7 +29,14 @@ final class EntryStore: ObservableObject {
         let outcome = ZshrcParser.parse()
         loadError = outcome.errorMessage
         let entries = outcome.entries
-        ranked = entries.map { RankedEntry(entry: $0, uses: usage[$0.name] ?? 0) }
+        // The scan above still runs even when the setting is off — it's a cheap local
+        // read, and keeping it warm means flipping the setting back on takes effect on
+        // the very next reload rather than needing a fresh history scan. What the
+        // setting actually gates is whether a count ever reaches a `RankedEntry` at
+        // all, which is what keeps it out of ranking (`Ranker`/`ShortcutRanker` both
+        // tie-break on `uses`) and out of every "×N" badge in FIND/BOARD/MANAGE.
+        let effectiveUsage = settings.historyUsageRankingEnabled ? usage : [:]
+        ranked = entries.map { RankedEntry(entry: $0, uses: effectiveUsage[$0.name] ?? 0) }
         conflicts = ConflictDetector.detect(in: entries)
     }
 
@@ -53,9 +65,15 @@ final class EntryStore: ObservableObject {
     var aliases: [RankedEntry] { ranked.filter { $0.entry.kind == .alias } }
     var mostUsed: [RankedEntry] { ranked.filter { $0.uses > 0 }.sorted { $0.uses > $1.uses } }
 
-    /// The graveyard: defined, never run. The most interesting number in the app.
+    /// The graveyard: defined, never run. The most interesting number in the app —
+    /// which is exactly why it needs its own guard rather than falling out of
+    /// `reload`'s zeroed `uses` for free: `uses == 0` for every single entry when
+    /// tracking is off would otherwise read as "you've never run anything you've
+    /// defined", a much stronger and false claim compared to `mostUsed`'s symmetric
+    /// (and honest) emptiness above.
     var neverRun: [RankedEntry] {
-        ranked.filter { $0.uses == 0 }.sorted { $0.name < $1.name }
+        guard settings.historyUsageRankingEnabled else { return [] }
+        return ranked.filter { $0.uses == 0 }.sorted { $0.name < $1.name }
     }
 
     var conflictedEntries: [RankedEntry] {

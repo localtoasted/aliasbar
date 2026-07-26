@@ -361,9 +361,28 @@ struct RootView: View {
                         KeyHint(keys: "⌘⏎", label: "make an alias")
                         KeyHint(keys: "⌘H", label: "back")
                     } else if state.findSource == .clipboard {
+                        // Checked ahead of the dialect branch below: the clipboard
+                        // source has no dialect of its own (⇥ there cycles transforms,
+                        // not shell/prompt), so its hints always win regardless of
+                        // whatever `state.dialect` still says from before ⌘K was hit.
                         KeyHint(keys: "⏎", label: "copy")
                         KeyHint(keys: "⇥", label: "cycle transforms")
                         KeyHint(keys: "⌘K", label: "back")
+                    } else if state.dialect == .prompt {
+                        // PRE-260's paste/copy-raw/fill-in flows replaced PRE-259's
+                        // interim copy-only Enter, but the footer never caught up —
+                        // this is that catch-up. `enterAction`'s copy/paste split is a
+                        // shell-only preference (it governs typing vs. copying a name
+                        // or command into the app behind), so it has nothing to say
+                        // about a prompt paste and is left out entirely rather than
+                        // shown and ignored.
+                        KeyHint(keys: "⏎", label: "paste prompt")
+                        KeyHint(keys: "⌘⏎", label: "copy raw")
+                        KeyHint(keys: "⇥", label: "shell")
+                        KeyHint(keys: "⌘↑↓", label: "buckets")
+                        KeyHint(keys: "⌘N", label: "new")
+                        KeyHint(keys: "⌘H", label: "history")
+                        KeyHint(keys: "⌘K", label: "clipboard")
                     } else {
                         KeyHint(keys: "⏎", label: settings.enterAction.short)
                         KeyHint(keys: "⌘⏎", label: settings.enterAction.secondary.short)
@@ -372,6 +391,13 @@ struct RootView: View {
                         // already on the sidebar button in MANAGE.
                         KeyHint(keys: "⌥←→", label: "views")
                         KeyHint(keys: "⌘↑↓", label: "buckets")
+                        // ⇥'s dialect flip only ever goes somewhere while the prompt
+                        // side of the app is switched on (`flipDialect` no-ops
+                        // otherwise, per `promptFeaturesEnabled`) — advertising it
+                        // when it wouldn't do anything would be worse than silence.
+                        if settings.promptFeaturesEnabled {
+                            KeyHint(keys: "⇥", label: "prompts")
+                        }
                         KeyHint(keys: "⌘N", label: "new")
                         KeyHint(keys: "⌘H", label: "history")
                         KeyHint(keys: "⌘K", label: "clipboard")
@@ -1541,7 +1567,9 @@ struct ManageView: View {
                                    ? "No conflicts"
                                    : "Nothing in \(state.bucket.label.lowercased())",
                                hint: state.bucket == .neverRun
-                                   ? "Everything you've defined has been used at least once."
+                                   ? (settings.historyUsageRankingEnabled
+                                       ? "Everything you've defined has been used at least once."
+                                       : "History-based usage tracking is off — turn it on in Settings to see what you've never run.")
                                    : "Pick another bucket on the left.")
             }
             .frame(maxWidth: .infinity)
@@ -1551,9 +1579,13 @@ struct ManageView: View {
     private func metadata(_ entry: RankedEntry) -> some View {
         VStack(alignment: .leading, spacing: 3) {
             metaRow("Source", "\(entry.entry.sourceDisplayName):\(entry.entry.line)")
-            metaRow("Runs", entry.uses == 0
-                    ? "never, per your shell history"
-                    : "\(entry.uses)×")
+            // `entry.uses` is always 0 while `historyUsageRankingEnabled` is off
+            // (`EntryStore.reload` zeroes it), so "never, per your shell history" has
+            // to be conditioned on the setting too — otherwise every alias reads as
+            // never run, when the truth is simply that nothing was counted.
+            metaRow("Runs", settings.historyUsageRankingEnabled
+                    ? (entry.uses == 0 ? "never, per your shell history" : "\(entry.uses)×")
+                    : "usage tracking is off in Settings")
             metaRow("Managed", entry.entry.managed
                     ? "yes, AliasBar can edit this"
                     : "no, hand-written")
