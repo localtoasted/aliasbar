@@ -76,7 +76,7 @@ This is the only code in AliasBar that modifies anything, so it's the part that'
 
 ## Themes
 
-Phosphor (green CRT), Ledger (ruled accounting paper), Blueprint (cyanotype), Index (card catalogue), Dictionary (typeset reference), or System.
+Graphite, Clay, or Ultramarine.
 
 ## Why it's small
 
