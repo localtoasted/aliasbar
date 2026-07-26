@@ -50,6 +50,14 @@ enum AppPaths {
             homeDirectory: NSHomeDirectory())
     }
 
+    /// Where `SuggestionIgnoreStore` records dismissed suggestions.
+    static var suggestionIgnoresPath: String {
+        CorePaths.resolveSuggestionIgnoresPath(
+            environmentOverride: ProcessInfo.processInfo.environment["ALIASBAR_SUGGESTION_IGNORES"],
+            homeDirectory: NSHomeDirectory()
+        )
+    }
+
     // Existing call sites (including WriterTests.swift) reach the resolvers through
     // AppPaths. Kept as thin forwarders so nothing outside this file has to change,
     // while CorePaths remains the one place the actual precedence logic lives.

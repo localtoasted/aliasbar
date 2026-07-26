@@ -139,7 +139,22 @@ enum PromptCompiler {
         var registry = try loadRegistry(at: registryPath)
         let destination = (commandsDir as NSString).appendingPathComponent("\(name).md")
         let content = render(description: description, body: body)
-        let newHash = SHA256Digest.hex(content)
+        let newHash = SHA256Digest.hex(Data(content.utf8))
+
+        // A registry entry for this name that points anywhere but commandsDir/<name>.md
+        // is not something `compile` may act on. Checking this before looking at what's
+        // on disk at `destination` matters: if nothing exists there yet, the collision
+        // and hash-mismatch checks below would never fire, and this call would happily
+        // write a fresh file and repoint the registry entry at it — silently orphaning
+        // whatever the old entry actually pointed to, with nothing left recording that
+        // it ever existed.
+        if let existing = registry[name] {
+            let expectedPath = URL(fileURLWithPath: destination).standardizedFileURL.path
+            let recordedPath = URL(fileURLWithPath: existing.path).standardizedFileURL.path
+            guard recordedPath == expectedPath else {
+                throw CompileError.registryPathEscape(name: name, path: existing.path)
+            }
+        }
 
         try FileManager.default.createDirectory(atPath: commandsDir, withIntermediateDirectories: true)
 
@@ -152,7 +167,11 @@ enum PromptCompiler {
             guard let existing = registry[name] else {
                 throw CompileError.collision(name: name, path: destination)
             }
-            let onDisk = try readFile(destination)
+            // Hashed as the raw bytes actually on disk, not a UTF-8-decoded String:
+            // decoding first would replace any invalid byte sequence with U+FFFD,
+            // changing what gets hashed and turning an untouched non-UTF-8 file into
+            // a false hash mismatch.
+            let onDisk = try readFileData(destination)
             guard SHA256Digest.hex(onDisk) == existing.sha256 else {
                 throw CompileError.hashMismatch(name: name, path: destination)
             }
@@ -204,7 +223,7 @@ enum PromptCompiler {
             return entry.path
         }
 
-        let onDisk = try readFile(entry.path)
+        let onDisk = try readFileData(entry.path)
         guard SHA256Digest.hex(onDisk) == entry.sha256 else {
             throw CompileError.hashMismatch(name: name, path: entry.path)
         }
@@ -315,10 +334,10 @@ enum PromptCompiler {
         return (base.isEmpty ? "." : base) + "/.backups/commands"
     }
 
-    private static func writeBackup(of content: String, name: String, backupsDir: String) throws -> String {
+    private static func writeBackup(of content: Data, name: String, backupsDir: String) throws -> String {
         try FileManager.default.createDirectory(atPath: backupsDir, withIntermediateDirectories: true)
         let path = backupsDir + "/\(name)-\(backupTimestamp()).md"
-        guard FileManager.default.createFile(atPath: path, contents: Data(content.utf8)) else {
+        guard FileManager.default.createFile(atPath: path, contents: content) else {
             throw CompileError.backupFailed(path)
         }
         return path
@@ -336,11 +355,15 @@ enum PromptCompiler {
         return "\(formatter.string(from: date))-\(String(format: "%06d", micros))"
     }
 
-    private static func readFile(_ path: String) throws -> String {
+    /// Raw bytes, exactly as they sit on disk. Ownership hashing and backups both go
+    /// through this rather than a decoded `String` — decoding first would silently
+    /// replace any invalid UTF-8 byte with U+FFFD, changing both the hash and the
+    /// bytes a backup preserves for a file that isn't valid UTF-8.
+    private static func readFileData(_ path: String) throws -> Data {
         guard let data = FileManager.default.contents(atPath: path) else {
             throw CompileError.unreadable(path)
         }
-        return String(decoding: data, as: UTF8.self)
+        return data
     }
 
     // MARK: - Atomic write
