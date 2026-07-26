@@ -2905,6 +2905,243 @@ for forbiddenAPI in [
 
 
 // ---------------------------------------------------------------------------
+print("\n31. PromptCompiler: siloed prompt installer")
+
+// Each fixture gets its own commandsDir and registry, both under the shared sandbox,
+// so no case can observe another's files.
+func promptFixture() -> (commandsDir: String, registryPath: String) {
+    caseIndex += 1
+    let base = "\(sandbox)/prompt-case\(caseIndex)"
+    let commandsDir = "\(base)/commands"
+    let registryPath = "\(base)/.aliasbar/compiled.json"
+    try! FileManager.default.createDirectory(atPath: commandsDir, withIntermediateDirectories: true)
+    try! FileManager.default.createDirectory(
+        atPath: (registryPath as NSString).deletingLastPathComponent,
+        withIntermediateDirectories: true)
+    return (commandsDir, registryPath)
+}
+
+// --- Fresh install, with and without a description -------------------------
+
+var (cDir, rPath) = promptFixture()
+let result1 = try! PromptCompiler.compile(name: "standup", description: "Daily standup summary",
+                                          body: "Summarize what shipped yesterday.\n",
+                                          commandsDir: cDir, registryPath: rPath)
+let written1 = read(result1.path)
+check("destination is commandsDir/name.md", result1.path == cDir + "/standup.md")
+check("frontmatter present", written1.hasPrefix("---\ndescription: Daily standup summary\n---\n"))
+check("provenance comment present", written1.contains("<!-- managed by AliasBar -->"))
+check("body present verbatim", written1.contains("Summarize what shipped yesterday."))
+check("no backup on a fresh install", result1.backup == nil)
+
+if case .ok(let installed) = PromptCompiler.installedCommands(registryPath: rPath) {
+    check("registry lists the new command", installed.contains { $0.name == "standup" })
+    check("registry hash matches the file actually on disk",
+          installed.first(where: { $0.name == "standup" })?.sha256 == SHA256Digest.hex(written1))
+} else {
+    check("registry is readable right after an install", false)
+}
+
+(cDir, rPath) = promptFixture()
+let result2 = try! PromptCompiler.compile(name: "nofm", description: nil, body: "just the body\n",
+                                          commandsDir: cDir, registryPath: rPath)
+let written2 = read(result2.path)
+check("no frontmatter block when description is nil", !written2.contains("---"))
+check("provenance comment still present without frontmatter",
+      written2.hasPrefix("<!-- managed by AliasBar -->\n"))
+
+// --- Update in place produces a backup --------------------------------------
+
+(cDir, rPath) = promptFixture()
+_ = try! PromptCompiler.compile(name: "iter", description: "v1", body: "first version\n",
+                                commandsDir: cDir, registryPath: rPath)
+let firstContent = read(cDir + "/iter.md")
+let result3 = try! PromptCompiler.compile(name: "iter", description: "v2", body: "second version\n",
+                                          commandsDir: cDir, registryPath: rPath)
+check("updating a command AliasBar owns produces a backup", result3.backup != nil)
+if let backup = result3.backup {
+    check("the backup holds exactly the prior content", read(backup) == firstContent)
+    check("the backup lives under .backups/commands next to the registry",
+          backup.contains("/.backups/commands/iter-"))
+}
+check("the file now holds the new content", read(cDir + "/iter.md").contains("second version"))
+
+// --- Refusals: the two ways an overwrite can be unsafe ----------------------
+
+(cDir, rPath) = promptFixture()
+try! "# a command I wrote myself\n".write(toFile: cDir + "/mine.md", atomically: true, encoding: .utf8)
+expectThrow("refuses to overwrite a pre-existing file the registry never recorded") {
+    _ = try PromptCompiler.compile(name: "mine", description: nil, body: "replacement\n",
+                                   commandsDir: cDir, registryPath: rPath)
+}
+check("the user's unregistered file is untouched",
+      read(cDir + "/mine.md") == "# a command I wrote myself\n")
+
+(cDir, rPath) = promptFixture()
+_ = try! PromptCompiler.compile(name: "edited", description: nil, body: "original\n",
+                                commandsDir: cDir, registryPath: rPath)
+try! "hand edit, not through AliasBar\n".write(toFile: cDir + "/edited.md", atomically: true, encoding: .utf8)
+expectThrow("refuses to overwrite a registry-owned file whose hash no longer matches") {
+    _ = try PromptCompiler.compile(name: "edited", description: nil, body: "replacement\n",
+                                   commandsDir: cDir, registryPath: rPath)
+}
+check("the hand edit survives the refused write",
+      read(cDir + "/edited.md") == "hand edit, not through AliasBar\n")
+
+// --- Uninstall removes only what it wrote -----------------------------------
+
+(cDir, rPath) = promptFixture()
+_ = try! PromptCompiler.compile(name: "keep", description: nil, body: "keep me\n",
+                                commandsDir: cDir, registryPath: rPath)
+_ = try! PromptCompiler.compile(name: "drift", description: nil, body: "drifted\n",
+                                commandsDir: cDir, registryPath: rPath)
+try! "someone hand-edited this after install\n".write(toFile: cDir + "/drift.md", atomically: true, encoding: .utf8)
+
+expectThrow("uninstall refuses a hash-mismatched file rather than deleting it") {
+    _ = try PromptCompiler.uninstall(name: "drift", commandsDir: cDir, registryPath: rPath)
+}
+check("the hash-mismatched file was not deleted", FileManager.default.fileExists(atPath: cDir + "/drift.md"))
+
+let backupOfKeep = try! PromptCompiler.uninstall(name: "keep", commandsDir: cDir, registryPath: rPath)
+check("the hash-matching file was removed", !FileManager.default.fileExists(atPath: cDir + "/keep.md"))
+check("uninstall's backup holds the removed content", read(backupOfKeep).contains("keep me"))
+check("the untouched sibling file still exists", FileManager.default.fileExists(atPath: cDir + "/drift.md"))
+
+if case .ok(let installed) = PromptCompiler.installedCommands(registryPath: rPath) {
+    check("registry no longer lists the uninstalled command", !installed.contains { $0.name == "keep" })
+    check("registry still lists the hash-mismatched one (never silently dropped)",
+          installed.contains { $0.name == "drift" })
+} else {
+    check("registry is readable after a partial uninstall", false)
+}
+
+expectThrow("uninstalling a name the registry never had refuses") {
+    _ = try PromptCompiler.uninstall(name: "never-installed", commandsDir: cDir, registryPath: rPath)
+}
+
+// --- Atomicity: no stray temp files survive a run ---------------------------
+
+(cDir, rPath) = promptFixture()
+for i in 0..<5 {
+    _ = try! PromptCompiler.compile(name: "atomic\(i)", description: nil, body: "body \(i)\n",
+                                    commandsDir: cDir, registryPath: rPath)
+}
+let leftoverCommandTemps = (try? FileManager.default.contentsOfDirectory(atPath: cDir))?
+    .filter { $0.hasPrefix(".aliasbar-tmp-") } ?? ["<directory listing failed>"]
+check("no stray temp files left in commandsDir", leftoverCommandTemps.isEmpty,
+      leftoverCommandTemps.joined(separator: ", "))
+let registryDir = (rPath as NSString).deletingLastPathComponent
+let leftoverRegistryTemps = (try? FileManager.default.contentsOfDirectory(atPath: registryDir))?
+    .filter { $0.hasPrefix(".aliasbar-tmp-") } ?? ["<directory listing failed>"]
+check("no stray temp files left next to the registry", leftoverRegistryTemps.isEmpty,
+      leftoverRegistryTemps.joined(separator: ", "))
+
+// --- Builtin collisions warn; they never block ------------------------------
+
+check("collides(name:) recognizes a builtin", BuiltinSlashCommands.collides(name: "review") == .builtin)
+check("collides(name:) is case-insensitive", BuiltinSlashCommands.collides(name: "REVIEW") == .builtin)
+check("collides(name:) returns nil for a custom name",
+      BuiltinSlashCommands.collides(name: "totally-custom") == nil)
+
+(cDir, rPath) = promptFixture()
+let reviewResult = try! PromptCompiler.compile(name: "review", description: nil,
+                                               body: "shadow the builtin on purpose\n",
+                                               commandsDir: cDir, registryPath: rPath)
+check("compiling a builtin-shadowing name still succeeds",
+      FileManager.default.fileExists(atPath: reviewResult.path))
+check("compile surfaces the builtin collision as a warning rather than blocking",
+      reviewResult.builtinCollision == .builtin)
+
+// --- Name validation ---------------------------------------------------------
+
+(cDir, rPath) = promptFixture()
+expectThrow("refuses a name containing a space") {
+    _ = try PromptCompiler.compile(name: "not valid", description: nil, body: "x\n",
+                                   commandsDir: cDir, registryPath: rPath)
+}
+expectThrow("refuses a name containing a slash") {
+    _ = try PromptCompiler.compile(name: "not/valid", description: nil, body: "x\n",
+                                   commandsDir: cDir, registryPath: rPath)
+}
+check("nothing was written for any invalid name",
+      (try? FileManager.default.contentsOfDirectory(atPath: cDir))?.isEmpty ?? true)
+
+(cDir, rPath) = promptFixture()
+_ = try! PromptCompiler.compile(name: "foo", description: nil, body: "x\n",
+                                commandsDir: cDir, registryPath: rPath)
+expectThrow("refuses a name that differs only in case from an existing file") {
+    _ = try PromptCompiler.compile(name: "Foo", description: nil, body: "y\n",
+                                   commandsDir: cDir, registryPath: rPath)
+}
+var sameNameAgainSucceeded = false
+if let _ = try? PromptCompiler.compile(name: "foo", description: nil, body: "updated\n",
+                                       commandsDir: cDir, registryPath: rPath) {
+    sameNameAgainSucceeded = true
+}
+check("re-compiling the exact same name is an update, not a case collision",
+      sameNameAgainSucceeded)
+
+// --- A corrupt registry is refused, never repaired by overwriting -----------
+
+(cDir, rPath) = promptFixture()
+try! "{ this is not valid json".write(toFile: rPath, atomically: true, encoding: .utf8)
+let corruptRegistryBefore = read(rPath)
+expectThrow("compile refuses outright when the registry is corrupt") {
+    _ = try PromptCompiler.compile(name: "anything", description: nil, body: "x\n",
+                                   commandsDir: cDir, registryPath: rPath)
+}
+check("the corrupt registry file is byte-for-byte untouched", read(rPath) == corruptRegistryBefore)
+check("nothing was written to commandsDir when the registry was corrupt",
+      (try? FileManager.default.contentsOfDirectory(atPath: cDir))?.isEmpty ?? true)
+expectThrow("uninstall also refuses outright when the registry is corrupt") {
+    _ = try PromptCompiler.uninstall(name: "anything", commandsDir: cDir, registryPath: rPath)
+}
+if case .corrupt = PromptCompiler.installedCommands(registryPath: rPath) {
+    check("installedCommands reports corruption rather than pretending the registry is empty", true)
+} else {
+    check("installedCommands reports corruption rather than pretending the registry is empty", false)
+}
+
+// A registry file that simply does not exist yet is the pre-first-install state,
+// not corruption, and must read back as empty.
+(cDir, rPath) = promptFixture()
+if case .ok(let installed) = PromptCompiler.installedCommands(registryPath: rPath) {
+    check("a registry that doesn't exist yet reads as empty, not corrupt", installed.isEmpty)
+} else {
+    check("a missing registry file is not reported as corrupt", false)
+}
+
+// --- SHA-256 sanity: the hash-mismatch protection is only as good as this ---
+
+check("SHA-256 of the empty string matches the published test vector",
+      SHA256Digest.hex("") == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+check("SHA-256 of \"abc\" matches the published test vector",
+      SHA256Digest.hex("abc") == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+check("SHA-256 handles multi-block input (1,000,000 x 'a')",
+      SHA256Digest.hex(String(repeating: "a", count: 1_000_000))
+        == "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0")
+
+// --- Zero shared code with AliasWriter --------------------------------------
+
+let promptCompilerSource = read(projectRoot.appendingPathComponent("Sources/PromptCompiler.swift").path)
+check("PromptCompiler source is readable", promptCompilerSource != "<unreadable>")
+// The header comment explains in prose *why* PromptCompiler shares nothing with
+// AliasWriter, and names it while doing so — that is documentation, not coupling.
+// The boundary this checks is code coupling, so comment lines are stripped first;
+// a genuine reference would show up as actual Swift code (a member access such as
+// `AliasWriter.`, or the bare type name used as a value) and survive the strip.
+let promptCompilerCodeOnly = promptCompilerSource
+    .components(separatedBy: "\n")
+    .filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }
+    .joined(separator: "\n")
+for forbiddenSymbol in [
+    "AliasWriter", "ManagedBlock", "ZshrcParser", "ShellEntry", "AppKit", "SwiftUI", "UserDefaults",
+] {
+    check("PromptCompiler shares no code-level reference to \(forbiddenSymbol)",
+          !promptCompilerCodeOnly.contains(forbiddenSymbol))
+}
+
+// ---------------------------------------------------------------------------
 print("\n" + String(repeating: "-", count: 60))
 print("\(passes) passed, \(failures) failed")
 exit(failures == 0 ? 0 : 1)
