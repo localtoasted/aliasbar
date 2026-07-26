@@ -181,9 +181,7 @@ enum Typist {
     static func paste(_ text: String) -> Bool {
         guard isTrusted else { return false }
 
-        let pasteboard = NSPasteboard.general
-        pasteboard.clearContents()
-        pasteboard.setString(text, forType: .string)
+        PasteboardBroker.write(transient: text)
 
         guard let source = CGEventSource(stateID: .combinedSessionState) else { return false }
         let v = CGKeyCode(kVK_ANSI_V)
