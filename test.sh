@@ -24,6 +24,8 @@ swiftc -parse-as-library -emit-module \
     "${PROJECT_DIR}/Sources/Shortcut.swift" \
     "${PROJECT_DIR}/Sources/PromptStore.swift" \
     "${PROJECT_DIR}/Sources/PromptCompiler.swift" \
+    "${PROJECT_DIR}/Sources/AuditPrompt.swift" \
+    "${PROJECT_DIR}/Sources/PromptInbox.swift" \
     "${PROJECT_DIR}/Sources/SharedDocument.swift" \
     "${PROJECT_DIR}/Sources/SnippetCore.swift" \
     "${PROJECT_DIR}/Sources/SuggestionEngine.swift" \
@@ -45,6 +47,8 @@ swiftc -target "$(uname -m)-apple-macos13.0" \
     "${PROJECT_DIR}/Sources/Shortcut.swift" \
     "${PROJECT_DIR}/Sources/PromptStore.swift" \
     "${PROJECT_DIR}/Sources/PromptCompiler.swift" \
+    "${PROJECT_DIR}/Sources/AuditPrompt.swift" \
+    "${PROJECT_DIR}/Sources/PromptInbox.swift" \
     "${PROJECT_DIR}/Sources/SuggestionEngine.swift" \
     "${PROJECT_DIR}/Sources/SharedDocument.swift" \
     "${PROJECT_DIR}/Sources/SettingsSync.swift" \
@@ -53,6 +57,7 @@ swiftc -target "$(uname -m)-apple-macos13.0" \
     "${PROJECT_DIR}/Sources/Diag.swift" \
     "${PROJECT_DIR}/Sources/Hotkey.swift" \
     "${PROJECT_DIR}/Sources/DialectContext.swift" \
+    "${PROJECT_DIR}/Sources/FillInSheet.swift" \
     "${PROJECT_DIR}/Sources/AppState.swift" \
     "${BUILD_DIR}/main.swift" \
     -o "${BUILD_DIR}/writer-tests"

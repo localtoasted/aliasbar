@@ -90,6 +90,19 @@ final class AppState: ObservableObject {
     /// and told to go edit the file by hand.
     @Published var confirmRemoval: RemovalConfirmation?
 
+    /// What FillInSheet is currently doing: filling in a selected prompt's slots
+    /// before it can be delivered. `fill` is the reusable, prompt-agnostic slot
+    /// state (`SlotFillState` in FillInSheet.swift) — this wrapper is the only part
+    /// that knows it belongs to a prompt specifically, so FillInSheet itself never
+    /// has to.
+    @Published var fillIn: PromptFillTarget?
+
+    struct PromptFillTarget: Identifiable {
+        let shortcut: Shortcut
+        var fill: SlotFillState
+        var id: String { shortcut.id }
+    }
+
     struct RemovalConfirmation: Identifiable {
         let id = UUID()
         /// Every line the edit would delete, verbatim.
@@ -111,6 +124,12 @@ final class AppState: ObservableObject {
 
     let store: EntryStore
     let settings: AppSettings
+
+    /// Where `deliver` writes. Always the real system pasteboard in production —
+    /// this exists purely as a seam so a test can prove a rendered prompt body
+    /// reaches the broker byte-exact without ever touching the actual clipboard.
+    /// Swapping it changes nothing about the delivery pipeline itself.
+    var pasteboard: PasteboardWriting = NSPasteboard.general
 
     /// Every prompt on disk, read once per summon in `prepareForShow` — a directory
     /// scan on every keystroke would be felt, the same reasoning `EntryStore` already
@@ -232,10 +251,14 @@ final class AppState: ObservableObject {
     /// FIND's Enter/⌘⏎, for a shortcut that might be either kind. A shell shortcut is
     /// rebuilt into the `RankedEntry` `perform` already knows how to deliver, so the
     /// shell delivery path is byte-for-byte what it was before FIND grew a second kind
-    /// of row. A prompt is new: straight-to-clipboard is deliberately the whole story
-    /// until PRE-260's paste flows and slot-filling composer land — Enter and ⌘⏎ do the
-    /// same thing today (copy the raw body, slots and all, then close), so only one of
-    /// them needs to change later, not both.
+    /// of row.
+    ///
+    /// A prompt now has three outcomes instead of PRE-259's single copy-and-close:
+    /// ⌘⏎ always copies the raw body — slots intact, byte-exact — and records usage;
+    /// a plain prompt (no slots) delivers its body through the same broker/paste
+    /// pipeline a shell shortcut uses; a slotted prompt opens `FillInSheet` instead
+    /// of delivering anything yet, so usage is recorded once, at the moment
+    /// something actually goes out, not when Enter is merely pressed.
     func performFind(_ shortcut: Shortcut, secondary: Bool) {
         switch shortcut.kind {
         case .alias, .function:
@@ -243,23 +266,86 @@ final class AppState: ObservableObject {
             perform(secondary ? settings.enterAction.secondary : settings.enterAction,
                     on: RankedEntry(entry: entry, uses: shortcut.uses))
         case .prompt:
-            PasteboardBroker.write(transient: shortcut.body)
-            PromptUsageCounter.recordUse(of: shortcut.name, path: AppPaths.promptUsagePath)
-            show(toast: "Copied \(shortcut.name)")
-            dismiss(restoringFocus: true)
+            if secondary {
+                deliverPrompt(shortcut, rendered: shortcut.body, raw: true)
+                return
+            }
+            guard shortcut.slots.isEmpty else {
+                fillIn = PromptFillTarget(shortcut: shortcut, fill: SlotFillState(slots: shortcut.slots))
+                return
+            }
+            deliverPrompt(shortcut, rendered: shortcut.body, raw: false)
         }
     }
 
-    /// BOARD's Enter on the prompt deck: copy the raw body, slots and all, and close —
-    /// the same interim action `performFind` takes on a `.prompt` shortcut. Kept as one
-    /// small function, deliberately, so the paste/slot-fill flow a concurrent slice is
-    /// building can swap it in here with a single edit rather than a hunt through the
-    /// keyboard switch.
+    /// BOARD's Enter on the prompt deck routes through the exact `performFind` flow the
+    /// FIND list uses — fill-in sheet for slotted prompts, the shared delivery pipeline
+    /// for plain ones — so the two surfaces can never drift apart.
     func performBoardPrompt(_ prompt: Prompt) {
-        PasteboardBroker.write(transient: prompt.body)
-        PromptUsageCounter.recordUse(of: prompt.name, path: AppPaths.promptUsagePath)
-        show(toast: "Copied \(prompt.name)")
-        dismiss(restoringFocus: true)
+        performFind(Shortcut(prompt: prompt), secondary: false)
+    }
+
+    /// Delivers a prompt's rendered text through the exact `deliver` pipeline a
+    /// shell shortcut uses — broker write, then either a paste (focus handback and
+    /// ⌘V synthesis) or a plain copy, precisely as `enterAction` already decides for
+    /// shell entries.
+    ///
+    /// `enterAction`'s name/command split has no prompt equivalent — a prompt is one
+    /// body, not a name-and-command pair — so only its copy/paste half carries over.
+    /// `afterAction` (Close vs. Keep it open) is honored the same way it is for a
+    /// shell copy: `deliver`'s copy branch calls `finish()`, which reads it; its
+    /// paste branch always closes, for the same reason a shell paste always does —
+    /// a paste only exists by surrendering focus, so there is nothing "stay open"
+    /// could mean here. A raw copy (`raw: true`, ⌘⏎) is always copy-only regardless
+    /// of `enterAction`: pasting a body with `{{unfilled}}` slots still in it into
+    /// whatever app is focused is never what a raw copy is for.
+    private func deliverPrompt(_ shortcut: Shortcut, rendered: String, raw: Bool) {
+        let pasting = !raw && (settings.enterAction == .pasteName || settings.enterAction == .pasteCommand)
+        deliver(rendered, pasting: pasting,
+                toast: raw ? "Copied \(shortcut.name) (raw)" : "Copied \(shortcut.name)")
+        PromptUsageCounter.recordUse(of: shortcut.name, path: AppPaths.promptUsagePath)
+    }
+
+    /// FillInSheet's Enter/Paste: renders the held slot values into the shortcut's
+    /// body and delivers it exactly like a plain (unslotted) prompt would — same
+    /// pipeline, same `enterAction`/`afterAction` semantics, same usage recording.
+    func confirmFillIn() {
+        guard let target = fillIn else { return }
+        let rendered = target.fill.rendered(target.shortcut.body)
+        fillIn = nil
+        deliverPrompt(target.shortcut, rendered: rendered, raw: false)
+    }
+
+    /// FillInSheet's Esc: closes it with nothing delivered and nothing recorded.
+    /// Usage means "something was actually pasted or copied", and cancelling is
+    /// neither.
+    func cancelFillIn() {
+        fillIn = nil
+    }
+
+    // MARK: - Prompt delivery status (Claude Code chip)
+
+    enum PromptDeliveryStatus: Equatable { case installed, stale, notInstalled }
+
+    /// Whether `shortcut` — always a prompt — is currently a Claude Code slash
+    /// command in good standing on this Mac: registered in `PromptCompiler`'s
+    /// registry AND still byte-identical to what compiling its *current* content
+    /// would produce.
+    ///
+    /// A registry entry alone isn't enough to claim "✓ installed": the prompt file
+    /// can be edited after it was last compiled, and a chip claiming the installed
+    /// command reflects the prompt in front of you when it no longer does would be
+    /// worse than no chip at all. `.stale` covers exactly that drift; `.notInstalled`
+    /// covers both "never compiled" and "the registry itself can't be read" — either
+    /// way there is nothing on this Mac to point to.
+    static func promptDeliveryStatus(for shortcut: Shortcut, registryPath: String) -> PromptDeliveryStatus {
+        guard shortcut.kind == .prompt,
+              case .ok(let installed) = PromptCompiler.installedCommands(registryPath: registryPath),
+              let entry = installed.first(where: { $0.name == shortcut.name })
+        else { return .notInstalled }
+        let expected = SHA256Digest.hex(
+            PromptCompiler.render(description: shortcut.description, body: shortcut.body))
+        return entry.sha256 == expected ? .installed : .stale
     }
 
     // MARK: - History
@@ -500,6 +586,19 @@ final class AppState: ObservableObject {
             }
             if event.keyCode == UInt16(kVK_Return) && event.modifierFlags.contains(.command) {
                 commitEditor()
+                return true
+            }
+            return false
+        }
+
+        // Same shape as the editor guard above: FillInSheet owns the keyboard while
+        // it is up. Esc is handled here, at the one place Esc is already handled for
+        // every other sheet; Tab/Shift-Tab between fields and Enter-to-confirm are
+        // native SwiftUI focus/submit behavior inside the sheet itself, so everything
+        // else falls through unconsumed.
+        if fillIn != nil {
+            if event.keyCode == UInt16(kVK_Escape) {
+                cancelFillIn()
                 return true
             }
             return false
@@ -765,7 +864,7 @@ final class AppState: ObservableObject {
     private func deliver(_ payload: String, pasting: Bool, toast: String) {
         switch pasting {
         case false:
-            PasteboardBroker.write(transient: payload)
+            PasteboardBroker.write(transient: payload, to: pasteboard)
             show(toast: toast)
             finish()
 
@@ -775,7 +874,7 @@ final class AppState: ObservableObject {
             guard Typist.isTrusted else {
                 // Never fail silently and never lose the user's action: put it on the
                 // clipboard anyway, so the worst case is one extra ⌘V.
-                PasteboardBroker.write(transient: payload)
+                PasteboardBroker.write(transient: payload, to: pasteboard)
                 // Deliberately no `finish()`. Closing here is what made this look like
                 // the app doing nothing at all: the window carrying the only explanation
                 // went away in the same frame the explanation was written to it, and the
