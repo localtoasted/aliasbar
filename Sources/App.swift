@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import Combine
 
 // MARK: - App delegate
 
@@ -17,6 +18,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private var onboardingWindow: NSWindow?
     private var keyMonitor: Any?
     private var clipboardMonitor: ClipboardMonitor?
+    /// Reacts to `clipboardMonitoring` flipping after launch — from Settings, or
+    /// from the clipboard source's own empty-state Enable button — so the monitor
+    /// starts (or stops) live instead of only ever being decided once at launch.
+    private var clipboardMonitoringCancellable: AnyCancellable?
 
     // MARK: Launch
 
@@ -42,10 +47,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         // Off means AliasBar never reads the clipboard outside of its own
         // deliveries — no monitor gets constructed at all, not merely a disabled one.
         if settings.clipboardMonitoring {
-            let monitor = ClipboardMonitor()
-            clipboardMonitor = monitor
-            monitor.start()
+            startClipboardMonitor()
         }
+        // Live toggling: flipping the setting on later — from Settings, or from the
+        // clipboard source's own empty-state Enable button — starts the monitor
+        // right then rather than only at the next launch. `dropFirst()` skips the
+        // value this subscription immediately replays on creation, which would
+        // otherwise re-run whatever the setting already was at launch a second time.
+        clipboardMonitoringCancellable = settings.$clipboardMonitoring
+            .dropFirst()
+            .sink { [weak self] enabled in
+                guard let self else { return }
+                if enabled {
+                    self.startClipboardMonitor()
+                } else {
+                    self.clipboardMonitor?.stop()
+                }
+            }
 
         NotificationCenter.default.addObserver(
             forName: .aliasBarHotkeyFired, object: nil, queue: .main
@@ -98,6 +116,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                 if openOnLaunch == "history" { self?.state.enterHistory() }
             }
         }
+    }
+
+    // MARK: Clipboard
+
+    /// Constructs (on first call) and starts the clipboard monitor. Safe to call
+    /// repeatedly — a monitor that already exists is simply told to `start()` again,
+    /// which is itself idempotent (`ClipboardMonitor.start()` tears down any
+    /// existing timer before installing a new one).
+    private func startClipboardMonitor() {
+        if let monitor = clipboardMonitor {
+            monitor.start()
+            return
+        }
+        let persistence = ClipboardPersistenceController(settings: settings)
+        let monitor = ClipboardMonitor(initialHistory: persistence.loadInitialHistory(),
+                                       persistence: persistence)
+        clipboardMonitor = monitor
+        state.clipboardMonitor = monitor
+        monitor.start()
     }
 
     // MARK: Presentation

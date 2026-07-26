@@ -157,9 +157,9 @@ struct SyncedRecord: Codable, Equatable {
 /// Marks a type eligible to be stored as a `SyncedRecord` payload.
 ///
 /// Deliberately just `Codable` plus this marker: the marker exists so a type must opt
-/// in on purpose. PRE-247's clipboard types are not given this conformance in this
-/// slice — that wiring belongs to whichever later change actually needs clips synced,
-/// and should make that call deliberately rather than inherit it for free.
+/// in on purpose. `SafeClip` is one such type — see `ClipboardSyncMirror` in
+/// `ClipboardCapture.swift`, which is the only place a clip ever reaches this store,
+/// and only when both `clipboardPersistence` and `clipboardInSyncFile` are on.
 protocol SharedRecordConvertible: Codable {}
 
 // MARK: - Document

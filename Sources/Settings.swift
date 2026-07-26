@@ -441,14 +441,17 @@ final class AppSettings: ObservableObject {
     @Published var clipboardMonitoring: Bool {
         didSet { defaults.set(clipboardMonitoring, forKey: Key.clipboardMonitoring) }
     }
-    /// Whether safe clips are written to disk. Off by default: this slice only ever
-    /// keeps clipboard history in memory (see `ClipboardMonitor`); a later slice gates
-    /// persistence behind this setting.
+    /// Whether safe clips are written to disk. Off by default: when on,
+    /// `ClipboardMonitor`'s history is persisted to `~/.aliasbar/clips.json` (see
+    /// `ClipboardPersistenceController`); when off, clipboard content only ever
+    /// lives in memory for the life of the app, and nothing under `~/.aliasbar`
+    /// records a single byte of it.
     @Published var clipboardPersistence: Bool {
         didSet { defaults.set(clipboardPersistence, forKey: Key.clipboardPersistence) }
     }
-    /// Whether persisted clips are included in the synced settings document. Off by
-    /// default, and meaningless while `clipboardPersistence` is off.
+    /// Whether persisted clips are also mirrored into the Sync file's "clips"
+    /// collection (see `ClipboardSyncMirror`). Off by default, and meaningless while
+    /// `clipboardPersistence` is off — there is nothing local yet to mirror.
     @Published var clipboardInSyncFile: Bool {
         didSet { defaults.set(clipboardInSyncFile, forKey: Key.clipboardInSyncFile) }
     }
