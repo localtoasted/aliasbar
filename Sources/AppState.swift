@@ -583,6 +583,10 @@ final class AppState: ObservableObject {
             // beat later once that has actually taken effect.
             onDismiss?()
             PreviousApp.restore()
+            // Recorded here, at the moment a paste is actually possible — it is what
+            // lets a later `AXIsProcessTrusted() == false` be read as a *lost* grant
+            // rather than one never given.
+            settings.hasEverPasted = true
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
                 _ = Typist.paste(payload)
             }

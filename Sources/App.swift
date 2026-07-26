@@ -14,6 +14,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private let store = EntryStore()
     private var state: AppState!
     private var settingsWindow: NSWindow?
+    private var onboardingWindow: NSWindow?
     private var keyMonitor: Any?
 
     // MARK: Launch
@@ -63,6 +64,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         // which needs Accessibility permission and cannot run over SSH. "history" lands in
         // the history palette; "settings" opens the settings window instead, which is
         // otherwise only reachable by clicking.
+        // First run, or a harness asking to pose the flow. The delay exists so the
+        // status item settles first and the window does not fight the launch.
+        if !settings.onboardingComplete
+            || ProcessInfo.processInfo.environment["ALIASBAR_ONBOARDING"] == "1" {
+            Diag.log("first run: scheduling onboarding")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                self?.openOnboarding()
+            }
+        }
+
         let openOnLaunch = ProcessInfo.processInfo.environment["ALIASBAR_OPEN_ON_LAUNCH"]
         if openOnLaunch == "1" || openOnLaunch == "history" || openOnLaunch == "settings" {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
@@ -79,7 +90,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     // MARK: Presentation
 
     private func makePopover() -> NSPopover {
-        let hosting = NSHostingController(rootView: RootView(state: state, settings: settings))
+        let root = RootView(state: state, settings: settings)
+            .modifier(AccessibilityRegrantBanner(settings: settings, state: state))
+        let hosting = NSHostingController(rootView: root)
         hosting.sizingOptions = [.preferredContentSize]
         let popover = NSPopover()
         popover.contentViewController = hosting
@@ -95,6 +108,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private func makePalette() -> PaletteController {
         // The panel has no frame of its own, so the corner has to come from the content.
         let root = RootView(state: state, settings: settings)
+            .modifier(AccessibilityRegrantBanner(settings: settings, state: state))
             .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         let hosting = NSHostingController(rootView: root)
         hosting.sizingOptions = [.preferredContentSize]
@@ -335,8 +349,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private func installKeyMonitor() {
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self, self.isShown else { return event }
-            // The settings window has its own text fields and must keep its keys.
+            // The settings and onboarding windows have their own text fields and must
+            // keep their keys.
             if event.window === self.settingsWindow { return event }
+            if event.window === self.onboardingWindow { return event }
             return self.state.handleKey(event) ? nil : event
         }
     }
@@ -365,6 +381,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification,
                                                object: window, queue: .main) { [weak self] _ in
             self?.registerHotkey()
+        }
+    }
+
+    // MARK: First run
+
+    private func openOnboarding() {
+        if let window = onboardingWindow {
+            NSApp.activate(ignoringOtherApps: true)
+            window.makeKeyAndOrderFront(nil)
+            return
+        }
+        let hosting = NSHostingController(rootView: OnboardingView(settings: settings) { [weak self] in
+            self?.onboardingWindow?.close()
+        })
+        let window = NSWindow(contentViewController: hosting)
+        window.title = "Welcome to AliasBar"
+        // The flow draws its own header, so the title bar dissolves into the themed
+        // ground; only the traffic lights remain, because closing *is* a skip path.
+        window.styleMask = [.titled, .closable, .fullSizeContentView]
+        window.titlebarAppearsTransparent = true
+        window.titleVisibility = .hidden
+        window.isReleasedWhenClosed = false
+        window.center()
+        onboardingWindow = window
+        NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
+        Diag.log("first run: onboarding window shown")
+
+        // Completion is recorded on close, whichever way it closed — Finish, Set up
+        // later, or the traffic light. There is no path that shows the flow twice.
+        NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification,
+                                               object: window, queue: .main) { [weak self] _ in
+            self?.settings.onboardingComplete = true
+            // A rebind made in the flow takes effect the same way one made in the
+            // settings window does.
+            self?.registerHotkey()
+            self?.onboardingWindow = nil
         }
     }
 }
