@@ -5071,6 +5071,357 @@ func testAppearanceRoundTripsThroughSettingValue() {
 }
 testAppearanceRoundTripsThroughSettingValue()
 
+print("\n38. Snippets: model, store, trigger matcher (PRE-251)")
+
+// -- Trigger validation -------------------------------------------------------
+
+// `Result<Void, TriggerError>` isn't Equatable (Void isn't Equatable), so these
+// extract each side rather than comparing the Result itself.
+func isValidTrigger(_ result: Result<Void, SnippetTriggerValidation.TriggerError>) -> Bool {
+    if case .success = result { return true }
+    return false
+}
+func triggerFailure(_ result: Result<Void, SnippetTriggerValidation.TriggerError>) -> SnippetTriggerValidation.TriggerError? {
+    if case .failure(let error) = result { return error }
+    return nil
+}
+
+func testTriggerValidationEdges() {
+    check("a 1-character trigger is too short",
+          triggerFailure(SnippetTriggerValidation.validate("a", against: [])) == .tooShort)
+    check("a 2-character trigger is the shortest allowed",
+          isValidTrigger(SnippetTriggerValidation.validate("ab", against: [])))
+    check("a 64-character trigger is the longest allowed",
+          isValidTrigger(SnippetTriggerValidation.validate(String(repeating: "a", count: 64), against: [])))
+    check("a 65-character trigger is too long",
+          triggerFailure(SnippetTriggerValidation.validate(String(repeating: "a", count: 65), against: [])) == .tooLong)
+    check("a space anywhere in the trigger is rejected",
+          triggerFailure(SnippetTriggerValidation.validate(";si g", against: [])) == .containsWhitespaceOrControl)
+    check("a tab is rejected",
+          triggerFailure(SnippetTriggerValidation.validate(";si\tg", against: [])) == .containsWhitespaceOrControl)
+    check("a newline is rejected",
+          triggerFailure(SnippetTriggerValidation.validate(";si\ng", against: [])) == .containsWhitespaceOrControl)
+    check("a control character (NUL) is rejected",
+          triggerFailure(SnippetTriggerValidation.validate(";si\u{0000}g", against: [])) == .containsWhitespaceOrControl)
+    check("the ';' prefix convention is not enforced — a bare word is a valid trigger",
+          isValidTrigger(SnippetTriggerValidation.validate("sig", against: [])))
+
+    let existing = [Snippet(trigger: ";sig", template: "Best, Ada")]
+    check("an exact duplicate trigger is rejected",
+          triggerFailure(SnippetTriggerValidation.validate(";sig", against: existing)) == .duplicate(existing: ";sig"))
+    check("a case-insensitive duplicate is rejected",
+          triggerFailure(SnippetTriggerValidation.validate(";SIG", against: existing)) == .duplicate(existing: ";sig"))
+    check("a genuinely different trigger is accepted",
+          isValidTrigger(SnippetTriggerValidation.validate(";addr", against: existing)))
+    check("excluding a snippet's own id lets it keep validating against itself unchanged",
+          isValidTrigger(SnippetTriggerValidation.validate(";sig", against: existing, excluding: existing[0].id)))
+    check("excluding a *different* id still catches the collision",
+          triggerFailure(SnippetTriggerValidation.validate(";sig", against: existing, excluding: UUID()))
+              == .duplicate(existing: ";sig"))
+}
+testTriggerValidationEdges()
+
+// -- Rendering: reuses PromptSlotParser, never a second parser ----------------
+
+func testSnippetRenderingUsesSharedGrammar() {
+    let repeated = Snippet(trigger: ";sig", template: "Hi {{name}}, it's {{name}} again.")
+    check("renderPlan de-duplicates a repeated hole, matching PromptSlotParser.slots",
+          SnippetRenderer.renderPlan(snippet: repeated) == ["name"])
+    check("render fills a repeated hole with one shared value",
+          SnippetRenderer.render(snippet: repeated, values: ["name": "Ada"])
+              == "Hi Ada, it's Ada again.")
+
+    let literalOnly = Snippet(trigger: ";addr", template: "221B Baker Street, London")
+    check("a template with no holes has an empty render plan",
+          SnippetRenderer.renderPlan(snippet: literalOnly).isEmpty)
+    check("literal text round-trips through render untouched",
+          SnippetRenderer.render(snippet: literalOnly, values: [:]) == "221B Baker Street, London")
+
+    let unfilled = Snippet(trigger: ";todo", template: "{{task}} due {{when}}")
+    check("renderPlan orders holes left to right",
+          SnippetRenderer.renderPlan(snippet: unfilled) == ["task", "when"])
+    check("an unfilled hole is left exactly as written, not blanked",
+          SnippetRenderer.render(snippet: unfilled, values: ["task": "ship"]) == "ship due {{when}}")
+
+    let singleBraceLiteral = Snippet(trigger: ";py", template: "print(f\"{value}\")")
+    check("single braces stay literal, matching PromptSlotParser's f-string carve-out",
+          SnippetRenderer.renderPlan(snippet: singleBraceLiteral).isEmpty)
+}
+testSnippetRenderingUsesSharedGrammar()
+
+// -- TriggerMatcher: incremental feed, longest match, reset, buffer bound -----
+
+func feedString(_ matcher: TriggerMatcher, _ text: String) -> TriggerMatcher.Match? {
+    var last: TriggerMatcher.Match?
+    for character in text {
+        last = matcher.feed(character)
+    }
+    return last
+}
+
+func testTriggerMatcherIncrementalFeed() {
+    let sig = Snippet(trigger: ";sig", template: "Best, Ada")
+    let matcher = TriggerMatcher(snippets: [sig])
+
+    check("feeding fewer characters than the trigger never matches",
+          feedString(matcher, ";si") == nil)
+    check("completing the trigger on the next character matches",
+          matcher.feed("g") == TriggerMatcher.Match(snippet: sig, triggerLength: 4))
+    check("the match consumes the buffer — retyping the closing char alone doesn't re-match",
+          matcher.feed("g") == nil)
+}
+testTriggerMatcherIncrementalFeed()
+
+func testTriggerMatcherLongestMatchWins() {
+    // Genuine overlap: "sig" is a *suffix* of ";sig", so the character that completes
+    // ";sig" also, in that same instant, completes "sig" — both triggers become true
+    // simultaneous matches on the very same `feed` call. This is the case
+    // "longest-match-wins" actually governs (a sequential prefix relationship, like
+    // ";s" typed en route to ";sig", isn't overlap at all: ";s" would already have
+    // completed — and cleared the buffer — two characters earlier, before "sig" was
+    // even fully typed, which is a separate, expected behavior covered elsewhere).
+    let short = Snippet(trigger: "sig", template: "short")
+    let long = Snippet(trigger: ";sig", template: "long")
+    let matcher = TriggerMatcher(snippets: [short, long])
+
+    check("neither trigger has completed partway through typing the longer one",
+          feedString(matcher, ";si") == nil)
+    check("when both complete on the same character, the longer trigger wins",
+          matcher.feed("g") == TriggerMatcher.Match(snippet: long, triggerLength: 4))
+}
+testTriggerMatcherLongestMatchWins()
+
+func testTriggerMatcherShorterTriggerFiresBeforeLongerOneCanForm() {
+    // The flip side of the overlap case above: when a shorter registered trigger is
+    // merely a *prefix* of a longer one — not a suffix relationship — the shorter
+    // one completes and fires (clearing the buffer) before the longer one can ever
+    // be finished. This is expected, not a bug: the matcher has no way to know more
+    // typing is coming, and documenting it here pins down the behavior rather than
+    // leaving it as an accidental side effect of the overlap test above.
+    let short = Snippet(trigger: ";s", template: "short")
+    let long = Snippet(trigger: ";sig", template: "long")
+    let matcher = TriggerMatcher(snippets: [short, long])
+
+    check("the shorter trigger fires as soon as it's complete",
+          feedString(matcher, ";s") == TriggerMatcher.Match(snippet: short, triggerLength: 2))
+    check("its match cleared the buffer, so finishing 'ig' afterward starts fresh, no match",
+          feedString(matcher, "ig") == nil)
+}
+testTriggerMatcherShorterTriggerFiresBeforeLongerOneCanForm()
+
+func testTriggerMatcherResetSemantics() {
+    let sig = Snippet(trigger: ";sig", template: "Best, Ada")
+    let matcher = TriggerMatcher(snippets: [sig])
+
+    _ = feedString(matcher, ";si")
+    matcher.reset()
+    check("reset discards a partial buffer — finishing the trigger afterward does not match",
+          matcher.feed("g") == nil)
+    check("a full retype after reset matches normally",
+          feedString(matcher, ";sig") == TriggerMatcher.Match(snippet: sig, triggerLength: 4))
+}
+testTriggerMatcherResetSemantics()
+
+func testTriggerMatcherBufferBoundedToLongestTrigger() {
+    let short = Snippet(trigger: ";hi", template: "hello")
+    let matcher = TriggerMatcher(snippets: [short])
+
+    // Feed far more filler than the longest trigger's length (3) before ever typing
+    // a real trigger — if the buffer weren't bounded, it would grow without limit
+    // over a long typing session.
+    _ = feedString(matcher, String(repeating: "x", count: 500))
+    check("long unrelated garbage does not itself cause a false match",
+          matcher.feed("z") == nil)
+    check("typing the real trigger right after a long unrelated run still matches",
+          feedString(matcher, ";hi") == TriggerMatcher.Match(snippet: short, triggerLength: 3))
+
+    // Grow the bound so a longer trigger can complete...
+    let long = Snippet(trigger: ";signature", template: "long one")
+    matcher.updateSnippets([short, long])
+    check("updateSnippets grows the bound so a longer trigger can complete",
+          feedString(matcher, ";signature") == TriggerMatcher.Match(snippet: long, triggerLength: 10))
+
+    // ...then remove it again: it must never match again no matter how completely
+    // it's retyped, and the remaining short trigger keeps working exactly as before.
+    matcher.updateSnippets([short])
+    check("a trigger removed by updateSnippets never matches again, even fully retyped",
+          feedString(matcher, ";signature") == nil)
+    check("a still-registered trigger keeps matching normally after the bound shrinks",
+          feedString(matcher, ";hi") == TriggerMatcher.Match(snippet: short, triggerLength: 3))
+}
+testTriggerMatcherBufferBoundedToLongestTrigger()
+
+func testTriggerMatcherUnicode() {
+    // A trigger built from a multi-scalar grapheme cluster (flag emoji = two Unicode
+    // scalars, one Character) must be matched and bounded in Characters, not scalars —
+    // otherwise this either never completes or the buffer bound miscounts its length.
+    let flagTrigger = Snippet(trigger: ";🇯🇵sig", template: "よろしくお願いします")
+    let matcher = TriggerMatcher(snippets: [flagTrigger])
+    check("a trigger containing a multi-scalar grapheme cluster matches as one unit",
+          feedString(matcher, ";🇯🇵sig") == TriggerMatcher.Match(snippet: flagTrigger, triggerLength: 5))
+
+    let accented = Snippet(trigger: ";café", template: "espresso")
+    let matcher2 = TriggerMatcher(snippets: [accented])
+    check("a composed-accent trigger matches",
+          feedString(matcher2, ";café") == TriggerMatcher.Match(snippet: accented, triggerLength: 5))
+}
+testTriggerMatcherUnicode()
+
+func testTriggerMatcherEmptySnippetListNeverMatches() {
+    let matcher = TriggerMatcher(snippets: [])
+    check("an empty snippet set never matches, no matter what's typed",
+          feedString(matcher, ";sig") == nil)
+}
+testTriggerMatcherEmptySnippetListNeverMatches()
+
+// -- SnippetStore: round trip, dual-write mirror, tombstone on delete --------
+
+func snippetStorePath() -> String {
+    caseIndex += 1
+    let dir = "\(sandbox)/snippet-store-case\(caseIndex)"
+    try! FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+    return "\(dir)/snippets.json"
+}
+
+func testSnippetStoreRoundTrip() {
+    let path = snippetStorePath()
+    let store = SnippetStore(localPath: path)
+    check("a fresh store with no file yet reads as empty", store.all().isEmpty)
+
+    let sig = Snippet(trigger: ";sig", template: "Best, {{name}}")
+    let addr = Snippet(trigger: ";addr", template: "221B Baker Street")
+    store.upsert(sig)
+    store.upsert(addr)
+
+    let all = store.all()
+    check("both saved snippets round-trip", all.count == 2)
+    check("the local file is readable JSON on disk",
+          FileManager.default.fileExists(atPath: path))
+
+    let reopened = SnippetStore(localPath: path)
+    check("a second store instance at the same path reads what the first wrote",
+          Set(reopened.all().map(\.trigger)) == Set([";sig", ";addr"]))
+
+    var edited = sig
+    edited.template = "Warmly, {{name}}"
+    edited.modifiedAt = Date(timeIntervalSince1970: 1) // whatever the caller passes in...
+    let stampedNow = Date(timeIntervalSince1970: 1_700_000_999)
+    let saved = store.upsert(edited, now: stampedNow)
+    check("upsert on an existing id replaces it rather than duplicating it",
+          store.all().count == 2)
+    check("the replaced snippet carries the new template",
+          store.all().first { $0.id == sig.id }?.template == "Warmly, {{name}}")
+    check("upsert stamps modifiedAt with the save time, overriding whatever the caller's copy carried",
+          saved.modifiedAt == stampedNow && store.all().first { $0.id == sig.id }?.modifiedAt == stampedNow)
+}
+testSnippetStoreRoundTrip()
+
+func testSnippetStoreCorruptFileToleration() {
+    let path = snippetStorePath()
+    try! "{ not valid json at all".write(toFile: path, atomically: true, encoding: .utf8)
+    let store = SnippetStore(localPath: path)
+    check("a corrupt snippets file reads as empty rather than crashing", store.all().isEmpty)
+}
+testSnippetStoreCorruptFileToleration()
+
+func testSnippetStoreDualWriteMirror() {
+    let path = snippetStorePath()
+    let docURL = URL(fileURLWithPath: "\(sharedStoreDir())/doc.json")
+    let sharedStore = SharedDocumentStore(url: docURL)
+    let store = SnippetStore(localPath: path, sharedStore: sharedStore)
+
+    let sig = Snippet(trigger: ";sig", template: "Best, Ada")
+    let now = Date(timeIntervalSince1970: 1_700_000_500)
+    let saved = store.upsert(sig, now: now)
+
+    // Compare against `saved`, not `sig`: upsert stamps its own modifiedAt (proven
+    // above in the round-trip test), so `sig`'s construction-time timestamp no
+    // longer matches what's actually on disk.
+    check("the snippet is saved locally", store.all().contains(saved))
+
+    guard case .success(let doc) = sharedStore.read() else {
+        check("the shared document is readable after a dual-write upsert", false)
+        return
+    }
+    let mirrored = doc.records[SnippetStore.RecordCollection.snippets]?.first { $0.id == sig.id.uuidString }
+    check("the upsert is mirrored into the shared document's snippets collection",
+          mirrored != nil)
+    check("the mirrored record is not a tombstone", mirrored?.deleted == false)
+
+    guard let payload = mirrored?.payload,
+          let decoded = try? JSONDecoder.aliasBarDocument.decode(Snippet.self, from: payload) else {
+        check("the mirrored record's payload decodes back to the saved snippet", false)
+        return
+    }
+    check("the mirrored payload matches what was saved locally, trigger and template",
+          decoded.trigger == sig.trigger && decoded.template == sig.template)
+}
+testSnippetStoreDualWriteMirror()
+
+func testSnippetStoreTombstoneOnDelete() {
+    let path = snippetStorePath()
+    let docURL = URL(fileURLWithPath: "\(sharedStoreDir())/doc.json")
+    let sharedStore = SharedDocumentStore(url: docURL)
+    let store = SnippetStore(localPath: path, sharedStore: sharedStore)
+
+    let sig = Snippet(trigger: ";sig", template: "Best, Ada")
+    store.upsert(sig, now: Date(timeIntervalSince1970: 1_700_000_500))
+    store.delete(id: sig.id, now: Date(timeIntervalSince1970: 1_700_000_600))
+
+    check("a deleted snippet is gone from the local file", store.all().isEmpty)
+
+    guard case .success(let doc) = sharedStore.read() else {
+        check("the shared document is readable after a dual-write delete", false)
+        return
+    }
+    let mirrored = doc.records[SnippetStore.RecordCollection.snippets]?.first { $0.id == sig.id.uuidString }
+    check("the delete is mirrored as a tombstone, not a removed record",
+          mirrored?.deleted == true)
+}
+testSnippetStoreTombstoneOnDelete()
+
+func testSnippetStoreDeleteWithoutSharedStoreNeverCrashes() {
+    let path = snippetStorePath()
+    let store = SnippetStore(localPath: path)
+    let sig = Snippet(trigger: ";sig", template: "Best, Ada")
+    store.upsert(sig)
+    store.delete(id: sig.id)
+    check("delete with no shared store configured just removes locally, no crash",
+          store.all().isEmpty)
+}
+testSnippetStoreDeleteWithoutSharedStoreNeverCrashes()
+
+// -- Snippet Codable round trip, independent of the store --------------------
+
+func testSnippetCodableRoundTrip() {
+    let sig = Snippet(trigger: ";sig", template: "Best, {{name}}",
+                      modifiedAt: Date(timeIntervalSince1970: 1_700_000_000))
+    let data = try! JSONEncoder.aliasBarDocument.encode(sig)
+    let decoded = try! JSONDecoder.aliasBarDocument.decode(Snippet.self, from: data)
+    check("Snippet round-trips through JSON with the same id, trigger, template, and modifiedAt",
+          decoded == sig)
+}
+testSnippetCodableRoundTrip()
+
+// -- SnippetPaths: environment override vs. default -------------------------
+
+func testSnippetPathsResolution() {
+    check("with no override, the local path defaults under the home directory",
+          SnippetPaths.resolveLocalPath(environmentOverride: nil, homeDirectory: "/Users/test")
+              == "/Users/test/.aliasbar/snippets.json")
+    check("an empty override string is treated as absent",
+          SnippetPaths.resolveLocalPath(environmentOverride: "", homeDirectory: "/Users/test")
+              == "/Users/test/.aliasbar/snippets.json")
+    // Not tested with a "~/..." override: expandingTildeInPath resolves against the
+    // real machine's home directory (NSHomeDirectory()), not the `homeDirectory`
+    // parameter passed in here — the same reason AppPaths.resolveRcPath's own tests
+    // only exercise it with already-absolute paths.
+    check("a non-empty override wins outright over the default",
+          SnippetPaths.resolveLocalPath(environmentOverride: "/tmp/fixture-snippets.json", homeDirectory: "/Users/test")
+              == "/tmp/fixture-snippets.json")
+}
+testSnippetPathsResolution()
+
 // ---------------------------------------------------------------------------
 print("\n38. SuggestionEngine: history-mined alias suggestions (PRE-264)")
 
