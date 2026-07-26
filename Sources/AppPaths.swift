@@ -2,38 +2,41 @@ import Foundation
 
 /// App-owned path resolution. The shared core accepts concrete paths so a future
 /// executable can choose its own defaults without importing app settings.
+///
+/// The precedence rules themselves live in `CorePaths` (Model.swift), which is
+/// Foundation-only and knows nothing of `AppSettings`. This type's whole job is to
+/// supply the app's one extra precedence source — the stored override — and defer to
+/// `CorePaths` for everything else, so the app and the `ab` CLI can never drift apart
+/// on where a path resolves to.
 enum AppPaths {
     static var rcPath: String {
-        resolveRcPath(stored: AppSettings.shared.rcPathOverride,
-                      environmentOverride: ProcessInfo.processInfo.environment["ALIASBAR_ZSHRC"],
-                      homeDirectory: NSHomeDirectory())
+        CorePaths.resolveRcPath(stored: AppSettings.shared.rcPathOverride,
+                                environmentOverride: ProcessInfo.processInfo.environment["ALIASBAR_ZSHRC"],
+                                homeDirectory: NSHomeDirectory())
     }
 
     static var historyPath: String {
-        resolveHistoryPath(
+        CorePaths.resolveHistoryPath(
             environmentOverride: ProcessInfo.processInfo.environment["ALIASBAR_HISTORY"],
             homeDirectory: NSHomeDirectory()
         )
     }
 
+    // Existing call sites (including WriterTests.swift) reach the resolvers through
+    // AppPaths. Kept as thin forwarders so nothing outside this file has to change,
+    // while CorePaths remains the one place the actual precedence logic lives.
     static func resolveRcPath(stored: String?,
                               environmentOverride: String?,
                               homeDirectory: String) -> String {
-        if let stored, !stored.isEmpty {
-            return (stored as NSString).expandingTildeInPath
-        }
-        if let environmentOverride, !environmentOverride.isEmpty {
-            return (environmentOverride as NSString).expandingTildeInPath
-        }
-        return homeDirectory + "/.zshrc"
+        CorePaths.resolveRcPath(stored: stored,
+                                environmentOverride: environmentOverride,
+                                homeDirectory: homeDirectory)
     }
 
     static func resolveHistoryPath(environmentOverride: String?,
                                    homeDirectory: String) -> String {
-        if let environmentOverride, !environmentOverride.isEmpty {
-            return (environmentOverride as NSString).expandingTildeInPath
-        }
-        return homeDirectory + "/.zsh_history"
+        CorePaths.resolveHistoryPath(environmentOverride: environmentOverride,
+                                     homeDirectory: homeDirectory)
     }
 }
 
