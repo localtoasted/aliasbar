@@ -50,12 +50,18 @@ final class ClipboardMonitor {
     private let pollInterval: TimeInterval
     private var timer: Timer?
     private var lastChangeCount: Int
+    /// Told about every change to `history`. `nil` (the default) is the "never
+    /// persist" no-op every existing test in this suite exercises unchanged — only
+    /// `App.swift`'s production wiring ever supplies a real one.
+    private let persistence: ClipboardPersisting?
 
     init(
         pasteboard: PasteboardReading & PasteboardWriting = NSPasteboard.general,
         quarantine: QuarantineStore = QuarantineStore(),
         clock: @escaping () -> Date = Date.init,
-        pollInterval: TimeInterval = 0.4
+        pollInterval: TimeInterval = 0.4,
+        initialHistory: [SafeClip] = [],
+        persistence: ClipboardPersisting? = nil
     ) {
         self.pasteboard = pasteboard
         self.quarantine = quarantine
@@ -64,6 +70,8 @@ final class ClipboardMonitor {
         // Whatever is already on the pasteboard at construction time is not a change
         // we witnessed — only a difference from here on counts as a capture.
         self.lastChangeCount = pasteboard.changeCount
+        self.history = initialHistory
+        self.persistence = persistence
     }
 
     func start() {
@@ -122,5 +130,51 @@ final class ClipboardMonitor {
         if history.count > Self.historyCap {
             history.removeLast(history.count - Self.historyCap)
         }
+        persistence?.historyChanged(history)
+    }
+}
+
+// MARK: - Persistence (PRE-247-C/D)
+
+/// What `ClipboardMonitor` calls after every change to `history`, kept behind a
+/// protocol so this file never has to name `AppSettings`, `AppPaths`, or
+/// `SharedDocumentStore` directly — every existing test in this suite constructs a
+/// `ClipboardMonitor` with no `persistence:` argument at all and keeps working
+/// unchanged, because `nil` (the default) touches no disk, ever.
+protocol ClipboardPersisting: AnyObject {
+    func historyChanged(_ history: [SafeClip])
+}
+
+/// The one place `clipboardPersistence` and `clipboardInSyncFile` are read for the
+/// clipboard source. Constructing this does no I/O by itself; only `historyChanged`
+/// does, and only when `clipboardPersistence` is actually on right now — the single
+/// gate the "zero clipboard bytes written anywhere while off" invariant depends on.
+final class ClipboardPersistenceController: ClipboardPersisting {
+    /// `unowned`, matching `SettingsSyncCoordinator`'s reasoning: this controller's
+    /// owner (the `ClipboardMonitor` `App.swift` builds it for) never outlives
+    /// `settings` — `AppSettings.shared` lives for the process's whole run.
+    private unowned let settings: AppSettings
+    private let clipsPath: String
+
+    init(settings: AppSettings, clipsPath: String = AppPaths.clipsPath) {
+        self.settings = settings
+        self.clipsPath = clipsPath
+    }
+
+    /// What the monitor should seed `history` with at construction time — empty
+    /// unless persistence is on *right now*, regardless of whether a file exists on
+    /// disk from an earlier session where it used to be. The setting is the one
+    /// question that decides whether disk is ever consulted at all.
+    func loadInitialHistory() -> [SafeClip] {
+        guard settings.clipboardPersistence else { return [] }
+        return ClipboardHistoryStore.load(path: clipsPath)
+    }
+
+    func historyChanged(_ history: [SafeClip]) {
+        guard settings.clipboardPersistence else { return }
+        ClipboardHistoryStore.save(history, path: clipsPath)
+        guard settings.clipboardInSyncFile, let syncURL = settings.syncFileURL else { return }
+        ClipboardSyncMirror.reconcile(Array(history.prefix(ClipboardHistoryStore.cap)),
+                                      into: SharedDocumentStore(url: syncURL))
     }
 }

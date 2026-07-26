@@ -56,7 +56,7 @@ enum Bucket: String, CaseIterable, Identifiable {
 /// than folded into `Bucket` so neither dialect's sidebar can accidentally select a
 /// case that means nothing for it.
 enum PromptBucket: String, CaseIterable, Identifiable {
-    case library, delivery, health
+    case library, delivery, health, inbox
     var id: String { rawValue }
 
     var label: String {
@@ -64,6 +64,7 @@ enum PromptBucket: String, CaseIterable, Identifiable {
         case .library: return "Library"
         case .delivery: return "Delivery"
         case .health: return "Health"
+        case .inbox: return "Inbox"
         }
     }
 
@@ -72,6 +73,7 @@ enum PromptBucket: String, CaseIterable, Identifiable {
         case .library: return "text.book.closed"
         case .delivery: return "arrow.up.circle"
         case .health: return "stethoscope"
+        case .inbox: return "tray.and.arrow.down"
         }
     }
 }
@@ -180,6 +182,12 @@ struct SnippetEditTarget: Identifiable {
         SnippetEditTarget(mode: .edit, trigger: snippet.trigger, template: snippet.template,
                           originalID: snippet.id)
     }
+/// What FIND is currently searching: your defined aliases and functions, your shell
+/// history, or your clipboard. Three sources sharing one surface, not three views —
+/// see `AppState.findSource`'s own doc comment for why this replaced a plain
+/// history-only flag.
+enum FindSource: Equatable {
+    case aliases, history, clipboard
 }
 
 /// The single source of truth for what the popover is showing and what the keyboard
@@ -191,7 +199,14 @@ struct SnippetEditTarget: Identifiable {
 final class AppState: ObservableObject {
     @Published var mode: ViewMode
     @Published var query = ""
-    @Published var selection = 0
+    /// Whichever list a source is currently navigating — shell/prompt rows, history
+    /// commands, or clipboard clips, depending on `findSource`/`mode`. Resetting the
+    /// clipboard source's action highlight here, in one place, is what keeps every
+    /// route that moves this (arrow keys, a query edit, flipping `findSource` itself)
+    /// from having to remember to do it individually.
+    @Published var selection = 0 {
+        didSet { if findSource == .clipboard { clipActionSelection = nil } }
+    }
     @Published var bucket: Bucket = .all
     /// MANAGE's prompt-dialect counterpart to `bucket` — which of Library/Delivery/
     /// Health the sidebar has selected. Independent of `bucket` on purpose: flipping
@@ -402,6 +417,13 @@ final class AppState: ObservableObject {
     /// prompt. Same "no fallback to first" rule: an index that has drifted off the end
     /// of a reranked list should act on nothing, not on whatever slid under it.
     var selectedShortcut: Shortcut? {
+        // `selection` means something different in each FIND source now — a row in
+        // `findResults` only while `findSource == .aliases`. Without this guard, a
+        // selection index that happens to also be in range for `findResults` would
+        // silently resolve against the wrong list while browsing history or
+        // clipboard, the same class of bug `selectedEntry`'s own guard prevents for
+        // BOARD's two decks.
+        guard findSource == .aliases else { return nil }
         let list = findResults
         guard list.indices.contains(selection) else { return nil }
         return list[selection]
@@ -411,7 +433,7 @@ final class AppState: ObservableObject {
     /// of shortcut ranking favors, in BOARD it changes which deck is on screen. A no-op
     /// in MANAGE and in FIND's history mode, neither of which has anything to flip.
     func flipDialect() {
-        guard (mode == .find && !historyMode) || mode == .board else { return }
+        guard (mode == .find && findSource == .aliases) || mode == .board else { return }
         dialect = dialect == .shell ? .prompt : .shell
         selection = 0
     }
@@ -535,6 +557,18 @@ final class AppState: ObservableObject {
         Self.promptDeliveryStatus(for: shortcut, registryPath: AppPaths.compiledRegistryPath)
     }
 
+    /// Whether the prompt library is completely empty — the one fact FIND's prompt
+    /// dialect, MANAGE's Library bucket, and BOARD's prompt deck each check before
+    /// showing the ⌘I hint in their own empty state, so the check itself can never
+    /// drift between the three call sites.
+    var promptLibraryEmpty: Bool { promptCache.isEmpty }
+
+    /// The consistent ⌘I hint shown in every "no prompts yet" empty state — worded
+    /// once here so FIND's prompt dialect, MANAGE's Library bucket, and BOARD's
+    /// prompt deck can never drift on what pressing it actually does.
+    static let promptLibraryEmptyHint =
+        "⌘I copies an audit prompt for ChatGPT or Claude — paste back what it suggests to review here, one item at a time."
+
     // MARK: - Manage: prompt dialect (Library / Delivery / Health)
 
     /// Every stored prompt as a `Shortcut`, usage filled in — the same adapter
@@ -655,6 +689,10 @@ final class AppState: ObservableObject {
             return library.filter {
                 !Self.promptHealthIssues(for: $0, library: library, usage: promptUsageCache).isEmpty
             }
+        case .inbox:
+            // InboxView owns this bucket's real pool (`inboxRows`, below) — never
+            // read through here. Kept only so the switch stays exhaustive.
+            return []
         }
     }
 
@@ -878,12 +916,295 @@ final class AppState: ObservableObject {
         clampSelection()
     }
 
+    // MARK: - Inbox (PRE-265 UI)
+
+    /// One inbox file's live review state. `PromptInbox`'s own API is deliberately
+    /// file-level (a file only ever leaves the live inbox as a whole, via
+    /// `markDone`/`discardFile`), so tracking "which items in this file have I
+    /// already decided, and which have I actually looked at" is squarely this UI
+    /// layer's job, kept entirely in memory for the life of this session — nothing
+    /// here is ever written to disk on its own.
+    struct InboxFileReview {
+        let url: URL
+        var items: [PromptInbox.Item]
+        /// Per-item decision, index-aligned with `items`. Absent (nil) means still
+        /// pending.
+        var decisions: [Int: InboxItemDecision] = [:]
+        /// Which items have actually had their full body displayed at least once.
+        /// This is the fact behind `acknowledgedFlags: true` — `approveInboxItem`
+        /// derives that argument from this set on every call, so passing `true`
+        /// down into `PromptInbox.approve` is never a formality it could fake by
+        /// just clicking fast. Populated only by `markInboxItemViewed`, which the
+        /// detail view calls from its own `onAppear` once the item's complete,
+        /// untruncated body has actually been laid out on screen.
+        var viewedInFull: Set<Int> = []
+
+        var isFullyDecided: Bool { items.indices.allSatisfy { decisions[$0] != nil } }
+    }
+
+    enum InboxItemDecision: Equatable {
+        case approved
+        case discarded
+    }
+
+    /// One row the Inbox bucket's list shows: either a decidable item out of a
+    /// file that parsed cleanly, or a whole file that didn't parse at all — the two
+    /// things `PromptInbox.scan` can produce (`.ok`'s items, `.invalid`'s file-level
+    /// refusal). An `.invalid` file has nothing to review item-by-item, so it only
+    /// ever offers a whole-file Discard.
+    enum InboxRow: Identifiable, Equatable {
+        case item(file: URL, index: Int)
+        case invalidFile(url: URL, reason: String)
+
+        var id: String {
+            switch self {
+            case .item(let file, let index): return "inbox-item-\(file.path)#\(index)"
+            case .invalidFile(let url, _): return "inbox-invalid-\(url.path)"
+            }
+        }
+    }
+
+    /// Every well-formed inbox file's review state, keyed by file URL — rebuilt at
+    /// `prepareForShow` (the packet's "summon-time scan is the honest cadence": no
+    /// filesystem watcher). `@Published` because `markInboxItemViewed` mutates it
+    /// without otherwise touching any other published field, and the Approve
+    /// button's enabled state has to react to exactly that change.
+    @Published private var inboxReviews: [URL: InboxFileReview] = [:]
+    /// The `.invalid` files from the same scan, separately — there's no item list
+    /// inside one of these to track decisions for.
+    @Published private var invalidInboxFiles: [(url: URL, reason: String)] = []
+    /// Set by `editInboxItem` just before opening the Composer, so a successful
+    /// save can mark the originating inbox item handled without `commitPromptEditor`
+    /// otherwise knowing anything about the inbox. Cleared whenever a *different*
+    /// composer session opens, and on Esc, so it can never attach to the wrong save.
+    private var pendingInboxEdit: (file: URL, index: Int)?
+
+    /// Re-scans `~/.aliasbar/inbox` from disk. Existing review state for a file
+    /// that's still there (same URL, same item count) is preserved rather than
+    /// reset — a file only disappears from `inboxReviews` once `markDone` has
+    /// actually moved it out of the live inbox, so a file still present between two
+    /// summons is still mid-review, not a fresh one.
+    private func refreshInbox() {
+        let directory = URL(fileURLWithPath: AppPaths.inboxDirectory)
+        var reviews: [URL: InboxFileReview] = [:]
+        var invalid: [(url: URL, reason: String)] = []
+        for file in PromptInbox.scan(inboxDirectory: directory).files {
+            switch file {
+            case .ok(let url, let items, _):
+                guard !items.isEmpty else { continue }
+                if let existing = inboxReviews[url], existing.items.count == items.count {
+                    reviews[url] = existing
+                } else {
+                    reviews[url] = InboxFileReview(url: url, items: items)
+                }
+            case .invalid(let url, let reason):
+                invalid.append((url, reason))
+            }
+        }
+        inboxReviews = reviews
+        invalidInboxFiles = invalid
+    }
+
+    /// Every pending row Inbox's list shows, deterministically ordered by filename
+    /// so the list doesn't reshuffle between renders. A decided item drops out
+    /// immediately rather than lingering with a "done" badge — once every item in a
+    /// file is decided the whole file leaves the inbox via `markDone`, so there's
+    /// nothing left in `inboxReviews` for it to linger in.
+    var inboxRows: [InboxRow] {
+        var rows: [InboxRow] = []
+        for (url, review) in inboxReviews.sorted(by: { $0.key.lastPathComponent < $1.key.lastPathComponent }) {
+            for index in review.items.indices where review.decisions[index] == nil {
+                rows.append(.item(file: url, index: index))
+            }
+        }
+        for invalid in invalidInboxFiles.sorted(by: { $0.url.lastPathComponent < $1.url.lastPathComponent }) {
+            rows.append(.invalidFile(url: invalid.url, reason: invalid.reason))
+        }
+        return rows
+    }
+
+    /// The sidebar's Inbox badge — every pending item plus every file that needs a
+    /// human to at least look at why it didn't parse.
+    var inboxPendingCount: Int { inboxRows.count }
+
+    var selectedInboxRow: InboxRow? {
+        guard promptBucket == .inbox else { return nil }
+        let rows = inboxRows
+        guard rows.indices.contains(selection) else { return nil }
+        return rows[selection]
+    }
+
+    /// The concrete item behind `selectedInboxRow`, bundled with its file's review
+    /// state — nil whenever nothing is selected, or the selection names an
+    /// `.invalidFile` row (which has no single item to bundle).
+    var selectedInboxItem: (file: URL, index: Int, item: PromptInbox.Item, review: InboxFileReview)? {
+        guard case .item(let file, let index) = selectedInboxRow,
+              let review = inboxReviews[file], review.items.indices.contains(index)
+        else { return nil }
+        return (file, index, review.items[index], review)
+    }
+
+    /// The item at `file`/`index`, for rendering any `.item` row in the list — not
+    /// just the selected one, which is what `selectedInboxItem` is for.
+    func itemFor(file: URL, index: Int) -> PromptInbox.Item? {
+        guard let review = inboxReviews[file], review.items.indices.contains(index) else { return nil }
+        return review.items[index]
+    }
+
+    /// Whether the currently selected item's Approve control may actually be
+    /// pressed — the one place this gate is decided, so the view never has to
+    /// reconstruct the "flagged and never viewed in full" rule itself.
+    var selectedInboxItemCanApprove: Bool {
+        guard let selected = selectedInboxItem else { return false }
+        return !selected.item.isFlagged || selected.review.viewedInFull.contains(selected.index)
+    }
+
+    /// For an `.update` item, the existing prompt's current body — the "old" half
+    /// of the side-by-side diff the detail pane shows. Reads the live library
+    /// (`promptCache`, refreshed at `prepareForShow` and after any write), so a
+    /// prompt edited since the audit ran shows its *current* body, not a stale one.
+    func inboxUpdateOldBody(for item: PromptInbox.Item) -> String? {
+        guard item.type == .update, let replaces = item.replaces else { return nil }
+        return promptCache.first { $0.name.lowercased() == replaces.lowercased() }?.body
+    }
+
+    /// Marks item `index` of `file` as having had its full body actually displayed
+    /// — called from the detail pane's own `onAppear`, once, the first time its
+    /// complete, untruncated body has actually been laid out on screen. This is the
+    /// only place `viewedInFull` is ever set, and nothing else sets it, which is
+    /// what makes `acknowledgedFlags: true` a fact `approveInboxItem` reads back
+    /// rather than a formality any caller could assert.
+    func markInboxItemViewed(file: URL, index: Int) {
+        guard var review = inboxReviews[file], review.items.indices.contains(index),
+              !review.viewedInFull.contains(index)
+        else { return }
+        review.viewedInFull.insert(index)
+        inboxReviews[file] = review
+    }
+
+    /// Approves `item` at `file`/`index` into the real prompt library via
+    /// `PromptInbox.approve`. Refuses as that function documents when the item is
+    /// flagged and `viewedInFull` doesn't cover it — this call site is the only one
+    /// that ever passes `acknowledgedFlags:`, and it always derives that value from
+    /// `viewedInFull` rather than hardcoding `true`.
+    func approveInboxItem(file: URL, index: Int) {
+        guard var review = inboxReviews[file], review.items.indices.contains(index),
+              review.decisions[index] == nil
+        else { return }
+        let item = review.items[index]
+        let acknowledged = review.viewedInFull.contains(index)
+        do {
+            let result = try PromptInbox.approve(
+                item, existingLibrary: promptCache,
+                promptsDirectory: URL(fileURLWithPath: AppPaths.promptsDirectory),
+                acknowledgedFlags: acknowledged)
+            review.decisions[index] = .approved
+            inboxReviews[file] = review
+            errorMessage = nil
+            show(toast: "Approved \(result.name)")
+            finishInboxFileIfDone(file)
+            refreshPromptCaches()
+        } catch let error as PromptInbox.ApproveError {
+            errorMessage = error.errorDescription
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    /// Discards item `index` of `file` — `PromptInbox.discard` itself is a
+    /// documented no-op (there's nothing on disk to undo for an item never
+    /// written), so the only real work here is recording the decision and, once
+    /// that completes the file, moving it out of the live inbox.
+    func discardInboxItem(file: URL, index: Int) {
+        guard var review = inboxReviews[file], review.items.indices.contains(index),
+              review.decisions[index] == nil
+        else { return }
+        PromptInbox.discard(review.items[index])
+        review.decisions[index] = .discarded
+        inboxReviews[file] = review
+        show(toast: "Discarded \(review.items[index].name)")
+        finishInboxFileIfDone(file)
+    }
+
+    /// Discards an entire file without deciding it item by item — the action an
+    /// `.invalidFile` row offers (there's nothing else to do with one), and also
+    /// available for a well-formed file a human decides isn't worth reviewing at
+    /// all.
+    func discardInboxFile(_ url: URL) {
+        _ = try? PromptInbox.discardFile(at: url)
+        inboxReviews.removeValue(forKey: url)
+        invalidInboxFiles.removeAll { $0.url == url }
+        clampSelection()
+    }
+
+    /// Edit-before-approve: opens the Composer prefilled from the item, tagged
+    /// `source: "inbox"` so `commitPromptEditor` knows to mark the originating item
+    /// handled once the save actually succeeds — the item is never touched here,
+    /// before the human has decided anything.
+    func editInboxItem(file: URL, index: Int) {
+        guard let review = inboxReviews[file], review.items.indices.contains(index) else { return }
+        let item = review.items[index]
+        openComposer(prefill: ComposerPrefill(kind: .prompt, name: item.name,
+                                              description: item.description ?? "",
+                                              body: item.body, source: "inbox"))
+        pendingInboxEdit = (file, index)
+    }
+
+    /// Called by `commitPromptEditor` once an inbox-sourced edit has actually
+    /// written its prompt. Treated the same as an approval for lifecycle purposes —
+    /// a human reviewed it, changed it, and it now lives in the real library — so it
+    /// counts toward the file's completion exactly like `approveInboxItem` does.
+    private func markInboxItemHandled(file: URL, index: Int) {
+        guard var review = inboxReviews[file], review.items.indices.contains(index),
+              review.decisions[index] == nil
+        else { return }
+        review.decisions[index] = .approved
+        inboxReviews[file] = review
+        finishInboxFileIfDone(file)
+    }
+
+    /// Once every item in `file` has a decision, the file itself leaves the live
+    /// inbox via `markDone` — there is no separate "you're done, close it out"
+    /// action a human has to remember to take.
+    private func finishInboxFileIfDone(_ file: URL) {
+        guard let review = inboxReviews[file], review.isFullyDecided else { return }
+        _ = try? PromptInbox.markDone(file)
+        inboxReviews.removeValue(forKey: file)
+    }
+
+    /// Re-reads the prompt library and its usage after a write that happened
+    /// outside `commitPromptEditor` (an inbox approval), the same reload
+    /// `commitPromptEditor` already does after its own save — so FIND/BOARD/MANAGE
+    /// see an inbox-approved prompt without waiting for the next summon.
+    private func refreshPromptCaches() {
+        let promptsDirectory = URL(fileURLWithPath: AppPaths.promptsDirectory)
+        promptCache = PromptStore.scan(directory: promptsDirectory).prompts
+        promptUsageCache = PromptUsageCounter.all(path: AppPaths.promptUsagePath)
+    }
+
     // MARK: - History
 
-    /// FIND, but searching everything you have ever run instead of everything you have
-    /// defined. Not a fourth view: the same surface, a different pool.
-    @Published var historyMode = false {
-        didSet { selection = 0; historyMemoQuery = nil }
+    // MARK: - Find source
+
+    /// FIND, but searching everything you have ever run, or your clipboard, instead
+    /// of everything you have defined. Not a fourth (or fifth) view: the same
+    /// surface, a different pool — the audit's own framing, and the reason this
+    /// replaced a plain history-only flag once clipboard became a second alternate
+    /// source rather than inventing its own boolean beside it.
+    @Published var findSource: FindSource = .aliases {
+        didSet { selection = 0; historyMemoQuery = nil; clipActionSelection = nil }
+    }
+
+    /// Compatibility read for every call site that predates the three-way source
+    /// (Views.swift's history chrome, `?`'s prefix-bucket guard, etc.) and only ever
+    /// needed "is history the thing showing" as a yes/no. Kept as a computed alias
+    /// rather than rewritten everywhere at once, so this slice's diff stays inside
+    /// the clipboard/Find-source regions instead of touching every existing
+    /// `historyMode` call site. `findSource`'s own `didSet` above does the resetting
+    /// either route needs, so routing the setter through it costs nothing.
+    var historyMode: Bool {
+        get { findSource == .history }
+        set { findSource = newValue ? .history : .aliases }
     }
 
     private var historyCache: [HistoryScanner.Command] = []
@@ -952,6 +1273,107 @@ final class AppState: ObservableObject {
             for: command,
             takenNames: Set(store.ranked.map(\.name))
         )
+    }
+
+    // MARK: - Clipboard source
+
+    /// Set by the app delegate once a `ClipboardMonitor` exists — nil until
+    /// clipboard monitoring has been started at least once this run (`App.swift`
+    /// never constructs one while the setting is off, matching `historyMode`'s
+    /// "not a fourth view" framing: there is nothing to browse until there is
+    /// something watching). `@Published` so FIND's clipboard source redraws the
+    /// moment monitoring gets turned on live, rather than only at the next summon.
+    @Published var clipboardMonitor: ClipboardMonitor?
+
+    /// Which transform action is highlighted in the clipboard source's detail pane,
+    /// or nil for "the clip itself". Tab/Shift-Tab cycles through
+    /// `[nil, action0, action1, ...]` — the same field-cycling shape
+    /// `FillInSheet.SlotFillState.advance` already uses for slots, applied here to
+    /// transform actions instead. Reset whenever the clip selection or the find
+    /// source changes (see `selection` and `findSource`'s own `didSet`s), never left
+    /// to a caller to remember.
+    @Published var clipActionSelection: Int?
+
+    /// FIND's clipboard rows: `ClipboardMonitor`'s SafeClip history, newest first,
+    /// exactly as the monitor already orders it, optionally narrowed by the live
+    /// query (plain substring match — a recency list, not a ranked search, so there
+    /// is nothing here for `Ranker` to do).
+    var clipboardRows: [SafeClip] {
+        let all = clipboardMonitor?.history ?? []
+        guard !query.isEmpty else { return all }
+        let needle = query.lowercased()
+        return all.filter { $0.content.lowercased().contains(needle) }
+    }
+
+    /// Quarantined clips still alive right now, reason-only — the clipboard
+    /// source's summary row reads this directly rather than reaching into
+    /// `clipboardMonitor` itself, so the row and the monitor's own clock can never
+    /// silently disagree about what's still active.
+    var activeQuarantine: [MemoryClip] {
+        clipboardMonitor?.activeQuarantine ?? []
+    }
+
+    /// FIND's clipboard counterpart to `selectedHistory`/`selectedShortcut` — same
+    /// "no fallback to first" rule, and nil outside the clipboard source so a
+    /// selection index left over from another source's list can never be misread
+    /// as a clip.
+    var selectedClip: SafeClip? {
+        guard findSource == .clipboard else { return nil }
+        let rows = clipboardRows
+        guard rows.indices.contains(selection) else { return nil }
+        return rows[selection]
+    }
+
+    /// The transform actions offered for whatever clip is selected right now. The
+    /// detail pane and the keyboard handler both read this rather than each calling
+    /// `ClipTransformer.actions` themselves, so Tab's cycling and what the pane
+    /// draws can never disagree about how many actions there are.
+    var clipboardActions: [ClipAction] {
+        guard let clip = selectedClip else { return [] }
+        return ClipTransformer.actions(for: clip.content)
+    }
+
+    /// Switches into the clipboard source and makes sure there is something to
+    /// show. The mirror of `enterHistory()` — same shape, same reason: FIND's third
+    /// source, not a fourth view.
+    func enterClipboard() {
+        mode = .find
+        findSource = .clipboard
+    }
+
+    /// Tab/Shift-Tab inside the clipboard source: cycles the detail pane's
+    /// highlight through "the clip itself" (nil) and each of its transform actions,
+    /// wrapping at both ends.
+    func cycleClipboardAction(forward: Bool) {
+        let actions = clipboardActions
+        guard !actions.isEmpty else { clipActionSelection = nil; return }
+        let count = actions.count + 1 // +1 slot for "the clip itself"
+        let current = (clipActionSelection ?? -1) + 1 // shift nil to slot 0
+        let next = ((current + (forward ? 1 : -1)) % count + count) % count
+        clipActionSelection = next == 0 ? nil : next - 1
+    }
+
+    /// Enter/⌘⏎ while the clipboard source is showing: delivers whatever is
+    /// highlighted — the clip's own content, or the selected transform's output —
+    /// through the exact same broker/paste pipeline every other Enter in this file
+    /// uses, so clipboard delivery honors `enterAction`'s copy/paste half and
+    /// `afterAction` identically to a shell or prompt result.
+    func performClipboardEnter() {
+        guard let clip = selectedClip else { return }
+        let pasting = settings.enterAction == .pasteName || settings.enterAction == .pasteCommand
+        if let index = clipActionSelection, clipboardActions.indices.contains(index) {
+            let action = clipboardActions[index]
+            deliver(action.output, pasting: pasting, toast: "Copied \(action.title)")
+        } else {
+            deliver(clip.content, pasting: pasting, toast: "Copied clip")
+        }
+    }
+
+    /// The clipboard source's empty-state Enable action — flips the setting on;
+    /// `AppDelegate`'s observer (`App.swift`) is what actually starts the monitor
+    /// live and hands this state a `ClipboardMonitor` moments later.
+    func enableClipboardMonitoring() {
+        settings.clipboardMonitoring = true
     }
 
     /// BOARD shows the whole pool, always. Typing dims rather than removes, so the grid
@@ -1031,10 +1453,29 @@ final class AppState: ObservableObject {
     /// instead of through `activeList`, which stays `bucketEntries` for every other
     /// shell bucket exactly as it always has.
     private var manageActiveCount: Int {
-        if dialect == .prompt { return promptManageResults.count }
+        if dialect == .prompt {
+            // Inbox holds its own list shape (`InboxRow`), same reasoning as
+            // Suggested's `[AliasSuggestion]` just below.
+            if promptBucket == .inbox { return inboxRows.count }
+            return promptManageResults.count
+        }
         if bucket == .suggested { return suggestedEntries.count }
         if bucket == .snippets { return snippetManageResults.count }
         return activeList.count
+    }
+
+    /// What `move(by:)` and `clampSelection()` (and the header's live counter) are
+    /// actually walking through right now — `activeCount`'s three-way counterpart
+    /// now that FIND has three sources instead of one flag. Outside FIND,
+    /// `findSource` is always `.aliases` (`switchTo` resets it on the way out, via
+    /// `historyMode = false`'s compatibility setter), so this reduces to plain
+    /// `activeCount` for BOARD and MANAGE exactly as it always did.
+    var navigableCount: Int {
+        switch findSource {
+        case .history: return historyResults.count
+        case .clipboard: return clipboardRows.count
+        case .aliases: return activeCount
+        }
     }
 
     /// The selected entry, or nil when the selection no longer points at anything.
@@ -1104,6 +1545,7 @@ final class AppState: ObservableObject {
         promptUsageCache = PromptUsageCounter.all(path: AppPaths.promptUsagePath)
         refreshSuggestions()
         refreshSnippetCache()
+        refreshInbox()
 
         if let hint = pendingPromptHint {
             pendingPromptHint = nil
@@ -1114,7 +1556,7 @@ final class AppState: ObservableObject {
     }
 
     func clampSelection() {
-        let count = historyMode ? historyResults.count : activeCount
+        let count = navigableCount
         if count == 0 { selection = 0 }
         else if selection >= count { selection = count - 1 }
         else if selection < 0 { selection = 0 }
@@ -1135,6 +1577,7 @@ final class AppState: ObservableObject {
         if editor != nil {
             if event.keyCode == UInt16(kVK_Escape) {
                 editor = nil
+                pendingInboxEdit = nil
                 return true
             }
             if event.keyCode == UInt16(kVK_Return) && event.modifierFlags.contains(.command) {
@@ -1178,9 +1621,9 @@ final class AppState: ObservableObject {
         switch Int(event.keyCode) {
         case kVK_Escape:
             // One step back before one step out. Escaping straight to the desktop from
-            // history would make the view feel like a trapdoor.
-            if historyMode {
-                historyMode = false
+            // history or the clipboard would make the view feel like a trapdoor.
+            if findSource != .aliases {
+                findSource = .aliases
                 return true
             }
             // A non-All bucket is a second thing to be inside of, so it is the second
@@ -1199,9 +1642,26 @@ final class AppState: ObservableObject {
             if historyMode { historyMode = false } else { enterHistory() }
             return true
 
+        // Mirrors ⌘H's toggle exactly, for the clipboard source. ⌘K rather than a
+        // letter tied to "clipboard" itself (⌘C is universally "copy the current
+        // text selection", which several detail-pane fields in this very source
+        // rely on via `.textSelection(.enabled)` — reusing it here would fight
+        // muscle memory instead of extending it) — ⌘K is the "jump to something
+        // else" mnemonic several command-palette-style apps already share.
+        case kVK_ANSI_K where command:
+            if findSource == .clipboard { findSource = .aliases } else { enterClipboard() }
+            return true
+
         case kVK_Return where historyMode:
             guard let entry = selectedHistory else { return true }
             if command { promoteToAlias(entry) } else { run(entry) }
+            return true
+
+        // The clipboard source's rows are `SafeClip`s, not a `Shortcut` or a
+        // `RankedEntry`, so its Enter goes through `performClipboardEnter` rather
+        // than either of the paths below.
+        case kVK_Return where findSource == .clipboard:
+            performClipboardEnter()
             return true
 
         // FIND's rows are the shell+prompt union, so its Enter goes through
@@ -1229,11 +1689,18 @@ final class AppState: ObservableObject {
             performBoardPrompt(prompt)
             return true
 
-        // ⇥ flips the dialect boost in FIND and the deck in BOARD, instead of cycling
-        // the view — MANAGE keeps ⇥ as a view switch below, since it has no dialect to
-        // flip.
-        case kVK_Tab where (mode == .find && !historyMode) || mode == .board:
+        // ⇥ flips the dialect boost in FIND's aliases source and the deck in BOARD,
+        // instead of cycling the view — MANAGE keeps ⇥ as a view switch below, since
+        // it has no dialect to flip.
+        case kVK_Tab where (mode == .find && findSource == .aliases) || mode == .board:
             flipDialect()
+            return true
+
+        // The clipboard source has no dialect to flip — ⇥ instead cycles the detail
+        // pane's highlight through the clip itself and its transform actions, the
+        // same "Tab/Shift-Tab cycles fields" shape `FillInSheet` already uses.
+        case kVK_Tab where mode == .find && findSource == .clipboard:
+            cycleClipboardAction(forward: !flags.contains(.shift))
             return true
 
         // MANAGE's own ⇥ flip, mirroring FIND's immediately above.
@@ -1366,6 +1833,13 @@ final class AppState: ObservableObject {
             onOpenSettings?()
             return true
 
+        // ⌘I anywhere in the palette: copies the audit prompt. ⌥⌘I picks the
+        // local-agent ending (write straight to the inbox) over the default web
+        // ending (paste into a chat window) — the one modifier this shortcut reads.
+        case kVK_ANSI_I where command:
+            copyAuditPrompt(ending: option ? .localAgent : .web)
+            return true
+
         case kVK_Tab:
             cycleView(backwards: flags.contains(.shift))
             return true
@@ -1375,8 +1849,9 @@ final class AppState: ObservableObject {
         }
 
         // Prefix keys jump straight into a MANAGE bucket, but only as the first
-        // character. Typing `?` mid-query should search for a question mark.
-        if query.isEmpty, !historyMode, !command, !control,
+        // character, and only while searching aliases — `?` typed into history or
+        // the clipboard should search for a literal question mark, not jump away.
+        if query.isEmpty, findSource == .aliases, !command, !control,
            let chars = event.charactersIgnoringModifiers {
             if let target = Self.prefixBucket(for: chars) {
                 mode = .manage
@@ -1404,7 +1879,7 @@ final class AppState: ObservableObject {
     }
 
     private func move(by delta: Int) {
-        let count = historyMode ? historyResults.count : activeCount
+        let count = navigableCount
         guard count > 0 else { selection = 0; return }
         // Wraps, because in a capped list the fastest way to the last item is up.
         selection = ((selection + delta) % count + count) % count
@@ -1433,9 +1908,9 @@ final class AppState: ObservableObject {
     /// narrows what you are looking at without moving you; the header chip (and in
     /// MANAGE, the sidebar) says where you have landed.
     private func cycleBucket(by delta: Int) {
-        // Buckets slice your aliases, not your history. Reaching for one while looking
-        // at history is a statement that you are done with history.
-        if historyMode { historyMode = false }
+        // Buckets slice your aliases, not your history or your clipboard. Reaching
+        // for one while looking at either is a statement that you are done with it.
+        if findSource != .aliases { findSource = .aliases }
         // MANAGE's prompt dialect has its own sidebar (Library/Delivery/Health), so
         // ⌘↑↓ there walks `PromptBucket`, not the shell `Bucket` list — the same
         // split FIND and BOARD never need, since neither has replaced its sidebar.
@@ -1553,6 +2028,20 @@ final class AppState: ObservableObject {
         if restoringFocus { PreviousApp.restore() }
     }
 
+    // MARK: - ⌘I: audit prompt (PRE-265)
+
+    /// ⌘I anywhere in the palette: builds the audit prompt fresh from the live
+    /// prompt library — `AuditPrompt.generate` is documented never to have a static
+    /// template, so this always reflects whatever `promptCache` currently holds —
+    /// and copies it. Always copy-only, regardless of `enterAction`, the same way a
+    /// raw ⌘⏎ copy is: this text is meant for pasting into a chat window, never for
+    /// pasting into whatever app was frontmost.
+    func copyAuditPrompt(ending: AuditPrompt.Ending) {
+        let text = AuditPrompt.generate(library: promptCache, ending: ending)
+        PasteboardBroker.write(transient: text, to: pasteboard)
+        show(toast: "Audit prompt copied — paste it into ChatGPT/Claude")
+    }
+
     // MARK: - Composer (PRE-267)
 
     /// The Composer's one entry point. Every route that opens the sheet — ⌘N,
@@ -1561,6 +2050,11 @@ final class AppState: ObservableObject {
     /// funnels a `ComposerPrefill` through here rather than constructing `EditTarget`
     /// directly, so every one of them agrees about what "prefilled" means.
     func openComposer(prefill: ComposerPrefill) {
+        // Only `editInboxItem` ever wants this set, and it sets it itself right
+        // after calling this function — so any other route into the Composer
+        // clears whatever a previous, possibly-abandoned inbox edit left behind,
+        // and can never have a later save misattributed to it.
+        if prefill.source != "inbox" { pendingInboxEdit = nil }
         switch prefill.kind {
         case .alias:
             editor = EditTarget(kind: .alias, mode: prefill.mode, name: prefill.name,
@@ -1849,6 +2343,14 @@ final class AppState: ObservableObject {
 
         errorMessage = nil
         editor = nil
+
+        // Edit-before-approve: the save just above landed in the real library, so
+        // the inbox item this Composer session originated from (if any) is handled
+        // — counted the same as an approval for the file's completion.
+        if target.source == "inbox", let pending = pendingInboxEdit {
+            markInboxItemHandled(file: pending.file, index: pending.index)
+            pendingInboxEdit = nil
+        }
 
         let registryPath = AppPaths.compiledRegistryPath
         let commandsDir = AppPaths.claudeCommandsDirectory

@@ -724,4 +724,16 @@ enum CorePaths {
         }
         return homeDirectory + "/.claude/commands"
     }
+
+    /// Where `PromptInbox` scans for untrusted proposal files — the directory
+    /// `AuditPrompt`'s `.localAgent` ending tells an agent to write into. Same
+    /// shape as `resolvePromptsDirectory`: no per-app stored setting, just an
+    /// environment override for testability.
+    static func resolveInboxDirectory(environmentOverride: String?,
+                                      homeDirectory: String) -> String {
+        if let environmentOverride, !environmentOverride.isEmpty {
+            return (environmentOverride as NSString).expandingTildeInPath
+        }
+        return homeDirectory + "/.aliasbar/inbox"
+    }
 }
