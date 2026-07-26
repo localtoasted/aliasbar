@@ -266,6 +266,19 @@ check("backup holds the original", read(backupPath) == "alias keep='1'\n")
 let mode = (try! FileManager.default.attributesOfItem(atPath: permPath)[.posixPermissions]
             as! NSNumber).intValue
 check("permissions preserved (0600)", mode == 0o600, String(format: "got %o", mode))
+
+let firstBackupContents = read(permPath)
+let firstBackup = try! AliasWriter.apply(.upsert(name: "n", command: "echo changed", comment: nil),
+                                          path: permPath, allEntries: [])
+let secondBackupContents = read(permPath)
+let secondBackup = try! AliasWriter.apply(.upsert(name: "n", command: "echo changed again",
+                                                   comment: nil),
+                                           path: permPath, allEntries: [])
+check("two writes in one second create distinct backups", firstBackup != secondBackup)
+check("the first same-second backup keeps its recovery point",
+      read(firstBackup) == firstBackupContents)
+check("the second same-second backup keeps its recovery point",
+      read(secondBackup) == secondBackupContents)
 check("no temp files left behind",
       (try! FileManager.default.contentsOfDirectory(atPath: sandbox))
           .allSatisfy { !$0.hasPrefix(".aliasbar-write-") })

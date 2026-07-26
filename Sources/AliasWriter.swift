@@ -1118,14 +1118,17 @@ enum AliasWriter {
 
     // MARK: - Backup
 
-    /// Timestamped backup beside the original. Returns its path so the UI can name it.
+    /// Timestamped backup beside the original. The UUID keeps two writes in the same
+    /// second from selecting the same path and overwriting the first recovery point.
+    /// Returns its path so the UI can name it.
     private static func writeBackup(of contents: String, for path: String) throws -> String {
         guard !contents.isEmpty else { return "" }
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyy-MM-dd-HHmmss"
         formatter.timeZone = TimeZone.current
         let stamp = formatter.string(from: Date())
-        let backupPath = "\(path).aliasbar-backup-\(stamp)"
+        let unique = UUID().uuidString.lowercased()
+        let backupPath = "\(path).aliasbar-backup-\(stamp)-\(unique)"
         do {
             try contents.write(toFile: backupPath, atomically: true, encoding: .utf8)
         } catch {
