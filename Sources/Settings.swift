@@ -411,10 +411,9 @@ final class AppSettings: ObservableObject {
     }
 
     /// One of onboarding's three found-treasure checkboxes: whether usage counts
-    /// from shell history are allowed to influence ranking. On by default. Not yet
-    /// consulted anywhere — the same "declare now, wire later" pattern
-    /// `clipboardPersistence` already shipped with; a later slice gates
-    /// `EntryStore`'s ranking behind it.
+    /// from shell history are allowed to influence ranking. On by default. Gated at
+    /// `EntryStore.reload()` (counts zeroed before any `RankedEntry` sees them) plus
+    /// the never-run/most-used/Suggested surfaces, which go empty-with-explanation.
     @Published var historyUsageRankingEnabled: Bool {
         didSet { defaults.set(historyUsageRankingEnabled, forKey: Key.historyUsageRankingEnabled) }
     }
@@ -423,7 +422,8 @@ final class AppSettings: ObservableObject {
     /// surfaced at all. Onboarding pre-checks it only when its scan actually finds
     /// `~/.claude`; the stored default here is `true` so an upgrade that skips
     /// onboarding entirely does not silently switch existing prompt features off.
-    /// Like `historyUsageRankingEnabled`, not yet consulted anywhere.
+    /// Gated at `AppState.loadPromptCache()` (the single choke point) plus the
+    /// dialect flips, ⌘I, and the Composer's kind picker.
     @Published var promptFeaturesEnabled: Bool {
         didSet { defaults.set(promptFeaturesEnabled, forKey: Key.promptFeaturesEnabled) }
     }
@@ -450,7 +450,15 @@ final class AppSettings: ObservableObject {
     /// lives in memory for the life of the app, and nothing under `~/.aliasbar`
     /// records a single byte of it.
     @Published var clipboardPersistence: Bool {
-        didSet { defaults.set(clipboardPersistence, forKey: Key.clipboardPersistence) }
+        didSet {
+            defaults.set(clipboardPersistence, forKey: Key.clipboardPersistence)
+            // Off means the stored bytes are gone, not merely that new ones stop
+            // arriving — anything less would quietly contradict the product's own
+            // clipboard trust story.
+            if oldValue && !clipboardPersistence {
+                ClipboardPersistenceController.purgeDiskCopies(syncFileURL: syncFileURL)
+            }
+        }
     }
     /// Whether persisted clips are also mirrored into the Sync file's "clips"
     /// collection (see `ClipboardSyncMirror`). Off by default, and meaningless while

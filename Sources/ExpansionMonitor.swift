@@ -188,6 +188,10 @@ final class ExpansionMonitor: ObservableObject {
     /// created — when Accessibility isn't granted yet.
     func start() {
         guard eventTap == nil else { return }
+        // The callers are gated on this too, but the "never observes anything while
+        // off" claim belongs to this type, not to caller discipline: a third caller
+        // added later cannot accidentally start the tap with the setting off.
+        guard AppSettings.shared.inlineExpansionEnabled else { return }
         guard Typist.isTrusted else {
             status = .needsAccessibility
             return

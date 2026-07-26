@@ -126,10 +126,10 @@ struct InboxView: View {
     }
 }
 
-/// One well-formed item's review pane. The whole trust-critical contract lives
-/// here: `.onAppear` is what turns "this item's complete body was laid out on
-/// screen" into a recorded fact (`AppState.markInboxItemViewed`) — the only place
-/// that ever happens — and the Approve button reads that same fact back through
+/// One well-formed item's review pane. The trust-critical contract: unflagged
+/// items are marked viewed by `.onAppear`; FLAGGED items are marked viewed only by
+/// the explicit control below the complete body, so selection alone can never
+/// satisfy the flag gate. The Approve button reads that recorded fact back through
 /// `state.selectedInboxItemCanApprove` rather than trusting its own click.
 private struct ItemDetail: View {
     @ObservedObject var state: AppState
@@ -155,6 +155,18 @@ private struct ItemDetail: View {
                         .foregroundStyle(.orange)
                         .fixedSize(horizontal: false, vertical: true)
                 }
+                if item.isFlagged && !review.viewedInFull.contains(index) {
+                    Button {
+                        state.markInboxItemViewed(file: file, index: index)
+                    } label: {
+                        Label("I've read the full item", systemImage: "checkmark.seal")
+                            .font(.system(size: 11.5, weight: .semibold))
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.vertical, 5).padding(.horizontal, 10)
+                    .background(RoundedRectangle(cornerRadius: 7).strokeBorder(.orange.opacity(0.6)))
+                    .accessibilityLabel("Confirm you have read the full flagged item")
+                }
                 actions
                 Spacer(minLength: 0)
             }
@@ -163,7 +175,11 @@ private struct ItemDetail: View {
         // Fires once, the first time this specific item's pane is actually laid
         // out — never on a mere selection-index reuse, since `AppState.InboxRow`
         // gives every item a stable identity SwiftUI can key `.onAppear` against.
-        .onAppear { state.markInboxItemViewed(file: file, index: index) }
+        .onAppear {
+            // Flagged items require the explicit control above — appearing on
+            // screen is not reading.
+            if !item.isFlagged { state.markInboxItemViewed(file: file, index: index) }
+        }
     }
 
     private var header: some View {

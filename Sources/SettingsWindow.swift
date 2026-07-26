@@ -561,7 +561,7 @@ struct SettingsView: View {
 
             SettingsGroup("Saving to disk") {
                 SettingsRow("Remember clips between launches",
-                            hint: "Off by default. When on, up to 200 recent clips are written to ~/.aliasbar/clips.json so they survive quitting AliasBar. Quarantined clips are never included — this only ever holds what already passed the same secret-shape check the clipboard source itself uses.") {
+                            hint: "Off by default. When on, up to 200 recent clips are written to ~/.aliasbar/clips.json so they survive quitting AliasBar. Quarantined clips are never included — this only ever holds what already passed the same secret-shape check the clipboard source itself uses. Turning it back off deletes the stored file and tombstones anything already mirrored into the sync file.") {
                     ThemedToggle(isOn: $settings.clipboardPersistence,
                                  label: settings.clipboardPersistence ? "On" : "Off")
                 }
