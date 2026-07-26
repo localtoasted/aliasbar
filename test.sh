@@ -77,7 +77,16 @@ swiftc -target "$(uname -m)-apple-macos13.0" \
 AB_BIN="${CLI_BUILD_DIR}/ab"
 
 CLI_SANDBOX="$(mktemp -d "${TMPDIR:-/tmp}/aliasbar-cli-tests-XXXXXX")"
-trap 'rm -rf "${CLI_SANDBOX}"' EXIT
+# A throwaway `defaults` domain standing in for the app's own preferences domain
+# (com.localtoasted.aliasbar), so the rc-path-precedence tests below can exercise
+# the "app's saved setting" tier without ever reading or writing the real one.
+APP_SETTING_SUITE="com.localtoasted.aliasbar.hardening-test.$$"
+# `defaults delete` clears the domain's keys but is known to leave a near-empty
+# stub .plist behind in ~/Library/Preferences; removing that file directly is what
+# actually leaves no residue on the machine running this suite.
+trap 'defaults delete "${APP_SETTING_SUITE}" >/dev/null 2>&1 || true; \
+      rm -f "${HOME}/Library/Preferences/${APP_SETTING_SUITE}.plist"; \
+      rm -rf "${CLI_SANDBOX}"' EXIT
 
 cli_pass=0
 cli_fail=0
@@ -207,6 +216,94 @@ cli_check "the overridden name is used, not a suggestion" contains "${AB_OUT}" $
 
 call_ab promote 99
 cli_check "promote past the end of history has nothing to do" status_is 4
+
+# --- `--` end-of-flags separator ---------------------------------------------
+call_ab add dashcmd -- --dry-run
+cli_check "add accepts a command starting with -- after a -- separator" status_is 0
+call_ab list
+cli_check "the flag-shaped command was stored verbatim" contains "${AB_OUT}" $'*dashcmd\t--dry-run'
+
+# --- --json on last and promote -----------------------------------------------
+call_ab last 2 --json
+cli_check "last --json exits 0" status_is 0
+cli_check "last --json is a JSON array" out_starts_with_bracket
+cli_check "last --json includes the text field" contains "${AB_OUT}" '"text":"npm run build"'
+cli_check "last --json includes a count field" contains "${AB_OUT}" '"count":'
+
+call_ab promote 3 --name jsonpromoted --json
+cli_check "promote --json exits 0" status_is 0
+cli_check "promote --json is a JSON array" out_starts_with_bracket
+cli_check "promote --json uses the same row shape as list/search" \
+    contains "${AB_OUT}" '"name":"jsonpromoted"'
+cli_check "promote --json marks the new alias managed" contains "${AB_OUT}" '"managed":true'
+call_ab list
+cli_check "promote --json still actually wrote the alias" contains "${AB_OUT}" "*jsonpromoted"
+
+# --- add/promote name which source decided the path ---------------------------
+call_ab add sourcetagged "echo hi"
+cli_check "add's output names \$ALIASBAR_ZSHRC as the deciding source" \
+    contains "${AB_OUT}" '[via $ALIASBAR_ZSHRC]'
+
+FILE_FLAG_TARGET="${CLI_SANDBOX}/file-flag-target-rc"
+: > "${FILE_FLAG_TARGET}"
+call_ab add fromflag "echo hi" --file "${FILE_FLAG_TARGET}"
+cli_check "add's output names --file as the deciding source when --file is given" \
+    contains "${AB_OUT}" '[via --file flag]'
+
+call_ab promote --name sourcetaggedpromote
+cli_check "promote's output also names the deciding source" \
+    contains "${AB_OUT}" '[via $ALIASBAR_ZSHRC]'
+
+# --- rc-path precedence: --file > $ALIASBAR_ZSHRC > the app's saved setting ----
+# Deliberately never exercises the bare ~/.zshrc default here — that would mean
+# reading (or worse, writing) the real file. The default branch itself is a
+# direct, already-unit-tested call into CorePaths.resolveRcPath against a fake
+# home directory, so it needs no subprocess coverage on top of that.
+
+APP_SETTING_RC="${CLI_SANDBOX}/app-setting-rc"
+cat > "${APP_SETTING_RC}" <<'APPRCEOF'
+alias fromapp='echo from-app-setting'
+APPRCEOF
+defaults write "${APP_SETTING_SUITE}" rcPathOverride -string "${APP_SETTING_RC}"
+
+ENV_ONLY_RC="${CLI_SANDBOX}/env-only-rc"
+cat > "${ENV_ONLY_RC}" <<'ENVRCEOF'
+alias fromenv='echo from-env'
+ENVRCEOF
+
+PRECEDENCE_FILE_FLAG_RC="${CLI_SANDBOX}/precedence-file-flag-rc"
+cat > "${PRECEDENCE_FILE_FLAG_RC}" <<'PFLAGRCEOF'
+alias fromfileflag='echo from-file-flag'
+PFLAGRCEOF
+
+AB_STATUS=0
+# `env -u ALIASBAR_ZSHRC` explicitly unsets it rather than merely omitting it from
+# this invocation's prefix, so this test can't accidentally pass or fail depending
+# on whether the developer running it happens to already export that variable.
+AB_OUT="$(env -u ALIASBAR_ZSHRC ALIASBAR_DEFAULTS_SUITE="${APP_SETTING_SUITE}" \
+    ALIASBAR_HISTORY="${HISTORY_FILE}" "${AB_BIN}" list 2>"${CLI_SANDBOX}/stderr")" || AB_STATUS=$?
+AB_ERR="$(cat "${CLI_SANDBOX}/stderr")"
+cli_check "the app's saved setting is honored when nothing else overrides it" \
+    contains "${AB_OUT}" $'fromapp\techo from-app-setting'
+
+AB_STATUS=0
+AB_OUT="$(ALIASBAR_DEFAULTS_SUITE="${APP_SETTING_SUITE}" ALIASBAR_ZSHRC="${ENV_ONLY_RC}" \
+    ALIASBAR_HISTORY="${HISTORY_FILE}" "${AB_BIN}" list 2>"${CLI_SANDBOX}/stderr")" || AB_STATUS=$?
+AB_ERR="$(cat "${CLI_SANDBOX}/stderr")"
+cli_check "\$ALIASBAR_ZSHRC outranks the app's saved setting" \
+    contains "${AB_OUT}" $'fromenv\techo from-env'
+cli_check "the app-setting file is not read once \$ALIASBAR_ZSHRC is set" \
+    not_contains "${AB_OUT}" "fromapp"
+
+AB_STATUS=0
+AB_OUT="$(ALIASBAR_DEFAULTS_SUITE="${APP_SETTING_SUITE}" ALIASBAR_ZSHRC="${ENV_ONLY_RC}" \
+    ALIASBAR_HISTORY="${HISTORY_FILE}" "${AB_BIN}" list --file "${PRECEDENCE_FILE_FLAG_RC}" \
+    2>"${CLI_SANDBOX}/stderr")" || AB_STATUS=$?
+AB_ERR="$(cat "${CLI_SANDBOX}/stderr")"
+cli_check "--file outranks both \$ALIASBAR_ZSHRC and the app's saved setting" \
+    contains "${AB_OUT}" $'fromfileflag\techo from-file-flag'
+cli_check "neither \$ALIASBAR_ZSHRC's nor the app setting's file is read once --file is given" \
+    not_contains "${AB_OUT}" "fromenv"
 
 echo
 echo "  ${cli_pass} passed, ${cli_fail} failed"

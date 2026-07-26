@@ -1,3 +1,4 @@
+import CoreFoundation
 import Foundation
 
 // `ab`: a command-line front end onto the same core the app uses — ZshrcParser,
@@ -43,16 +44,22 @@ Commands:
   add <name> <command> [--comment <text>] [--force-collateral]
       Write or update an alias in the managed block.
 
-  last [n]
+  last [n] [--json]
       Print the n most recent distinct history commands (default 10), newest first.
 
-  promote [n] [--name <name>] [--force-collateral]
+  promote [n] [--name <name>] [--force-collateral] [--json]
       Take history command #n (default 1, most recent) and create an alias for it.
       Without --name, a name is suggested and deduplicated against existing names.
 
+A `--` before positional arguments ends flag parsing: everything after it is taken
+literally, even a value that starts with `-` (for example, an alias command that is
+itself a flag-shaped string: `ab add myalias -- --verbose`).
+
 Path resolution:
-  rc file:  --file  >  $ALIASBAR_ZSHRC  >  ~/.zshrc
+  rc file:  --file  >  $ALIASBAR_ZSHRC  >  the app's saved rc-path setting  >  ~/.zshrc
   history:  $ALIASBAR_HISTORY  >  ~/.zsh_history
+
+`add` and `promote` name which of those sources decided the path in their output.
 
 Exit codes: 0 ok, 2 usage error, 3 writer refusal, 4 nothing to do, 5 unreadable file.
 """
@@ -75,8 +82,23 @@ struct ParsedArgs {
 func parseArgs(_ args: [String], valueFlags: Set<String>, boolFlags: Set<String>) throws -> ParsedArgs {
     var result = ParsedArgs()
     var i = 0
+    var sawSeparator = false
     while i < args.count {
         let arg = args[i]
+        if sawSeparator {
+            // Everything from here on is a positional, verbatim — including a value
+            // that happens to start with "--". This is the only way to add an alias
+            // whose *command* is itself flag-shaped (`ab add myalias -- --verbose`);
+            // without it, "--verbose" would be rejected below as an unknown flag.
+            result.positionals.append(arg)
+            i += 1
+            continue
+        }
+        if arg == "--" {
+            sawSeparator = true
+            i += 1
+            continue
+        }
         if valueFlags.contains(arg) {
             guard i + 1 < args.count else {
                 throw UsageError(message: "\(arg) requires a value")
@@ -110,16 +132,71 @@ func parseArgsOrExit(_ args: [String], valueFlags: Set<String>, boolFlags: Set<S
 
 // MARK: - Path resolution
 
-/// `--file` sits above the core's own precedence chain (env var, then `~/.zshrc`).
-/// The chain itself is `CorePaths.resolveRcPath`, called with `stored: nil` — the CLI
-/// has no app settings to consult, which is the entire point of that parameter.
-func resolveRcPath(fileFlag: String?) -> String {
-    if let fileFlag, !fileFlag.isEmpty {
-        return (fileFlag as NSString).expandingTildeInPath
+/// The AliasBar app's own bundle id and the `UserDefaults` key its GUI rc-path
+/// override is stored under (`Sources/Settings.swift`'s `Key.rcPath`, written to
+/// `AppSettings.store`; the bundle id comes from `build.sh`'s Info.plist). Named here
+/// rather than imported: the CLI's build list is deliberately just Model.swift and
+/// AliasWriter.swift, with no dependency on Settings.swift or AppKit, so this is the
+/// one place that has to know the app's storage key by name instead of by reference.
+private let aliasBarBundleID = "com.localtoasted.aliasbar"
+private let rcPathOverrideDefaultsKey = "rcPathOverride"
+
+/// A resolved path plus which precedence source decided it, so callers can report
+/// that to the user instead of just the path.
+struct ResolvedPath {
+    let path: String
+    let source: String
+}
+
+/// Best-effort read of the app's GUI-set rc-path override. "Best-effort" because this
+/// has no business ever failing loudly: a fresh install with nothing in its defaults
+/// yet, a sandboxed context, cfprefsd being unavailable — all of these should read
+/// back as "no override set", identically to the override never having existed.
+///
+/// `CFPreferencesCopyAppValue` is tried first: unlike `UserDefaults(suiteName:)`, it
+/// reads another process's preferences domain directly by application id, which is
+/// what's needed here since the CLI is not the app. `ALIASBAR_DEFAULTS_SUITE` — the
+/// same env var `Settings.swift` honors to redirect the app's own storage during
+/// tests and screenshot/video harnesses — is checked first so a test can point both
+/// the app and this lookup at one throwaway domain without ever touching the real
+/// user's preferences.
+func appStoredRcPathOverride() -> String? {
+    if let suite = ProcessInfo.processInfo.environment["ALIASBAR_DEFAULTS_SUITE"], !suite.isEmpty {
+        return UserDefaults(suiteName: suite)?.string(forKey: rcPathOverrideDefaultsKey)
     }
-    return CorePaths.resolveRcPath(stored: nil,
-                                   environmentOverride: ProcessInfo.processInfo.environment["ALIASBAR_ZSHRC"],
-                                   homeDirectory: NSHomeDirectory())
+    if let value = CFPreferencesCopyAppValue(rcPathOverrideDefaultsKey as CFString,
+                                             aliasBarBundleID as CFString) as? String {
+        return value
+    }
+    return UserDefaults(suiteName: aliasBarBundleID)?.string(forKey: rcPathOverrideDefaultsKey)
+}
+
+/// The rc-file precedence chain, in full: `--file` beats `$ALIASBAR_ZSHRC`, which
+/// beats the app's saved GUI setting, which beats the plain `~/.zshrc` default.
+///
+/// This is deliberately its own chain rather than a call into `CorePaths.resolveRcPath`
+/// with the app setting plugged in as `stored:` — that function's precedence puts the
+/// stored override *above* the environment variable, which is right for the app (a
+/// person who set a path in Settings almost certainly wants it honored regardless of
+/// what's in their shell environment) but wrong here: `$ALIASBAR_ZSHRC` is this CLI's
+/// own explicit, scriptable override, and a script setting it should not be silently
+/// out-ranked by a GUI setting the script's author may not even know exists. What this
+/// chain guarantees instead is the thing that was actually broken before: when neither
+/// `--file` nor `$ALIASBAR_ZSHRC` is set, the CLI now finds the same file the app would
+/// open, rather than silently falling all the way through to `~/.zshrc`.
+func resolveRcPath(fileFlag: String?) -> ResolvedPath {
+    if let fileFlag, !fileFlag.isEmpty {
+        return ResolvedPath(path: (fileFlag as NSString).expandingTildeInPath, source: "--file flag")
+    }
+    if let env = ProcessInfo.processInfo.environment["ALIASBAR_ZSHRC"], !env.isEmpty {
+        return ResolvedPath(path: (env as NSString).expandingTildeInPath, source: "$ALIASBAR_ZSHRC")
+    }
+    if let stored = appStoredRcPathOverride(), !stored.isEmpty {
+        return ResolvedPath(path: (stored as NSString).expandingTildeInPath, source: "the app's saved setting")
+    }
+    let defaultPath = CorePaths.resolveRcPath(stored: nil, environmentOverride: nil,
+                                              homeDirectory: NSHomeDirectory())
+    return ResolvedPath(path: defaultPath, source: "default (~/.zshrc)")
 }
 
 func resolveHistoryPath() -> String {
@@ -182,6 +259,26 @@ func printJSON(_ rows: [EntryRow]) {
     print(text)
 }
 
+/// `last`'s JSON row shape. Deliberately not `EntryRow`: a history command is not a
+/// shell entry (no name, no managed/comment/sourceFile — it's a raw line from
+/// `~/.zsh_history`), so reusing that shape would mean padding every unrelated field
+/// with nulls. `count` is the same invocation count `EntryRow.uses` carries for a
+/// shell entry, kept under its own name here since there's no alias name for it to be
+/// "uses of".
+struct HistoryRow: Codable {
+    let text: String
+    let count: Int
+}
+
+func printHistoryJSON(_ rows: [HistoryRow]) {
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.sortedKeys]
+    guard let data = try? encoder.encode(rows), let text = String(data: data, encoding: .utf8) else {
+        fail(.usage, "internal error: failed to encode JSON")
+    }
+    print(text)
+}
+
 /// name<TAB>command, one per line, managed entries prefixed with `*` on the name.
 /// A literal tab rather than padded spaces: it stays exactly two fields per line, so
 /// `cut -f2` or `column -t -s $'\t'` both work on it, which hand-padded columns don't.
@@ -200,7 +297,7 @@ func runList(_ args: [String]) {
         fail(.usage, "list takes no positional arguments")
     }
 
-    let path = resolveRcPath(fileFlag: parsed.values["--file"])
+    let path = resolveRcPath(fileFlag: parsed.values["--file"]).path
     let entries = loadEntriesOrExit(path: path)
     let sorted = entries.sorted { lhs, rhs in
         let l = lhs.name.lowercased()
@@ -224,7 +321,7 @@ func runSearch(_ args: [String]) {
         fail(.usage, "search requires exactly one query argument")
     }
 
-    let path = resolveRcPath(fileFlag: parsed.values["--file"])
+    let path = resolveRcPath(fileFlag: parsed.values["--file"]).path
     let entries = loadEntriesOrExit(path: path)
 
     // Ranker needs usage counts to break ties the same way the app does.
@@ -252,7 +349,8 @@ func runAdd(_ args: [String]) {
     let comment = parsed.values["--comment"]
     let forceCollateral = parsed.flags.contains("--force-collateral")
 
-    let path = resolveRcPath(fileFlag: parsed.values["--file"])
+    let resolved = resolveRcPath(fileFlag: parsed.values["--file"])
+    let path = resolved.path
     let entries = loadEntriesOrExit(path: path)
 
     do {
@@ -260,7 +358,7 @@ func runAdd(_ args: [String]) {
                                            path: path,
                                            allEntries: entries,
                                            confirmedCollateral: forceCollateral)
-        printWriteResult(action: "Wrote", name: name, path: path, backup: backup)
+        printWriteResult(action: "Wrote", name: name, path: path, source: resolved.source, backup: backup)
         exit(ExitCode.ok.rawValue)
     } catch let error as AliasWriter.WriteError {
         fail(.writerRefusal, error.errorDescription ?? "write refused")
@@ -272,18 +370,23 @@ func runAdd(_ args: [String]) {
 /// Shared success message for `add` and `promote`. `AliasWriter.apply` returns "" when
 /// the rc file was empty (nothing existed yet to back up), which is a legitimate
 /// outcome, not a missing backup — so it's only mentioned when there is one.
-func printWriteResult(action: String, name: String, path: String, backup: String) {
+///
+/// `source` names which precedence rule actually picked `path` (`--file`, the env
+/// var, the app's saved setting, or the plain default) — without it, a write to a
+/// path the caller didn't expect (say, because a GUI setting was quietly overriding
+/// `~/.zshrc`) would look identical to one that went exactly where they assumed.
+func printWriteResult(action: String, name: String, path: String, source: String, backup: String) {
     if backup.isEmpty {
-        print("\(action) \(name) to \(path)")
+        print("\(action) \(name) to \(path) [via \(source)]")
     } else {
-        print("\(action) \(name) to \(path) (backup: \(backup))")
+        print("\(action) \(name) to \(path) [via \(source)] (backup: \(backup))")
     }
 }
 
 // MARK: - last
 
 func runLast(_ args: [String]) {
-    let parsed = parseArgsOrExit(args, valueFlags: [], boolFlags: [])
+    let parsed = parseArgsOrExit(args, valueFlags: [], boolFlags: ["--json"])
     guard parsed.positionals.count <= 1 else {
         fail(.usage, "last takes at most one argument")
     }
@@ -291,8 +394,14 @@ func runLast(_ args: [String]) {
 
     let mostRecentFirst = HistoryScanner.commands(path: resolveHistoryPath())
         .sorted { $0.lastSeen > $1.lastSeen }
-    for command in mostRecentFirst.prefix(n) {
-        print(command.text)
+    let selected = Array(mostRecentFirst.prefix(n))
+
+    if parsed.flags.contains("--json") {
+        printHistoryJSON(selected.map { HistoryRow(text: $0.text, count: $0.count) })
+    } else {
+        for command in selected {
+            print(command.text)
+        }
     }
     exit(ExitCode.ok.rawValue)
 }
@@ -300,7 +409,8 @@ func runLast(_ args: [String]) {
 // MARK: - promote
 
 func runPromote(_ args: [String]) {
-    let parsed = parseArgsOrExit(args, valueFlags: ["--file", "--name"], boolFlags: ["--force-collateral"])
+    let parsed = parseArgsOrExit(args, valueFlags: ["--file", "--name"],
+                                 boolFlags: ["--force-collateral", "--json"])
     guard parsed.positionals.count <= 1 else {
         fail(.usage, "promote takes at most one positional argument")
     }
@@ -313,7 +423,8 @@ func runPromote(_ args: [String]) {
     }
     let command = mostRecentFirst[n - 1].text
 
-    let path = resolveRcPath(fileFlag: parsed.values["--file"])
+    let resolved = resolveRcPath(fileFlag: parsed.values["--file"])
+    let path = resolved.path
     let entries = loadEntriesOrExit(path: path)
     let takenNames = Set(entries.map(\.name))
 
@@ -334,7 +445,20 @@ func runPromote(_ args: [String]) {
                                            path: path,
                                            allEntries: entries,
                                            confirmedCollateral: forceCollateral)
-        printWriteResult(action: "Promoted history #\(n) to", name: name, path: path, backup: backup)
+        if parsed.flags.contains("--json") {
+            // Re-parsed rather than synthesized: this is the same row shape `list`
+            // and `search` emit, built from what's actually on disk after the write,
+            // not from what this call assumed it would look like.
+            let refreshed = loadEntriesOrExit(path: path)
+            if let written = refreshed.first(where: { $0.name == name }) {
+                printJSON([row(written)])
+            } else {
+                printJSON([])
+            }
+        } else {
+            printWriteResult(action: "Promoted history #\(n) to", name: name, path: path,
+                             source: resolved.source, backup: backup)
+        }
         exit(ExitCode.ok.rawValue)
     } catch let error as AliasWriter.WriteError {
         fail(.writerRefusal, error.errorDescription ?? "write refused")
