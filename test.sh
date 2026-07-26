@@ -17,6 +17,7 @@ swiftc -parse-as-library -emit-module \
     -target "$(uname -m)-apple-macos13.0" \
     "${PROJECT_DIR}/Sources/Model.swift" \
     "${PROJECT_DIR}/Sources/SensitiveContentClassifier.swift" \
+    "${PROJECT_DIR}/Sources/ClipboardCapture.swift" \
     "${PROJECT_DIR}/Sources/AliasWriter.swift" \
     -emit-module-path "${BUILD_DIR}/AliasBarCore.swiftmodule"
 
@@ -24,6 +25,7 @@ swiftc -target "$(uname -m)-apple-macos13.0" \
     "${PROJECT_DIR}/Sources/Model.swift" \
     "${PROJECT_DIR}/Sources/AppPaths.swift" \
     "${PROJECT_DIR}/Sources/SensitiveContentClassifier.swift" \
+    "${PROJECT_DIR}/Sources/ClipboardCapture.swift" \
     "${PROJECT_DIR}/Sources/Settings.swift" \
     "${PROJECT_DIR}/Sources/Theme.swift" \
     "${PROJECT_DIR}/Sources/Appearance.swift" \
