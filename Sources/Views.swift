@@ -451,6 +451,144 @@ struct EmptyStateView: View {
     }
 }
 
+/// The first screen a new user ever sees, so it teaches instead of apologising: one
+/// concrete example, the way in, and the key that summons the window — never a bare
+/// "nothing here".
+private struct TeachingEmptyState: View {
+    @Environment(\.theme) private var theme
+    /// The summon combo's display string, or nil when the hotkey is disabled.
+    let hotkey: String?
+    let create: () -> Void
+
+    var body: some View {
+        VStack(spacing: 16) {
+            VStack(spacing: 7) {
+                Image(systemName: "doc.text.magnifyingglass")
+                    .font(.system(size: 22, weight: .light))
+                    .foregroundStyle(theme.faint)
+                Text("Nothing in \(ZshrcParser.displayPath) yet")
+                    .font(.system(size: 12.5, weight: .medium))
+                    .foregroundStyle(theme.dim)
+            }
+
+            // One example, drawn like the row it will become. Seeing `gs → git status`
+            // explains an alias faster than any sentence about aliases could.
+            HStack(spacing: 8) {
+                Text("gs")
+                    .font(.system(size: 13, weight: .semibold, design: theme.nameDesign))
+                    .kerning(-0.15)
+                    .foregroundStyle(theme.text)
+                Image(systemName: "arrow.right")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(theme.faint)
+                Text("git status")
+                    .font(.system(size: 12, design: .monospaced))
+                    .foregroundStyle(theme.dim)
+                Text("for example")
+                    .font(.system(size: 10))
+                    .foregroundStyle(theme.faint)
+                    .padding(.leading, 2)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 7)
+            .background(theme.surface, in: RoundedRectangle(cornerRadius: theme.cornerRadius + 1))
+            .overlay(
+                RoundedRectangle(cornerRadius: theme.cornerRadius + 1)
+                    .strokeBorder(theme.rule.opacity(0.5), lineWidth: 1)
+            )
+
+            VStack(spacing: 9) {
+                Button(action: create) {
+                    HStack(spacing: 6) {
+                        Text("⌘N")
+                            .font(.system(size: 10.5, weight: .bold, design: .monospaced))
+                            .foregroundStyle(theme.onAccent.opacity(0.85))
+                        Text("Write your first alias")
+                            .font(.system(size: 11.5, weight: .semibold))
+                            .foregroundStyle(theme.onAccent)
+                    }
+                    .padding(.horizontal, 11)
+                    .padding(.vertical, 6)
+                    .background(theme.accent, in: RoundedRectangle(cornerRadius: theme.cornerRadius + 1))
+                }
+                .liveButton()
+
+                if let hotkey {
+                    Text("\(hotkey) summons this window from anywhere.")
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(theme.faint)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(.vertical, 24)
+        .padding(.horizontal, 24)
+    }
+}
+
+/// A dead end that does something. The failed query is already the name the user wants,
+/// so the row offering to create it is a live control — click or ⏎ — not a hint about a
+/// shortcut somewhere else.
+private struct NoMatchView: View {
+    @Environment(\.theme) private var theme
+    let query: String
+    let create: () -> Void
+
+    var body: some View {
+        VStack(spacing: 14) {
+            VStack(spacing: 7) {
+                Image(systemName: "magnifyingglass")
+                    .font(.system(size: 22, weight: .light))
+                    .foregroundStyle(theme.faint)
+                Text("No match for \"\(query)\"")
+                    .font(.system(size: 12.5, weight: .medium))
+                    .foregroundStyle(theme.dim)
+            }
+
+            VStack(spacing: 8) {
+                HStack(spacing: 8) {
+                    Image(systemName: "plus.circle.fill")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(theme.accent)
+                    Text("Create an alias named")
+                        .font(.system(size: 12.5, weight: .medium))
+                        .foregroundStyle(theme.text)
+                    Text(query)
+                        .font(.system(size: 12.5, weight: .semibold, design: theme.nameDesign))
+                        .kerning(-0.15)
+                        .foregroundStyle(theme.accent)
+                        .lineLimit(1)
+                    Text("⏎")
+                        .font(.system(size: 10, weight: .bold, design: .monospaced))
+                        .foregroundStyle(theme.dim)
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 1.5)
+                        .background(theme.surface, in: RoundedRectangle(cornerRadius: 3))
+                        .overlay(RoundedRectangle(cornerRadius: 3)
+                            .strokeBorder(theme.rule.opacity(0.6), lineWidth: 0.5))
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 9)
+                .background(theme.accent.opacity(0.14),
+                            in: RoundedRectangle(cornerRadius: theme.cornerRadius + 1))
+                .overlay(
+                    RoundedRectangle(cornerRadius: theme.cornerRadius + 1)
+                        .strokeBorder(theme.accent.opacity(0.4), lineWidth: 1)
+                )
+                .contentShape(Rectangle())
+                .live { create() }
+
+                Text("The editor opens with the name filled in.")
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(theme.faint)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(.vertical, 24)
+        .padding(.horizontal, 24)
+    }
+}
+
 // MARK: - FIND
 
 /// The hot path. One answer, large, with the runners-up as compact chips underneath.
@@ -526,14 +664,14 @@ struct FindView: View {
                                        title: "Nothing in \(state.bucket.label.lowercased())",
                                        hint: "Esc shows everything again.")
                     } else {
-                        EmptyStateView(symbol: "doc.text.magnifyingglass",
-                                       title: "Nothing in \(ZshrcParser.displayPath)",
-                                       hint: "Press ⌘N to write your first alias.")
+                        TeachingEmptyState(hotkey: settings.hotkeyEnabled
+                                               ? settings.hotkey.displayString
+                                               : nil,
+                                           create: { state.editor = .create() })
                     }
                 } else {
-                    EmptyStateView(symbol: "magnifyingglass",
-                                   title: "No match for \"\(state.query)\"",
-                                   hint: "⌘N turns this into a new alias.")
+                    NoMatchView(query: state.query,
+                                create: { state.editor = .create(name: state.query) })
                 }
             } else {
                 ScrollView {
