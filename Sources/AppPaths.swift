@@ -74,12 +74,32 @@ enum AppPaths {
         )
     }
 
+    /// Where onboarding's first-run scan looks for a Claude Code install.
+    /// `ALIASBAR_CLAUDE_DIR` exists purely for testability, matching
+    /// `promptsDirectory` — there is no per-app setting for this either.
+    static var claudeDirectory: String {
+        CorePaths.resolveClaudeDirectory(
+            environmentOverride: ProcessInfo.processInfo.environment["ALIASBAR_CLAUDE_DIR"],
+            homeDirectory: NSHomeDirectory()
+        )
+    }
+
     static func resolveClipsPath(environmentOverride: String?,
                                  homeDirectory: String) -> String {
         if let environmentOverride, !environmentOverride.isEmpty {
             return (environmentOverride as NSString).expandingTildeInPath
         }
         return homeDirectory + "/.aliasbar/clips.json"
+    }
+
+    /// Where MANAGE's Delivery bucket asks `PromptCompiler` to write/remove Claude
+    /// Code slash commands. `ALIASBAR_CLAUDE_COMMANDS_DIR` exists purely for
+    /// testability, matching every other override in this file.
+    static var claudeCommandsDirectory: String {
+        CorePaths.resolveClaudeCommandsDirectory(
+            environmentOverride: ProcessInfo.processInfo.environment["ALIASBAR_CLAUDE_COMMANDS_DIR"],
+            homeDirectory: NSHomeDirectory()
+        )
     }
 
     // Existing call sites (including WriterTests.swift) reach the resolvers through
