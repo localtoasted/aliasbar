@@ -12,6 +12,7 @@ import ServiceManagement
 /// on top of the app instead of the app's actual appearance.
 struct SettingsView: View {
     @ObservedObject var settings: AppSettings
+    @ObservedObject private var updater = Updater.shared
     // Behaviour, unless a harness asked for another section. The appearance section is
     // otherwise four clicks and a keystroke away from a cold launch, which is four clicks
     // more than a screenshot script can manage without Accessibility permission.
@@ -543,8 +544,18 @@ struct SettingsView: View {
                 }
             }
 
+            SettingsGroup("Updates") {
+                SettingsRow("Automatic", hint: "Checks the AliasBar release feed in the background and offers new versions when they appear. Nothing installs without asking.") {
+                    ThemedToggle(isOn: $updater.automaticallyChecksForUpdates,
+                                 label: "Check for updates automatically")
+                }
+                SettingsRow("Manual", hint: nil) {
+                    ThemedButton("Check now") { updater.checkForUpdates() }
+                }
+            }
+
             SettingsGroup("Privacy") {
-                NoticeText("AliasBar has no network access of any kind. It reads two files on your disk: your shell config, and your shell history for usage counts. Neither is ever sent anywhere.",
+                NoticeText("AliasBar reads two files on your disk: your shell config, and your shell history for usage counts. Neither is ever sent anywhere. Its only network access is checking the release feed for updates — automatically only if you switch that on, and never carrying anything beyond the request itself.",
                            tone: .info)
             }
 

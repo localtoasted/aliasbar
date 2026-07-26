@@ -29,6 +29,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         state.onDismiss = { [weak self] in self?.closeUI() }
         state.onOpenSettings = { [weak self] in self?.openSettings() }
 
+        // Kick the update cycle off at launch: the scheduled background check has to run
+        // whether or not the settings window is ever opened.
+        Updater.shared.start()
+
         makeStatusItem()
         installKeyMonitor()
         HotkeyRecorder.shared.start()
