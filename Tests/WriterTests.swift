@@ -2904,6 +2904,416 @@ for forbiddenAPI in [
 }
 
 // ---------------------------------------------------------------------------
+print("\n31. Shortcut model + PromptStore (PRE-258)")
+
+func promptFixture(_ ls: [String]) -> String { ls.joined(separator: "\n") }
+
+var promptDirIndex = 0
+func promptScratchDir() -> URL {
+    promptDirIndex += 1
+    let dir = URL(fileURLWithPath: "\(sandbox)/prompts\(promptDirIndex)")
+    try! FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    return dir
+}
+
+@discardableResult
+func writeRawPromptFile(_ contents: String, name: String, in dir: URL) -> URL {
+    let url = dir.appendingPathComponent("\(name).md")
+    try! contents.write(to: url, atomically: true, encoding: .utf8)
+    return url
+}
+
+// --- Slot grammar -----------------------------------------------------------
+
+check("basic slot", PromptSlotParser.slots(in: "Hello {{name}}") == ["name"])
+check("repeated slot is one shared value",
+      PromptSlotParser.slots(in: "{{name}}, is that really {{name}}?") == ["name"])
+check("distinct slots keep first-seen order",
+      PromptSlotParser.slots(in: "{{b}} then {{a}} then {{b}} then {{c}}") == ["b", "a", "c"])
+check("single braces are always literal",
+      PromptSlotParser.slots(in: "an f-string: {value}").isEmpty)
+check("unclosed double brace is literal",
+      PromptSlotParser.slots(in: "{{name} and {{ other").isEmpty)
+check("Jinja-style spaced/dotted braces stay literal",
+      PromptSlotParser.slots(in: "{{ user.name }} said hi").isEmpty)
+check("JSON braces are literal",
+      PromptSlotParser.slots(in: #"{"key": "value", "nested": {"a": 1}}"#).isEmpty)
+check("empty slot name is literal", PromptSlotParser.slots(in: "{{}}").isEmpty)
+check("a name with an embedded space breaks the match",
+      PromptSlotParser.slots(in: "{{na me}}").isEmpty)
+check("hyphens, underscores, and digits are valid name characters",
+      PromptSlotParser.slots(in: "{{my-slot_1}}") == ["my-slot_1"])
+check("a slot name cannot contain non-ASCII characters",
+      PromptSlotParser.slots(in: "{{café}}").isEmpty)
+check("unicode prose around a slot does not disturb the scan",
+      PromptSlotParser.slots(in: "こんにちは {{name}} 世界 🎉") == ["name"])
+check("an extra leading brace still finds the slot inside",
+      PromptSlotParser.slots(in: "{{{name}}}") == ["name"])
+
+check("render substitutes every occurrence",
+      PromptSlotParser.render("{{name}}, meet {{name}}.", values: ["name": "Ada"])
+          == "Ada, meet Ada.")
+check("render leaves an unfilled slot exactly as written",
+      PromptSlotParser.render("{{a}} and {{b}}", values: ["a": "X"]) == "X and {{b}}")
+check("render is a no-op on a body with no slots",
+      PromptSlotParser.render("plain text, no slots here", values: ["name": "Ada"])
+          == "plain text, no slots here")
+check("render preserves literal spans exactly, including unicode",
+      PromptSlotParser.render("héllo {{name}} 🎉", values: ["name": "world"])
+          == "héllo world 🎉")
+
+// --- Frontmatter parse + the byte-faithful round trip ------------------------
+
+let fullFixture = promptFixture([
+    "---",
+    "schema: 1",
+    "description: Summarize the daily standup",
+    "delivery: claude-code, popover",
+    "edited: 2026-07-20T12:00:00Z",
+    "---",
+    "Summarize: {{notes}}",
+    "",
+])
+let fullFixtureDir = promptScratchDir()
+writeRawPromptFile(fullFixture, name: "standup", in: fullFixtureDir)
+let fullFixtureRead = PromptStore.read(url: fullFixtureDir.appendingPathComponent("standup.md"))
+if case .success(let parsed) = fullFixtureRead {
+    check("full frontmatter: description", parsed.description == "Summarize the daily standup")
+    check("full frontmatter: delivery", parsed.deliveryTargets == [.claudeCode, .popover])
+    check("full frontmatter: edited parses as a date", parsed.editedAt != nil)
+    check("full frontmatter: body excludes the frontmatter block",
+          parsed.body == "Summarize: {{notes}}\n")
+    check("full frontmatter: slots reach through to the body",
+          parsed.slots == ["notes"])
+
+    let rtDir = promptScratchDir()
+    try! PromptStore.write(prompt: parsed, to: rtDir)
+    check("full frontmatter round-trips byte-for-byte",
+          read(rtDir.appendingPathComponent("standup.md").path) == fullFixture)
+} else {
+    check("full frontmatter reads", false)
+}
+
+let minimalFixture = promptFixture(["---", "schema: 1", "---", "Just a body.", ""])
+let minimalDir = promptScratchDir()
+writeRawPromptFile(minimalFixture, name: "minimal", in: minimalDir)
+if case .success(let parsed) = PromptStore.read(url: minimalDir.appendingPathComponent("minimal.md")) {
+    check("minimal frontmatter: missing optionals read as nil/empty",
+          parsed.description == nil && parsed.deliveryTargets.isEmpty && parsed.editedAt == nil)
+    check("minimal frontmatter: body", parsed.body == "Just a body.\n")
+    let rtDir = promptScratchDir()
+    try! PromptStore.write(prompt: parsed, to: rtDir)
+    check("minimal frontmatter round-trips byte-for-byte",
+          read(rtDir.appendingPathComponent("minimal.md").path) == minimalFixture)
+} else {
+    check("minimal frontmatter reads", false)
+}
+
+let unknownKeyFixture = promptFixture([
+    "---",
+    "schema: 1",
+    "custom-field: some hand-added metadata",
+    "description: Has an unknown neighbor",
+    "---",
+    "Body text.",
+    "",
+])
+let unknownKeyDir = promptScratchDir()
+writeRawPromptFile(unknownKeyFixture, name: "unknown", in: unknownKeyDir)
+if case .success(let parsed) = PromptStore.read(url: unknownKeyDir.appendingPathComponent("unknown.md")) {
+    check("unknown key: known field still recognized",
+          parsed.description == "Has an unknown neighbor")
+    let rtDir = promptScratchDir()
+    try! PromptStore.write(prompt: parsed, to: rtDir)
+    check("unknown frontmatter key round-trips byte-for-byte, in its original position",
+          read(rtDir.appendingPathComponent("unknown.md").path) == unknownKeyFixture)
+} else {
+    check("unknown key frontmatter reads", false)
+}
+
+// The property the packet calls out hardest: a hand-written prompt full of JSON,
+// an f-string, and Jinja used as literal prose must come back byte-for-byte, with
+// no frontmatter silently added underneath it.
+let handWrittenFixture = promptFixture([
+    "You are a helpful assistant. Return JSON like:",
+    #"{"key": "value", "nested": {"a": 1}}"#,
+    "",
+    #"Python f-string example: f"Hello {name}, you have {count} items""#,
+    "",
+    "Jinja example used as literal prose: {{ user.name }} and {{ user.email }}",
+    "",
+    "A real slot for this prompt: {{topic}}",
+    "",
+])
+let handWrittenDir = promptScratchDir()
+writeRawPromptFile(handWrittenFixture, name: "handwritten", in: handWrittenDir)
+if case .success(let parsed) = PromptStore.read(url: handWrittenDir.appendingPathComponent("handwritten.md")) {
+    check("hand-written prompt has no frontmatter", parsed.frontmatter == nil)
+    check("hand-written prompt body is the entire file",
+          parsed.body == handWrittenFixture)
+    check("hand-written prompt: JSON/f-string/Jinja braces are not slots, only the real one is",
+          parsed.slots == ["topic"])
+    let rtDir = promptScratchDir()
+    try! PromptStore.write(prompt: parsed, to: rtDir)
+    check("hand-written prompt round-trips byte-for-byte with no frontmatter added",
+          read(rtDir.appendingPathComponent("handwritten.md").path) == handWrittenFixture)
+} else {
+    check("hand-written prompt reads", false)
+}
+
+let codeBlockFixture = promptFixture([
+    "Explain this function:",
+    "",
+    "```python",
+    "def greet(name):",
+    "    return f\"Hello, {name}!\"",
+    "```",
+    "",
+    "Then answer: {{question}}",
+    "",
+])
+let codeBlockDir = promptScratchDir()
+writeRawPromptFile(codeBlockFixture, name: "codeblock", in: codeBlockDir)
+if case .success(let parsed) = PromptStore.read(url: codeBlockDir.appendingPathComponent("codeblock.md")) {
+    check("prompt with a fenced code block keeps its braces literal",
+          parsed.slots == ["question"])
+    let rtDir = promptScratchDir()
+    try! PromptStore.write(prompt: parsed, to: rtDir)
+    check("fenced-code-block prompt round-trips byte-for-byte",
+          read(rtDir.appendingPathComponent("codeblock.md").path) == codeBlockFixture)
+} else {
+    check("code block prompt reads", false)
+}
+
+// A hand-written file that opens with a Markdown rule and never declares a schema
+// must never be mistaken for frontmatter, however `---`-shaped it looks.
+let decorativeFixture = promptFixture([
+    "---",
+    "This is not frontmatter, just a horizontal rule as prose.",
+    "---",
+    "",
+    "Rest of the body.",
+    "",
+])
+let decorativeDir = promptScratchDir()
+writeRawPromptFile(decorativeFixture, name: "decorative", in: decorativeDir)
+if case .success(let parsed) = PromptStore.read(url: decorativeDir.appendingPathComponent("decorative.md")) {
+    check("a `---` block with no schema is not treated as frontmatter",
+          parsed.frontmatter == nil)
+    check("its body is the entire original file",
+          parsed.body == decorativeFixture)
+} else {
+    check("decorative-rule prompt reads", false)
+}
+
+let unclosedFixture = promptFixture([
+    "---", "schema: 1", "Some prose that never closes the block.", "",
+])
+let unclosedDir = promptScratchDir()
+writeRawPromptFile(unclosedFixture, name: "unclosed", in: unclosedDir)
+if case .success(let parsed) = PromptStore.read(url: unclosedDir.appendingPathComponent("unclosed.md")) {
+    check("a frontmatter block with no closing delimiter is not frontmatter at all",
+          parsed.frontmatter == nil && parsed.body == unclosedFixture)
+} else {
+    check("unclosed frontmatter prompt reads", false)
+}
+
+// Editing one known field through the typed API preserves the unknown neighbor and
+// leaves the body untouched — "preserving unknown frontmatter" in practice.
+if case .success(var toEdit) = PromptStore.read(url: unknownKeyDir.appendingPathComponent("unknown.md")) {
+    toEdit.frontmatter = toEdit.frontmatter?.setting("description", to: "Updated description")
+    let editDir = promptScratchDir()
+    try! PromptStore.write(prompt: toEdit, to: editDir)
+    let editedContent = read(editDir.appendingPathComponent("unknown.md").path)
+    check("editing a known field updates it", editedContent.contains("description: Updated description"))
+    check("editing a known field preserves the unknown neighbor",
+          editedContent.contains("custom-field: some hand-added metadata"))
+    check("editing a known field leaves the body untouched", editedContent.hasSuffix("Body text.\n"))
+} else {
+    check("prompt reads for the field-edit test", false)
+}
+
+// --- Scan outcome distinctions ------------------------------------------------
+
+let missingPromptsDir = URL(fileURLWithPath: "\(sandbox)/prompts-missing-\(UUID().uuidString)")
+let missingScan = PromptStore.scan(directory: missingPromptsDir)
+check("scan of a missing directory is ok and empty, not unreadable",
+      missingScan.prompts.isEmpty && missingScan.errorMessage == nil)
+
+let emptyPromptsDir = promptScratchDir()
+let emptyScan = PromptStore.scan(directory: emptyPromptsDir)
+check("scan of an empty existing directory is ok and empty",
+      emptyScan.prompts.isEmpty && emptyScan.errorMessage == nil)
+
+let populatedDir = promptScratchDir()
+writeRawPromptFile(promptFixture(["Body one.", ""]), name: "beta", in: populatedDir)
+writeRawPromptFile(promptFixture(["Body two.", ""]), name: "alpha", in: populatedDir)
+try! FileManager.default.createDirectory(at: populatedDir.appendingPathComponent(".backups"),
+                                         withIntermediateDirectories: true)
+let populatedScan = PromptStore.scan(directory: populatedDir)
+check("scan finds every .md file, sorted by name, and skips .backups",
+      populatedScan.prompts.map(\.name) == ["alpha", "beta"])
+
+let promptsPathIsAFile = URL(fileURLWithPath: "\(sandbox)/prompts-as-file-\(UUID().uuidString)")
+try! "not a directory".write(to: promptsPathIsAFile, atomically: true, encoding: .utf8)
+let fileScan = PromptStore.scan(directory: promptsPathIsAFile)
+if case .unreadable = fileScan {
+    check("scan of a path that is a file, not a directory, is unreadable", true)
+} else {
+    check("scan of a path that is a file, not a directory, is unreadable", false)
+}
+
+// --- Name validation + case-collision refusal ---------------------------------
+
+check("valid prompt name", PromptStore.isValidName("daily-standup_v2"))
+check("a name with a space is invalid", !PromptStore.isValidName("daily standup"))
+check("an empty name is invalid", !PromptStore.isValidName(""))
+check("a name with a dot is invalid", !PromptStore.isValidName("daily.standup"))
+
+let collisionDir = promptScratchDir()
+try! PromptStore.write(prompt: Prompt(name: "Report", frontmatter: nil, body: "Body."),
+                       to: collisionDir)
+do {
+    try PromptStore.write(prompt: Prompt(name: "report", frontmatter: nil, body: "Other body."),
+                          to: collisionDir)
+    check("a name differing only by case is refused", false)
+} catch PromptStore.WriteError.caseCollision {
+    check("a name differing only by case is refused", true)
+} catch {
+    check("a name differing only by case is refused", false, "\(error)")
+}
+do {
+    try PromptStore.write(prompt: Prompt(name: "Report", frontmatter: nil, body: "Updated body."),
+                          to: collisionDir)
+    check("an exact same-case name is a normal overwrite, not a collision", true)
+} catch {
+    check("an exact same-case name is a normal overwrite, not a collision", false, "\(error)")
+}
+do {
+    try PromptStore.write(prompt: Prompt(name: "bad name", frontmatter: nil, body: "x"),
+                          to: collisionDir)
+    check("an invalid name is refused at write time", false)
+} catch PromptStore.WriteError.invalidName {
+    check("an invalid name is refused at write time", true)
+} catch {
+    check("an invalid name is refused at write time", false, "\(error)")
+}
+
+// --- Write: backup + atomicity -------------------------------------------------
+
+let backupDir = promptScratchDir()
+let firstVersion = Prompt(name: "note", frontmatter: nil, body: "Version one.")
+let firstWriteBackup = try! PromptStore.write(prompt: firstVersion, to: backupDir)
+check("writing a brand-new prompt has nothing to back up", firstWriteBackup == nil)
+
+let secondVersion = Prompt(name: "note", frontmatter: nil, body: "Version two.")
+let secondWriteBackup = try! PromptStore.write(prompt: secondVersion, to: backupDir)
+check("overwriting an existing prompt produces a backup path", secondWriteBackup != nil)
+if let backupPath = secondWriteBackup {
+    check("the backup lives under .backups", backupPath.contains("/.backups/"))
+    check("the backup captured the prior version, not the new one",
+          read(backupPath) == "Version one.")
+}
+check("the live file holds the newest content",
+      read(backupDir.appendingPathComponent("note.md").path) == "Version two.")
+
+let thirdVersion = Prompt(name: "note", frontmatter: nil, body: "Version three.")
+let thirdWriteBackup = try! PromptStore.write(prompt: thirdVersion, to: backupDir)
+check("two overwrites in immediate succession still produce two distinct backups",
+      thirdWriteBackup != nil && thirdWriteBackup != secondWriteBackup)
+let backupsListing = try! FileManager.default.contentsOfDirectory(
+    atPath: backupDir.appendingPathComponent(".backups").path)
+check("every overwrite left its own backup file", backupsListing.count == 2)
+
+let strayTempFiles = try! FileManager.default.contentsOfDirectory(atPath: backupDir.path)
+    .filter { $0.hasPrefix(".aliasbar-prompt-write-") }
+check("no temp files are left behind after a write", strayTempFiles.isEmpty)
+
+// --- PromptUsageCounter --------------------------------------------------------
+
+let usagePath = "\(sandbox)/usage-\(UUID().uuidString).json"
+check("usage reads as empty when the file doesn't exist yet",
+      PromptUsageCounter.all(path: usagePath).isEmpty)
+
+let usageFixedNow = Date(timeIntervalSince1970: 1_700_000_000)
+let firstUse = PromptUsageCounter.recordUse(of: "standup", path: usagePath, now: usageFixedNow)
+check("a prompt's first recorded use has count 1", firstUse.count == 1)
+let secondUse = PromptUsageCounter.recordUse(of: "standup", path: usagePath,
+                                             now: usageFixedNow.addingTimeInterval(60))
+check("a second use bumps the count", secondUse.count == 2)
+check("a second use updates lastUsed", secondUse.lastUsed == usageFixedNow.addingTimeInterval(60))
+check("usage persists across reads",
+      PromptUsageCounter.all(path: usagePath)["standup"]?.count == 2)
+
+try! "not valid json {{{".write(toFile: usagePath, atomically: true, encoding: .utf8)
+check("a corrupt usage file reads as empty rather than crashing",
+      PromptUsageCounter.all(path: usagePath).isEmpty)
+let recoveredUse = PromptUsageCounter.recordUse(of: "recovered", path: usagePath)
+check("usage recovers and starts fresh after corruption", recoveredUse.count == 1)
+check("the recovered usage file is valid JSON again",
+      PromptUsageCounter.all(path: usagePath)["recovered"]?.count == 1)
+
+// --- Shortcut adapters ----------------------------------------------------------
+
+let shortcutFixtureFile = scratch("# fixture\n")
+let shellEntryForShortcut = ShellEntry(kind: .alias, name: "gst", command: "git status",
+                                       comment: "status shortcut",
+                                       sourceFile: shortcutFixtureFile, line: 3, managed: true)
+let aliasShortcut = Shortcut(entry: shellEntryForShortcut)
+check("Shortcut(entry:) carries the alias kind", aliasShortcut.kind == .alias)
+check("Shortcut(entry:) carries name, body, and comment",
+      aliasShortcut.name == "gst" && aliasShortcut.body == "git status"
+          && aliasShortcut.comment == "status shortcut")
+check("Shortcut(entry:) carries shell source metadata",
+      aliasShortcut.sourceFile == shellEntryForShortcut.sourceFile
+          && aliasShortcut.line == 3 && aliasShortcut.managed)
+check("Shortcut(entry:) leaves every prompt-only field empty",
+      aliasShortcut.slots.isEmpty && aliasShortcut.description == nil
+          && aliasShortcut.deliveryTargets.isEmpty && aliasShortcut.editedAt == nil)
+
+let functionEntryForShortcut = ShellEntry(kind: .function, name: "mkcd",
+                                          command: "mkdir -p \"$1\" && cd \"$1\"",
+                                          comment: nil, sourceFile: shortcutFixtureFile,
+                                          line: 10, managed: false)
+check("Shortcut(entry:) maps the function kind",
+      Shortcut(entry: functionEntryForShortcut).kind == .function)
+
+let promptForShortcut = Prompt(
+    name: "standup",
+    frontmatter: PromptFrontmatter.empty()
+        .setting("description", to: "Summarize the standup")
+        .setting("delivery", to: PromptFrontmatter.deliveryValue([.claudeCode])),
+    body: "Notes: {{notes}}"
+)
+let promptShortcut = Shortcut(prompt: promptForShortcut)
+check("Shortcut(prompt:) carries the prompt kind", promptShortcut.kind == .prompt)
+check("Shortcut(prompt:) carries name and body",
+      promptShortcut.name == "standup" && promptShortcut.body == "Notes: {{notes}}")
+check("Shortcut(prompt:) surfaces slots parsed from the body",
+      promptShortcut.slots == ["notes"])
+check("Shortcut(prompt:) surfaces description and delivery targets",
+      promptShortcut.description == "Summarize the standup"
+          && promptShortcut.deliveryTargets == [.claudeCode])
+check("Shortcut(prompt:) leaves every shell-only field empty",
+      promptShortcut.sourceFile == nil && promptShortcut.line == nil && !promptShortcut.managed)
+
+let collidingNameEntry = ShellEntry(kind: .alias, name: "standup", command: "x", comment: nil,
+                                    sourceFile: shortcutFixtureFile, line: 1, managed: false)
+check("an alias and a prompt that happen to share a name still get distinct ids",
+      Shortcut(entry: collidingNameEntry).id != promptShortcut.id)
+
+// --- Foundation core seam: the new files stay dependency-free, like Model.swift ---
+
+let shortcutSource = read(projectRoot.appendingPathComponent("Sources/Shortcut.swift").path)
+let promptStoreSource = read(projectRoot.appendingPathComponent("Sources/PromptStore.swift").path)
+check("Shortcut.swift and PromptStore.swift are readable",
+      shortcutSource != "<unreadable>" && promptStoreSource != "<unreadable>")
+for forbidden in ["import SwiftUI", "import AppKit", "UserDefaults", "AppSettings"] {
+    check("Shortcut.swift excludes \(forbidden)", !shortcutSource.contains(forbidden))
+    check("PromptStore.swift excludes \(forbidden)", !promptStoreSource.contains(forbidden))
+}
+
+// ---------------------------------------------------------------------------
 print("\n31. Clipboard capture: quarantine routing and store")
 
 let quarantineBase = Date(timeIntervalSince1970: 1_700_000_000)
