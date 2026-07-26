@@ -80,11 +80,11 @@ cat > "${APP_BUNDLE}/Contents/Info.plist" <<'PLIST'
     <string>https://github.com/localtoasted/aliasbar/releases/latest/download/appcast.xml</string>
     <key>SUPublicEDKey</key>
     <string>r4ojp6CWS34l4NYY7OfbAjGVUo0KSGWsyzr7rhPwMTw=</string>
-    <!-- Off until the user switches it on in Settings > About. The app promises that
-         its only network access is opt-in; Sparkle's own consent prompt would also
-         arrive "from nowhere" on second launch, which this app deliberately avoids. -->
+    <!-- On by default; onboarding presents the choice on first run and Settings >
+         About keeps it. Setting the key here (either way) also stops Sparkle's own
+         consent prompt from arriving "from nowhere" on second launch. -->
     <key>SUEnableAutomaticChecks</key>
-    <false/>
+    <true/>
 </dict>
 </plist>
 PLIST
