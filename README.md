@@ -93,11 +93,13 @@ Requires macOS 13+ and Xcode Command Line Tools.
 ```sh
 git clone https://github.com/localtoasted/aliasbar.git
 cd aliasbar
-./build.sh
+./build.sh --install
 open ~/Applications/AliasBar.app
 ```
 
-`build.sh` compiles `Sources/*.swift`, assembles an ad-hoc signed `.app`, and installs it to `~/Applications`.
+`build.sh` compiles `Sources/*.swift` and assembles a signed app at
+`.build/AliasBar.app` without changing `~/Applications`. Pass `--install` to replace
+`~/Applications/AliasBar.app` with the completed build.
 
 ## Configuration
 
