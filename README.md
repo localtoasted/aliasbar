@@ -109,6 +109,12 @@ open ~/Applications/AliasBar.app
 `.build/AliasBar.app` without changing `~/Applications`. Pass `--install` to replace
 `~/Applications/AliasBar.app` with the completed build.
 
+Just want `ab`, the command-line tool, without the menu-bar app? Install it via Homebrew:
+
+```sh
+brew install localtoasted/aliasbar/aliasbar
+```
+
 ## Configuration
 
 AliasBar reads `~/.zshrc` by default. Point it elsewhere in Settings → Content, or seed it on first launch:

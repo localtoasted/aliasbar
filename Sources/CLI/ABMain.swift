@@ -11,6 +11,14 @@ import Foundation
 // exit code. Every decision that would otherwise need a prompt (confirming collateral
 // damage, picking a name) is instead a flag, with a documented refusal when it's absent.
 
+// MARK: - Version
+
+/// The CLI's own version — independent of the app's Info.plist version, since `ab`
+/// ships separately via Homebrew. `tools/release-cli.sh` refuses to release unless
+/// this matches the version it's told to build, so a forgotten bump fails loudly
+/// instead of shipping a mislabeled binary. Bump here before cutting a release.
+let abCLIVersion = "0.4.0"
+
 // MARK: - Exit codes
 
 /// v1 contract: 0 ok, 2 usage error, 3 writer refusal, 4 nothing to do, 5 unreadable file.
@@ -50,6 +58,9 @@ Commands:
   promote [n] [--name <name>] [--force-collateral] [--json]
       Take history command #n (default 1, most recent) and create an alias for it.
       Without --name, a name is suggested and deduplicated against existing names.
+
+  --version
+      Print the CLI's version and exit.
 
 A `--` before positional arguments ends flag parsing: everything after it is taken
 literally, even a value that starts with `-` (for example, an alias command that is
@@ -497,6 +508,9 @@ struct ABMain {
         case "promote": runPromote(rest)
         case "help", "-h", "--help":
             print(usageText)
+            exit(ExitCode.ok.rawValue)
+        case "--version", "-v", "version":
+            print("ab \(abCLIVersion)")
             exit(ExitCode.ok.rawValue)
         default:
             fail(.usage, "unknown command \"\(command)\"")
