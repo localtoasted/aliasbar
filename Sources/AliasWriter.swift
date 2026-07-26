@@ -825,40 +825,43 @@ enum AliasWriter {
             return nil
         }
 
-        /// Where the lexer is when a line ends.
-        ///
-        /// Tracking single quotes alone is not enough. Three cases break it:
-        /// an apostrophe inside a double-quoted value (`alias x="echo it's fine"`) looks
-        /// like an opening quote; a double-quoted value spanning lines looks complete
-        /// after the first; and a trailing unescaped backslash continues the statement
-        /// onto the next line with no quote involved at all. Each of those either
-        /// rejects a valid alias or, worse, truncates a statement and leaves the
-        /// remainder as a bare command that runs at shell startup.
+        /// Where the lexer is when a line ends. Every nested shell construct owns its
+        /// quote and word-boundary state: quotes inside `$(...)` do not close quotes in
+        /// the surrounding value, and comments inside a substitution end at its newline
+        /// without ending the substitution itself.
         enum QuoteState { case unquoted, single, double }
+
+        enum NestingKind {
+            case root
+            case command
+            case arithmetic
+            case parameter
+            case process
+
+            /// `#` is shell-comment syntax in command contexts. In arithmetic it is the
+            /// radix operator (`16#ff`), and in parameter expansion it is an operator.
+            var allowsComments: Bool {
+                switch self {
+                case .root, .command, .process: return true
+                case .arithmetic, .parameter: return false
+                }
+            }
+        }
+
+        struct LexFrame {
+            var kind: NestingKind
+            var quote: QuoteState = .unquoted
+            var atWordStart = true
+            /// Number of unmatched delimiters belonging to this frame. Arithmetic
+            /// starts at two for `$((`, while every other nested construct starts at
+            /// one. Ordinary parentheses/braces inside the construct adjust the same
+            /// count, so an inner `)` or `}` cannot close the outer construct early.
+            var delimiterDepth: Int
+        }
 
         /// Everything the lexer needs to carry from one line to the next.
         struct LexState {
-            var quote: QuoteState = .unquoted
-            /// Whether the previous character was unquoted whitespace (or this is the
-            /// start of a line). `#` introduces a comment only there; anywhere inside a
-            /// word it is an ordinary character.
-            ///
-            /// **Only whitespace sets this, deliberately.** Shell metacharacters look
-            /// like word separators, but `(`, `)`, `{`, and `}` all occur *inside*
-            /// single words through `${HOME}`, `$((1))`, `$(cmd)`, `<(cmd)`, and brace
-            /// expansion. Counting any of them as a boundary makes a following `#` look
-            /// like a comment introducer, which hides a trailing backslash and orphans
-            /// the continuation line as a command that runs at shell startup. That
-            /// exact bug arrived twice, via `}` and via `)`.
-            ///
-            /// Distinguishing a metacharacter from a substitution needs full nesting
-            /// state for arithmetic, command, process, and glob constructs. Whitespace
-            /// is the rule that is both simple and safe. The one case it gets wrong is
-            /// `;#comment` or `|#comment` ending in a backslash, where the span extends
-            /// one line too far; that costs an over-delete of a comment line rather than
-            /// leaving live code behind, and standalone metacharacters are surrounded by
-            /// whitespace in practice anyway.
-            var atWordStart = true
+            var frames = [LexFrame(kind: .root, delimiterDepth: 0)]
             /// Whether the statement continues onto the following line.
             var continues = false
         }
@@ -866,19 +869,70 @@ enum AliasWriter {
         /// Advances the lexer across one line.
         func scan(_ line: String, from entering: LexState) -> LexState {
             var state = entering
+            if state.frames.isEmpty {
+                state.frames = [LexFrame(kind: .root, delimiterDepth: 0)]
+            }
             var index = line.startIndex
             var trailingEscape = false
+            var endedInComment = false
+
+            func character(after position: String.Index) -> Character? {
+                let next = line.index(after: position)
+                return next < line.endIndex ? line[next] : nil
+            }
+
+            func character(twoAfter position: String.Index) -> Character? {
+                let first = line.index(after: position)
+                guard first < line.endIndex else { return nil }
+                let second = line.index(after: first)
+                return second < line.endIndex ? line[second] : nil
+            }
+
+            func advance(_ position: String.Index, by count: Int) -> String.Index {
+                line.index(position, offsetBy: count, limitedBy: line.endIndex) ?? line.endIndex
+            }
+
+            func push(_ kind: NestingKind, delimiterDepth: Int, tokenLength: Int) {
+                state.frames[state.frames.count - 1].atWordStart = false
+                state.frames.append(LexFrame(kind: kind, delimiterDepth: delimiterDepth))
+                index = advance(index, by: tokenLength)
+            }
+
+            /// Expansions are active in unquoted and double-quoted text, but process
+            /// substitution is syntax only in an unquoted command context.
+            func openExpansion(allowProcess: Bool) -> Bool {
+                let next = character(after: index)
+                let afterNext = character(twoAfter: index)
+                if line[index] == "$", next == "(", afterNext == "(" {
+                    push(.arithmetic, delimiterDepth: 2, tokenLength: 3)
+                    return true
+                }
+                if line[index] == "$", next == "(" {
+                    push(.command, delimiterDepth: 1, tokenLength: 2)
+                    return true
+                }
+                if line[index] == "$", next == "{" {
+                    push(.parameter, delimiterDepth: 1, tokenLength: 2)
+                    return true
+                }
+                if allowProcess, line[index] == "<", next == "(" {
+                    push(.process, delimiterDepth: 1, tokenLength: 2)
+                    return true
+                }
+                return false
+            }
 
             while index < line.endIndex {
                 let ch = line[index]
                 trailingEscape = false
+                let frameIndex = state.frames.count - 1
 
-                switch state.quote {
+                switch state.frames[frameIndex].quote {
                 case .single:
                     // Wholly literal. A backslash here is just a backslash, so the very
                     // next apostrophe closes the string.
-                    if ch == "'" { state.quote = .unquoted }
-                    state.atWordStart = false
+                    if ch == "'" { state.frames[frameIndex].quote = .unquoted }
+                    state.frames[frameIndex].atWordStart = false
 
                 case .double:
                     if ch == "\\" {
@@ -886,51 +940,98 @@ enum AliasWriter {
                         if next == line.endIndex { trailingEscape = true; index = next; continue }
                         index = next
                     } else if ch == "\"" {
-                        state.quote = .unquoted
+                        state.frames[frameIndex].quote = .unquoted
+                    } else if openExpansion(allowProcess: false) {
+                        continue
                     }
-                    state.atWordStart = false
+                    state.frames[frameIndex].atWordStart = false
 
                 case .unquoted:
                     if ch == "\\" {
                         let next = line.index(after: index)
                         if next == line.endIndex { trailingEscape = true; index = next; continue }
                         index = next
-                        state.atWordStart = false
+                        state.frames[frameIndex].atWordStart = false
                     } else if ch == "'" {
-                        state.quote = .single
-                        state.atWordStart = false
+                        state.frames[frameIndex].quote = .single
+                        state.frames[frameIndex].atWordStart = false
                     } else if ch == "\"" {
-                        state.quote = .double
-                        state.atWordStart = false
-                    } else if ch == "#" && state.atWordStart {
-                        // A real comment: runs to end of line, opens nothing, and
-                        // cannot carry a line continuation.
+                        state.frames[frameIndex].quote = .double
+                        state.frames[frameIndex].atWordStart = false
+                    } else if openExpansion(allowProcess: true) {
+                        continue
+                    } else if ch == "#",
+                              state.frames[frameIndex].kind.allowsComments,
+                              state.frames[frameIndex].atWordStart {
+                        // A comment cannot carry an escape across its newline. A root
+                        // comment ends the statement; a nested comment only ends this
+                        // physical line, and its substitution remains open.
+                        endedInComment = true
+                        break
+                    } else if ch == " " || ch == "\t" {
+                        state.frames[frameIndex].atWordStart = true
+                    } else if state.frames[frameIndex].kind == .root,
+                              ch == ";" || ch == "|" || ch == "&" {
+                        // At depth zero these begin another shell statement. The span
+                        // ends here even if a later comment contains a backslash.
+                        state.frames = [LexFrame(kind: .root, delimiterDepth: 0)]
                         state.continues = false
                         return state
-                    } else if ch == " " || ch == "\t" {
-                        state.atWordStart = true
+                    } else if state.frames[frameIndex].kind == .arithmetic, ch == "(" {
+                        state.frames[frameIndex].delimiterDepth += 1
+                        state.frames[frameIndex].atWordStart = false
+                    } else if state.frames[frameIndex].kind == .arithmetic, ch == ")" {
+                        state.frames[frameIndex].delimiterDepth -= 1
+                        if state.frames[frameIndex].delimiterDepth == 0 {
+                            state.frames.removeLast()
+                        }
+                    } else if state.frames[frameIndex].kind == .parameter, ch == "{" {
+                        state.frames[frameIndex].delimiterDepth += 1
+                        state.frames[frameIndex].atWordStart = false
+                    } else if state.frames[frameIndex].kind == .parameter, ch == "}" {
+                        state.frames[frameIndex].delimiterDepth -= 1
+                        if state.frames[frameIndex].delimiterDepth == 0 {
+                            state.frames.removeLast()
+                        }
+                    } else if state.frames[frameIndex].kind == .command
+                                || state.frames[frameIndex].kind == .process {
+                        if ch == "(" {
+                            state.frames[frameIndex].delimiterDepth += 1
+                            state.frames[frameIndex].atWordStart = true
+                        } else if ch == ")" {
+                            state.frames[frameIndex].delimiterDepth -= 1
+                            if state.frames[frameIndex].delimiterDepth == 0 {
+                                state.frames.removeLast()
+                            }
+                        } else if ch == ";" || ch == "|" || ch == "&" {
+                            // Separators inside a substitution separate its commands,
+                            // not the outer alias statement.
+                            state.frames[frameIndex].atWordStart = true
+                        } else {
+                            state.frames[frameIndex].atWordStart = false
+                        }
                     } else {
-                        // Includes `#` mid-word, which zsh treats as an ordinary
-                        // character. Missing that would let `echo#tag\` hide a
-                        // continuation and orphan the next line as a live command.
-                        state.atWordStart = false
+                        state.frames[frameIndex].atWordStart = false
                     }
                 }
+                if endedInComment { break }
                 index = line.index(after: index)
             }
 
-            // The statement continues if a quote is still open, or if the line ended on
-            // an unescaped backslash. In single quotes a trailing backslash is literal,
-            // but the open quote already means continuation.
-            state.continues = state.quote != .unquoted || trailingEscape
-            // Deliberately does NOT force atWordStart false on a trailing backslash.
-            // zsh removes the backslash-newline pair but not the whitespace before it,
-            // so `alias x=1 \` resumes at a word boundary and a following `# comment`
-            // really is a comment, while `echo#tag\` resumes mid-word. The state left
-            // by the character before the backslash already encodes exactly that
-            // distinction, because the trailing-backslash branch returns before
-            // touching it. Overriding it here merged a comment line into the statement
-            // and let a deletion swallow the next alias.
+            if endedInComment {
+                state.frames[state.frames.count - 1].atWordStart = true
+            } else if !trailingEscape,
+                      state.frames[state.frames.count - 1].quote == .unquoted {
+                // A physical newline is a command boundary inside substitutions. A
+                // backslash-newline is removed instead, so it deliberately preserves
+                // the word-boundary state from before the backslash.
+                state.frames[state.frames.count - 1].atWordStart = true
+            }
+
+            // Any open nesting frame or quote carries the statement across a newline.
+            // A comment suppresses a trailing backslash, exactly as zsh does.
+            let rootQuoteOpen = state.frames.first?.quote != .unquoted
+            state.continues = state.frames.count > 1 || rootQuoteOpen || (!endedInComment && trailingEscape)
             return state
         }
 

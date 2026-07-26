@@ -1573,6 +1573,158 @@ _ = try! AliasWriter.apply(.upsert(name: "added", command: "echo hi", comment: n
 check("the guard lets a normal upsert through", read(guardNormal).contains("alias added="))
 check("and the result parses", zshAccepts(guardNormal))
 
+// ---------------------------------------------------------------------------
+print("\n26. The span lexer tracks nesting and top-level separators together")
+
+/// These fixtures opt past the collateral-confirmation guard so they exercise the span
+/// itself. A wrong under-span leaves invalid syntax behind; a wrong over-span removes one
+/// of `survives`. The zsh and collateral guards remain separately covered above.
+func checkExactSpanDelete(_ label: String,
+                          statement: String,
+                          removes: [String],
+                          survives: [String]) {
+    let path = scratch("""
+    \(ManagedBlock.begin)
+    \(statement)
+    \(ManagedBlock.end)
+    """)
+    check("\(label): fixture is valid zsh", zshAccepts(path), read(path))
+    let outcome = Result {
+        try AliasWriter.apply(.delete(name: "doomed"), path: path, allEntries: [],
+                              confirmedCollateral: true)
+    }
+    let after = read(path)
+    check("\(label): exact-span delete succeeds", (try? outcome.get()) != nil, after)
+    for fragment in removes {
+        check("\(label): removes \(fragment)", !after.contains(fragment), after)
+    }
+    for fragment in survives {
+        check("\(label): preserves \(fragment)", after.contains(fragment), after)
+    }
+    check("\(label): result remains valid zsh", zshAccepts(path), after)
+}
+
+// 1. A physical newline inside a quoted value belongs to the alias.
+checkExactSpanDelete(
+    "newline inside a value",
+    statement: """
+    alias doomed="echo one
+    echo two"
+    alias newlineKeeper='1'
+    """,
+    removes: ["alias doomed=", "echo two"],
+    survives: ["alias newlineKeeper='1'"])
+
+// 2. An unquoted trailing backslash carries the statement onto the next line.
+checkExactSpanDelete(
+    "trailing backslash continuation",
+    statement: """
+    alias doomed='echo one' \\
+    print two
+    alias slashKeeper='2'
+    """,
+    removes: ["alias doomed=", "print two"],
+    survives: ["alias slashKeeper='2'"])
+
+// 3. A # embedded in a word is literal and cannot hide that trailing backslash.
+checkExactSpanDelete(
+    "embedded hash before continuation",
+    statement: """
+    alias doomed=echo#tag \\
+    print three
+    alias hashKeeper='3'
+    """,
+    removes: ["alias doomed=", "print three"],
+    survives: ["alias hashKeeper='3'"])
+
+// 4. Backslash-newline preserves whether the next character starts a new word. Here the
+// whitespace before the backslash makes the next line's # a real comment, whose own
+// backslash is inert.
+checkExactSpanDelete(
+    "word boundary across continuation",
+    statement: """
+    alias doomed=one \\
+    # continuation comment \\
+    alias boundaryKeeper='4'
+    """,
+    removes: ["alias doomed=", "# continuation comment"],
+    survives: ["alias boundaryKeeper='4'"])
+
+// 5. A quoted } inside ${...} is data, not the parameter expansion's closer.
+checkExactSpanDelete(
+    "inner brace in parameter expansion",
+    statement: """
+    alias doomed=${missing:-"}"
+    still}
+    alias braceKeeper='5'
+    """,
+    removes: ["alias doomed=", "still}"],
+    survives: ["alias braceKeeper='5'"])
+
+// 6. Parentheses inside arithmetic adjust its delimiter depth; the first ) is not one of
+// the two that close $((...)).
+checkExactSpanDelete(
+    "inner paren in arithmetic expansion",
+    statement: """
+    alias doomed=$(( (1 + 2)
+      * 3 ))
+    alias arithmeticKeeper='6'
+    """,
+    removes: ["alias doomed=", "* 3 ))"],
+    survives: ["alias arithmeticKeeper='6'"])
+
+// 7. A separator at root depth ends the span before a later comment/backslash can extend
+// it. Confirmation permits removing that exact first line, but never the next statement.
+checkExactSpanDelete(
+    "separator before comment",
+    statement: """
+    alias doomed=x;# comment \\
+    alias separatorKeeper='7'
+    """,
+    removes: ["alias doomed="],
+    survives: ["alias separatorKeeper='7'"])
+
+// 8. Every supported substitution can cross a newline without an open quote or a
+// backslash. Separators inside command/process substitutions remain nested.
+for (label, statement, tail) in [
+    ("command substitution",
+     "alias doomed=$(print one; print two\nprint three)\nalias cmdKeeper='8'",
+     "print three)"),
+    ("arithmetic substitution",
+     "alias doomed=$((1 +\n2))\nalias arithKeeper='8'",
+     "2))"),
+    ("parameter substitution",
+     "alias doomed=${missing:-one\ntwo}\nalias paramKeeper='8'",
+     "two}"),
+    ("process substitution",
+     "alias doomed=<(print one | cat\nprint two)\nalias processKeeper='8'",
+     "print two)"),
+] {
+    checkExactSpanDelete(
+        label,
+        statement: statement,
+        removes: ["alias doomed=", tail],
+        survives: [statement.components(separatedBy: "\n").last!])
+}
+
+// 9. The historical over-span swallowed arbitrary non-alias content after `;# ... \`.
+// With the root separator integrated into the nesting scanner, even a confirmed removal
+// covers only the alias's physical line.
+for (label, victim) in [
+    ("export", "export IMPORTANT=value"),
+    ("function", "reload() { source ~/.zshrc; }"),
+    ("bare assignment", "EDITOR=nvim"),
+] {
+    checkExactSpanDelete(
+        "non-alias \(label)",
+        statement: """
+        alias doomed=x;# comment \\
+        \(victim)
+        """,
+        removes: ["alias doomed="],
+        survives: [victim])
+}
+
 
 // ===========================================================================
 // HISTORY
