@@ -28,6 +28,7 @@ enum PromptCompiler {
         case collision(name: String, path: String)
         case hashMismatch(name: String, path: String)
         case notInstalled(String)
+        case registryPathEscape(name: String, path: String)
         case registryCorrupt(String)
         case registryUnreadable(String)
         case backupFailed(String)
@@ -46,6 +47,8 @@ enum PromptCompiler {
                 return "\(path) was edited since AliasBar installed it, so \"\(name)\" wasn't touched. Reinstall on purpose if you want AliasBar's version back."
             case .notInstalled(let name):
                 return "\"\(name)\" isn't in AliasBar's registry, so there's nothing to uninstall."
+            case .registryPathEscape(let name, let path):
+                return "The registry entry for \"\(name)\" points at \(path), which is not where AliasBar installs commands. Nothing was touched."
             case .registryCorrupt(let path):
                 return "AliasBar's command registry at \(path) is malformed, so nothing was changed. Fix or remove it by hand first."
             case .registryUnreadable(let path):
@@ -182,6 +185,15 @@ enum PromptCompiler {
         var registry = try loadRegistry(at: registryPath)
         guard let entry = registry[name] else {
             throw CompileError.notInstalled(name)
+        }
+
+        // The registry is a plain JSON file that may live in a synced directory, so
+        // its contents are data, not authority: the only file uninstall may ever act
+        // on is the one this compiler would itself have written for this name.
+        let expectedPath = URL(fileURLWithPath: commandsDir)
+            .appendingPathComponent("\(name).md").standardizedFileURL.path
+        guard URL(fileURLWithPath: entry.path).standardizedFileURL.path == expectedPath else {
+            throw CompileError.registryPathEscape(name: name, path: entry.path)
         }
 
         guard FileManager.default.fileExists(atPath: entry.path) else {
