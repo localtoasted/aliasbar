@@ -16,6 +16,7 @@ swiftc -parse-as-library -emit-module \
     -module-name AliasBarCore \
     -target "$(uname -m)-apple-macos13.0" \
     "${PROJECT_DIR}/Sources/Model.swift" \
+    "${PROJECT_DIR}/Sources/ContentHash.swift" \
     "${PROJECT_DIR}/Sources/SensitiveContentClassifier.swift" \
     "${PROJECT_DIR}/Sources/ClipboardCapture.swift" \
     "${PROJECT_DIR}/Sources/AliasWriter.swift" \
@@ -25,6 +26,7 @@ swiftc -parse-as-library -emit-module \
 swiftc -target "$(uname -m)-apple-macos13.0" \
     "${PROJECT_DIR}/Sources/Model.swift" \
     "${PROJECT_DIR}/Sources/AppPaths.swift" \
+    "${PROJECT_DIR}/Sources/ContentHash.swift" \
     "${PROJECT_DIR}/Sources/SensitiveContentClassifier.swift" \
     "${PROJECT_DIR}/Sources/ClipboardCapture.swift" \
     "${PROJECT_DIR}/Sources/Settings.swift" \
