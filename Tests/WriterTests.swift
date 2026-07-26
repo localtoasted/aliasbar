@@ -254,6 +254,18 @@ do {
     check("name inside the block is editable", false, "\(error)")
 }
 
+let freshlyClashing = scratch("""
+# Added after AliasBar's editor opened.
+alias collision='echo outside'
+""")
+let freshlyClashingOriginal = read(freshlyClashing)
+expectThrow("a fresh unmanaged clash is refused even when UI entries are stale") {
+    _ = try AliasWriter.apply(.upsert(name: "collision", command: "echo inside", comment: nil),
+                              path: freshlyClashing, allEntries: [])
+}
+check("a refused fresh clash leaves the file untouched",
+      read(freshlyClashing) == freshlyClashingOriginal)
+
 // ---------------------------------------------------------------------------
 print("\n7. Backups and file attributes")
 
@@ -266,6 +278,19 @@ check("backup holds the original", read(backupPath) == "alias keep='1'\n")
 let mode = (try! FileManager.default.attributesOfItem(atPath: permPath)[.posixPermissions]
             as! NSNumber).intValue
 check("permissions preserved (0600)", mode == 0o600, String(format: "got %o", mode))
+
+let firstBackupContents = read(permPath)
+let firstBackup = try! AliasWriter.apply(.upsert(name: "n", command: "echo changed", comment: nil),
+                                          path: permPath, allEntries: [])
+let secondBackupContents = read(permPath)
+let secondBackup = try! AliasWriter.apply(.upsert(name: "n", command: "echo changed again",
+                                                   comment: nil),
+                                           path: permPath, allEntries: [])
+check("two writes in one second create distinct backups", firstBackup != secondBackup)
+check("the first same-second backup keeps its recovery point",
+      read(firstBackup) == firstBackupContents)
+check("the second same-second backup keeps its recovery point",
+      read(secondBackup) == secondBackupContents)
 check("no temp files left behind",
       (try! FileManager.default.contentsOfDirectory(atPath: sandbox))
           .allSatisfy { !$0.hasPrefix(".aliasbar-write-") })
@@ -1572,6 +1597,498 @@ _ = try! AliasWriter.apply(.upsert(name: "added", command: "echo hi", comment: n
                            path: guardNormal, allEntries: [])
 check("the guard lets a normal upsert through", read(guardNormal).contains("alias added="))
 check("and the result parses", zshAccepts(guardNormal))
+
+// ---------------------------------------------------------------------------
+print("\n26. The span lexer tracks nesting and top-level separators together")
+
+/// These fixtures opt past the collateral-confirmation guard so they exercise the span
+/// itself. A wrong under-span leaves invalid syntax behind; a wrong over-span removes one
+/// of `survives`. The zsh and collateral guards remain separately covered above.
+func checkExactSpanDelete(_ label: String,
+                          statement: String,
+                          removes: [String],
+                          survives: [String]) {
+    let path = scratch("""
+    \(ManagedBlock.begin)
+    \(statement)
+    \(ManagedBlock.end)
+    """)
+    check("\(label): fixture is valid zsh", zshAccepts(path), read(path))
+    let outcome = Result {
+        try AliasWriter.apply(.delete(name: "doomed"), path: path, allEntries: [],
+                              confirmedCollateral: true)
+    }
+    let after = read(path)
+    check("\(label): exact-span delete succeeds", (try? outcome.get()) != nil, after)
+    for fragment in removes {
+        check("\(label): removes \(fragment)", !after.contains(fragment), after)
+    }
+    for fragment in survives {
+        check("\(label): preserves \(fragment)", after.contains(fragment), after)
+    }
+    check("\(label): result remains valid zsh", zshAccepts(path), after)
+}
+
+// 1. A physical newline inside a quoted value belongs to the alias.
+checkExactSpanDelete(
+    "newline inside a value",
+    statement: """
+    alias doomed="echo one
+    echo two"
+    alias newlineKeeper='1'
+    """,
+    removes: ["alias doomed=", "echo two"],
+    survives: ["alias newlineKeeper='1'"])
+
+// 2. An unquoted trailing backslash carries the statement onto the next line.
+checkExactSpanDelete(
+    "trailing backslash continuation",
+    statement: """
+    alias doomed='echo one' \\
+    print two
+    alias slashKeeper='2'
+    """,
+    removes: ["alias doomed=", "print two"],
+    survives: ["alias slashKeeper='2'"])
+
+// 3. A # embedded in a word is literal and cannot hide that trailing backslash.
+checkExactSpanDelete(
+    "embedded hash before continuation",
+    statement: """
+    alias doomed=echo#tag \\
+    print three
+    alias hashKeeper='3'
+    """,
+    removes: ["alias doomed=", "print three"],
+    survives: ["alias hashKeeper='3'"])
+
+// 4. Backslash-newline preserves whether the next character starts a new word. Here the
+// whitespace before the backslash makes the next line's # a real comment, whose own
+// backslash is inert.
+checkExactSpanDelete(
+    "word boundary across continuation",
+    statement: """
+    alias doomed=one \\
+    # continuation comment \\
+    alias boundaryKeeper='4'
+    """,
+    removes: ["alias doomed=", "# continuation comment"],
+    survives: ["alias boundaryKeeper='4'"])
+
+// 5. A quoted } inside ${...} is data, not the parameter expansion's closer.
+checkExactSpanDelete(
+    "inner brace in parameter expansion",
+    statement: """
+    alias doomed=${missing:-"}"
+    still}
+    alias braceKeeper='5'
+    """,
+    removes: ["alias doomed=", "still}"],
+    survives: ["alias braceKeeper='5'"])
+
+// 6. Parentheses inside arithmetic adjust its delimiter depth; the first ) is not one of
+// the two that close $((...)).
+checkExactSpanDelete(
+    "inner paren in arithmetic expansion",
+    statement: """
+    alias doomed=$(( (1 + 2)
+      * 3 ))
+    alias arithmeticKeeper='6'
+    """,
+    removes: ["alias doomed=", "* 3 ))"],
+    survives: ["alias arithmeticKeeper='6'"])
+
+// 7. A separator at root depth ends the span before a later comment/backslash can extend
+// it. Confirmation permits removing that exact first line, but never the next statement.
+checkExactSpanDelete(
+    "separator before comment",
+    statement: """
+    alias doomed=x;# comment \\
+    alias separatorKeeper='7'
+    """,
+    removes: ["alias doomed="],
+    survives: ["alias separatorKeeper='7'"])
+
+// 8. Every supported substitution can cross a newline without an open quote or a
+// backslash. Separators inside command/process substitutions remain nested.
+for (label, statement, tail) in [
+    ("command substitution",
+     "alias doomed=$(print one; print two\nprint three)\nalias cmdKeeper='8'",
+     "print three)"),
+    ("arithmetic substitution",
+     "alias doomed=$((1 +\n2))\nalias arithKeeper='8'",
+     "2))"),
+    ("parameter substitution",
+     "alias doomed=${missing:-one\ntwo}\nalias paramKeeper='8'",
+     "two}"),
+    ("process substitution",
+     "alias doomed=<(print one | cat\nprint two)\nalias processKeeper='8'",
+     "print two)"),
+] {
+    checkExactSpanDelete(
+        label,
+        statement: statement,
+        removes: ["alias doomed=", tail],
+        survives: [statement.components(separatedBy: "\n").last!])
+}
+
+// 9. The historical over-span swallowed arbitrary non-alias content after `;# ... \`.
+// With the root separator integrated into the nesting scanner, even a confirmed removal
+// covers only the alias's physical line.
+for (label, victim) in [
+    ("export", "export IMPORTANT=value"),
+    ("function", "reload() { source ~/.zshrc; }"),
+    ("bare assignment", "EDITOR=nvim"),
+] {
+    checkExactSpanDelete(
+        "non-alias \(label)",
+        statement: """
+        alias doomed=x;# comment \\
+        \(victim)
+        """,
+        removes: ["alias doomed="],
+        survives: [victim])
+}
+
+// 10. Output process substitution is the same nested command context as <(...).
+checkExactSpanDelete(
+    "output process substitution",
+    statement: """
+    alias doomed=>(print one
+    print two)
+    alias outputProcessKeeper='10'
+    """,
+    removes: ["alias doomed=", "print two)"],
+    survives: ["alias outputProcessKeeper='10'"])
+
+// 11. Legacy backtick command substitution can span physical lines too.
+checkExactSpanDelete(
+    "multiline backtick substitution",
+    statement: """
+    alias doomed=`print one
+    print two`
+    alias backtickKeeper='11'
+    """,
+    removes: ["alias doomed=", "print two`"],
+    survives: ["alias backtickKeeper='11'"])
+
+// 12. A case pattern's closing parenthesis is grammar, not the end of $().
+checkExactSpanDelete(
+    "case arm inside command substitution",
+    statement: """
+    alias doomed=$(case x in
+    x) print yes ;;
+    esac
+    )
+    alias caseKeeper='12'
+    """,
+    removes: ["alias doomed=", "esac"],
+    survives: ["alias caseKeeper='12'"])
+
+// 13. Heredoc bodies are opaque shell input; delimiters in their payload are data.
+checkExactSpanDelete(
+    "heredoc inside command substitution",
+    statement: """
+    alias doomed=$(cat <<'EOF'
+    payload )
+    EOF
+    )
+    alias heredocKeeper='13'
+    """,
+    removes: ["alias doomed=", "payload )"],
+    survives: ["alias heredocKeeper='13'"])
+
+// 14. A root alias's heredoc body and terminator belong to the alias statement. Leaving
+// either behind would turn opaque payload into executable shell input.
+checkExactSpanDelete(
+    "heredoc on root alias",
+    statement: """
+    alias doomed=print <<EOF
+    payload from heredoc
+    EOF
+    alias rootHeredocKeeper='14'
+    """,
+    removes: ["alias doomed=", "payload from heredoc", "\nEOF\n"],
+    survives: ["alias rootHeredocKeeper='14'"])
+
+// 15. Every zsh case terminator returns the grammar to pattern position. In particular,
+// the next arm's ) cannot close the surrounding command substitution.
+for (label, terminator) in [
+    ("fallthrough", ";&"),
+    ("continue", ";|"),
+] {
+    checkExactSpanDelete(
+        "case \(label) terminator",
+        statement: """
+        alias doomed=$(case x in; x) print one \(terminator); y) print two ;; esac)
+        alias caseTerminatorKeeper='15'
+        """,
+        removes: ["alias doomed=", "y) print two"],
+        survives: ["alias caseTerminatorKeeper='15'"])
+}
+
+// 16. Quote removal applies across the entire heredoc delimiter word, not only when its
+// first character is quoted.
+checkExactSpanDelete(
+    "mixed-quoted heredoc delimiter",
+    statement: """
+    alias doomed=$(cat <<E'OF'
+    payload )
+    EOF
+    )
+    alias mixedHeredocKeeper='16'
+    """,
+    removes: ["alias doomed=", "payload )"],
+    survives: ["alias mixedHeredocKeeper='16'"])
+
+// 17. Heredoc discovery spans the complete root shell list. Operators before a
+// separator must remain queued, and operators after it must still be discovered.
+let rootHeredocSeparators = [
+    ("pipe", "|"),
+    ("and", "&&"),
+    ("or", "||"),
+    ("semicolon", ";"),
+    ("background", "&"),
+]
+for (position, beforeSeparator) in [("before", true), ("after", false)] {
+    for (index, entry) in rootHeredocSeparators.enumerated() {
+        let (separatorLabel, separator) = entry
+        let delimiter = "HD\(position.uppercased())\(index)"
+        let payload = "\(position) \(separatorLabel) payload"
+        let command = beforeSeparator
+            ? "cat <<\(delimiter) \(separator) cat"
+            : "cat \(separator) cat <<\(delimiter)"
+        checkExactSpanDelete(
+            "root heredoc \(position) \(separatorLabel)",
+            statement: """
+            alias doomed=\(command)
+            \(payload)
+            \(delimiter)
+            alias rootSeparatorKeeper='\(position)-\(index)'
+            """,
+            removes: ["alias doomed=", payload, "\n\(delimiter)\n"],
+            survives: ["alias rootSeparatorKeeper='\(position)-\(index)'"])
+    }
+}
+
+// 18. More than one heredoc may be queued on opposite sides of a separator. The shell
+// consumes bodies in operator order, and the removal span must do the same.
+checkExactSpanDelete(
+    "root heredocs split across separator",
+    statement: """
+    alias doomed=cat <<FIRST | cat <<SECOND
+    first split payload
+    FIRST
+    second split payload
+    SECOND
+    alias splitHeredocKeeper='18'
+    """,
+    removes: ["alias doomed=", "first split payload", "second split payload",
+              "\nFIRST\n", "\nSECOND\n"],
+    survives: ["alias splitHeredocKeeper='18'"])
+
+// 19. Tab-stripping is a property of each queued heredoc, not of the shell list as a
+// whole. Mixing << and <<- across a separator must preserve both delimiter rules.
+checkExactSpanDelete(
+    "mixed root heredoc operators across separator",
+    statement: "alias doomed=cat <<PLAIN | cat <<-TABBED\n"
+        + "plain mixed payload\n"
+        + "PLAIN\n"
+        + "\ttabbed mixed payload\n"
+        + "\tTABBED\n"
+        + "alias mixedOperatorKeeper='19'",
+    removes: ["alias doomed=", "plain mixed payload", "tabbed mixed payload",
+              "\nPLAIN\n", "\tTABBED\n"],
+    survives: ["alias mixedOperatorKeeper='19'"])
+
+// 20. The unresolved-heredoc invariant is independent of ordinary continuation state.
+// Even if future lexer work accidentally loses a frame, a recognized delimiter that
+// was never consumed must make the edit fail without touching the file.
+let unconsumedRootHeredoc = scratch("""
+\(ManagedBlock.begin)
+alias doomed=cat <<NEVER | cat
+payload without a terminator
+\(ManagedBlock.end)
+""")
+let unconsumedRootHeredocBefore = read(unconsumedRootHeredoc)
+expectThrow("an unconsumed root heredoc refuses the edit") {
+    _ = try AliasWriter.apply(.delete(name: "doomed"), path: unconsumedRootHeredoc,
+                              allEntries: [], confirmedCollateral: true)
+}
+check("an unconsumed root heredoc leaves the file byte-for-byte untouched",
+      read(unconsumedRootHeredoc) == unconsumedRootHeredocBefore,
+      read(unconsumedRootHeredoc))
+
+/// A heredoc delimiter outside the recognized set must refuse the edit and leave
+/// the file byte-for-byte untouched. Guessing at the delimiter is what round 4
+/// proved fatal: an identity that diverges from zsh balances the unresolved
+/// counter against a false terminator, and the deletion orphans live heredoc
+/// payload as executable input.
+func checkHeredocDelimiterRefusal(_ label: String, statement: String,
+                                  fixtureMustBeValidZsh: Bool = true) {
+    let path = scratch("""
+    \(ManagedBlock.begin)
+    \(statement)
+    \(ManagedBlock.end)
+    """)
+    if fixtureMustBeValidZsh {
+        check("\(label): fixture is valid zsh", zshAccepts(path), read(path))
+    }
+    let before = read(path)
+    expectThrow("\(label): delete refuses the edit") {
+        _ = try AliasWriter.apply(.delete(name: "doomed"), path: path, allEntries: [],
+                                  confirmedCollateral: true)
+    }
+    check("\(label): file left byte-for-byte untouched", read(path) == before,
+          read(path))
+}
+
+// 21. Round-4 corruption reproduction: the backslash against the newline continues
+// the delimiter word, so the real delimiter is EOF. A scanner that stops at the
+// backslash invents EO, terminates the body two lines early, and the deletion
+// orphans `second payload` and the real terminator as executable input.
+checkHeredocDelimiterRefusal(
+    "backslash-continued heredoc delimiter",
+    statement: """
+    alias doomed=cat <<EO\\
+    F
+    first payload
+    EO
+    second payload
+    EOF
+    alias continuationKeeper='21'
+    """)
+
+// 22. Round-4 corruption reproduction: `$'EOF'` is ANSI-C quoting, so the real
+// delimiter is EOF. A scanner that reads the characters literally invents $EOF and
+// terminates against the literal `$EOF` body line instead.
+checkHeredocDelimiterRefusal(
+    "ANSI-C-quoted heredoc delimiter",
+    statement: """
+    alias doomed=cat <<$'EOF'
+    first payload
+    $EOF
+    second payload
+    EOF
+    alias ansiKeeper='22'
+    """)
+
+// 23. Inside a double-quoted delimiter a backslash-newline is a line continuation,
+// so the word carries onto the next physical line. The old scanner dropped the
+// operator entirely here, registering no heredoc at all.
+checkHeredocDelimiterRefusal(
+    "double-quoted delimiter continued across the newline",
+    statement: """
+    alias doomed=cat <<"EO\\
+    F"
+    first payload
+    EOF
+    alias quotedContinuationKeeper='23'
+    """)
+
+// 24. A quote still open at the newline continues the delimiter word across it.
+// The old scanner also dropped this operator silently. The fixture is not claimed
+// as valid zsh; refusal must hold regardless of what the file means.
+checkHeredocDelimiterRefusal(
+    "unterminated quote in heredoc delimiter",
+    statement: """
+    alias doomed=cat <<'EOF
+    payload
+    EOF
+    alias unterminatedKeeper='24'
+    """,
+    fixtureMustBeValidZsh: false)
+
+// 25. Command substitution in a delimiter word is outside the recognized set.
+checkHeredocDelimiterRefusal(
+    "backtick in heredoc delimiter",
+    statement: """
+    alias doomed=cat <<`EOF`
+    payload
+    EOF
+    alias backtickDelimiterKeeper='25'
+    """,
+    fixtureMustBeValidZsh: false)
+
+// 26. zsh accepts command-substitution syntax literally in a heredoc delimiter word.
+// Its spaces and parentheses belong to the delimiter; stopping at the first `(` invents
+// `$` as the delimiter and can balance the unresolved counter against a payload line.
+checkHeredocDelimiterRefusal(
+    "command-substitution syntax in heredoc delimiter",
+    statement: """
+    alias doomed=cat <<$(print EOF)
+    first payload
+    $
+    second payload
+    $(print EOF)
+    alias commandSubstitutionDelimiterKeeper='26'
+    """)
+
+// 27. Braced parameter syntax has the same trap: whitespace belongs to zsh's literal
+// delimiter, while a word-level scanner would stop early and invent `${value:-EOF`.
+checkHeredocDelimiterRefusal(
+    "parameter-expansion syntax in heredoc delimiter",
+    statement: """
+    alias doomed=cat <<${value:-EOF X}
+    first payload
+    ${value:-EOF
+    second payload
+    ${value:-EOF X}
+    alias parameterDelimiterKeeper='27'
+    """)
+
+// 28. Legacy arithmetic syntax around a delimiter is outside the recognized set too.
+// This malformed fixture is not assigned a zsh meaning; the safety property is that an
+// edit never guesses at its extent or changes a byte.
+checkHeredocDelimiterRefusal(
+    "arithmetic-substitution syntax in heredoc delimiter",
+    statement: """
+    alias doomed=cat <<$[1 + 2]
+    first payload
+    $[1
+    second payload
+    3
+    alias arithmeticDelimiterKeeper='28'
+    """,
+    fixtureMustBeValidZsh: false)
+
+// 29. Parentheses can be literal delimiter characters in zsh, so treating one as a
+// word boundary invents a shorter terminator and can expose the real payload.
+checkHeredocDelimiterRefusal(
+    "parenthesized heredoc delimiter suffix",
+    statement: """
+    alias doomed=cat <<foo(bar)
+    first payload
+    foo
+    second payload
+    foo(bar)
+    alias parenthesizedDelimiterKeeper='29'
+    """)
+
+// 30. zsh ends the delimiter word at a redirection, so `<<EOF>file` names EOF, not
+// `EOF>file`. Folding the redirect into the delimiter would never find the body's
+// real terminator.
+checkExactSpanDelete(
+    "redirect immediately after heredoc delimiter",
+    statement: """
+    alias doomed=cat <<EOF>/tmp/aliasbar-test-26-redirect
+    redirect payload
+    EOF
+    alias redirectKeeper='30'
+    """,
+    removes: ["alias doomed=", "redirect payload", "\nEOF\n"],
+    survives: ["alias redirectKeeper='30'"])
+
+// 31. `<<<` is a here-string, not a heredoc: nothing is deferred past the newline,
+// and its word must not be misread as a delimiter that never arrives.
+checkExactSpanDelete(
+    "here-string is not a heredoc",
+    statement: """
+    alias doomed=cat <<<'here payload'
+    alias hereStringKeeper='31'
+    """,
+    removes: ["alias doomed=", "here payload"],
+    survives: ["alias hereStringKeeper='31'"])
 
 
 // ===========================================================================

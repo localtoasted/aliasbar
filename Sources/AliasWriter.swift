@@ -318,6 +318,19 @@ enum AliasWriter {
         guard snapshotBeforeRead == snapshotAfterRead else {
             throw WriteError.modifiedElsewhere
         }
+
+        // `allEntries` came from the UI's last parse and can be stale by the time Save
+        // is pressed. Reparse the exact contents bracketed by the snapshots above so an
+        // unmanaged definition added since the editor opened cannot be shadowed by a
+        // new managed definition.
+        if let name = nameToWrite,
+           let clash = ZshrcParser.parseText(original, sourceFile: target)
+               .first(where: { $0.name == name && !$0.managed }) {
+            throw WriteError.definedOutsideBlock(name: name,
+                                                 file: clash.sourceFile,
+                                                 line: clash.line)
+        }
+
         // Re-checked immediately before the replacement. Atomic rename prevents a
         // half-written file; it does nothing about a lost update.
         let snapshotAtRead = snapshotAfterRead
@@ -813,6 +826,21 @@ enum AliasWriter {
                     last += 1
                     state = scan(lines[last], from: state)
                 }
+                // A delimiter outside the recognized set means the scanner cannot know
+                // where the heredoc body ends, so the span's extent is untrustworthy in
+                // both directions. Refuse with the honest reason.
+                if state.unsupportedHeredocDelimiter {
+                    throw WriteError.wouldBreakSyntax(
+                        "the definition of \"\(name)\" uses a heredoc delimiter this app cannot parse the way zsh does")
+                }
+                // This guard is intentionally independent of `continues`. If a future
+                // scanner change drops a frame or forgets to propagate continuation,
+                // unresolved heredoc input must turn into a refused edit, never a
+                // successful under-span that exposes the payload as shell commands.
+                if state.hasUnconsumedHeredoc {
+                    throw WriteError.wouldBreakSyntax(
+                        "the definition of \"\(name)\" has unconsumed heredoc input")
+                }
                 // Still incomplete at the end marker means the block is already
                 // malformed. Consuming to the end would delete everything after it, so
                 // refuse and let the user look at their own file.
@@ -825,60 +853,324 @@ enum AliasWriter {
             return nil
         }
 
-        /// Where the lexer is when a line ends.
-        ///
-        /// Tracking single quotes alone is not enough. Three cases break it:
-        /// an apostrophe inside a double-quoted value (`alias x="echo it's fine"`) looks
-        /// like an opening quote; a double-quoted value spanning lines looks complete
-        /// after the first; and a trailing unescaped backslash continues the statement
-        /// onto the next line with no quote involved at all. Each of those either
-        /// rejects a valid alias or, worse, truncates a statement and leaves the
-        /// remainder as a bare command that runs at shell startup.
+        /// Where the lexer is when a line ends. Every nested shell construct owns its
+        /// quote and word-boundary state: quotes inside `$(...)` do not close quotes in
+        /// the surrounding value, and comments inside a substitution end at its newline
+        /// without ending the substitution itself.
         enum QuoteState { case unquoted, single, double }
+
+        enum NestingKind {
+            case root
+            case command
+            case arithmetic
+            case parameter
+            case process
+            case backtick
+
+            /// `#` is shell-comment syntax in command contexts. In arithmetic it is the
+            /// radix operator (`16#ff`), and in parameter expansion it is an operator.
+            var allowsComments: Bool {
+                switch self {
+                case .root, .command, .process, .backtick: return true
+                case .arithmetic, .parameter: return false
+                }
+            }
+        }
+
+        enum CasePhase {
+            case awaitingIn
+            case pattern
+            case body
+        }
+
+        struct Heredoc {
+            var delimiter: String
+            var stripsTabs: Bool
+        }
+
+        struct LexFrame {
+            var kind: NestingKind
+            var quote: QuoteState = .unquoted
+            var atWordStart = true
+            var atCommandStart = true
+            var token = ""
+            var tokenStartedCommand = false
+            var cases: [CasePhase] = []
+            var pendingHeredocs: [Heredoc] = []
+            var activeHeredoc: Heredoc?
+            /// Number of unmatched delimiters belonging to this frame. Arithmetic
+            /// starts at two for `$((`, while every other nested construct starts at
+            /// one. Ordinary parentheses/braces inside the construct adjust the same
+            /// count, so an inner `)` or `}` cannot close the outer construct early.
+            var delimiterDepth: Int
+        }
 
         /// Everything the lexer needs to carry from one line to the next.
         struct LexState {
-            var quote: QuoteState = .unquoted
-            /// Whether the previous character was unquoted whitespace (or this is the
-            /// start of a line). `#` introduces a comment only there; anywhere inside a
-            /// word it is an ordinary character.
-            ///
-            /// **Only whitespace sets this, deliberately.** Shell metacharacters look
-            /// like word separators, but `(`, `)`, `{`, and `}` all occur *inside*
-            /// single words through `${HOME}`, `$((1))`, `$(cmd)`, `<(cmd)`, and brace
-            /// expansion. Counting any of them as a boundary makes a following `#` look
-            /// like a comment introducer, which hides a trailing backslash and orphans
-            /// the continuation line as a command that runs at shell startup. That
-            /// exact bug arrived twice, via `}` and via `)`.
-            ///
-            /// Distinguishing a metacharacter from a substitution needs full nesting
-            /// state for arithmetic, command, process, and glob constructs. Whitespace
-            /// is the rule that is both simple and safe. The one case it gets wrong is
-            /// `;#comment` or `|#comment` ending in a backslash, where the span extends
-            /// one line too far; that costs an over-delete of a comment line rather than
-            /// leaving live code behind, and standalone metacharacters are surrounded by
-            /// whitespace in practice anyway.
-            var atWordStart = true
+            var frames = [LexFrame(kind: .root, delimiterDepth: 0)]
+            /// Independent accounting for every heredoc delimiter the scanner has
+            /// recognized but not yet consumed. Frames own the parsing details, while
+            /// this count is the fail-safe invariant: resetting or popping a frame can
+            /// never make an unresolved heredoc disappear from span completion.
+            var unresolvedHeredocs = 0
+            var heredocStateInvalid = false
+            /// A heredoc operator was seen whose delimiter word falls outside the
+            /// recognized set (line continuation, `$'…'` quoting, an unterminated
+            /// quote, a backtick). Its terminator cannot be located the way zsh
+            /// would, so no span containing it may complete. Never cleared.
+            var unsupportedHeredocDelimiter = false
             /// Whether the statement continues onto the following line.
             var continues = false
+
+            var hasUnconsumedHeredoc: Bool {
+                heredocStateInvalid || unsupportedHeredocDelimiter
+                    || unresolvedHeredocs > 0 || frames.contains {
+                    $0.activeHeredoc != nil || !$0.pendingHeredocs.isEmpty
+                }
+            }
         }
 
         /// Advances the lexer across one line.
         func scan(_ line: String, from entering: LexState) -> LexState {
             var state = entering
+            if state.frames.isEmpty {
+                state.frames = [LexFrame(kind: .root, delimiterDepth: 0)]
+            }
             var index = line.startIndex
             var trailingEscape = false
+            var endedInComment = false
+            var crossedRootSeparator = false
+
+            func character(after position: String.Index) -> Character? {
+                let next = line.index(after: position)
+                return next < line.endIndex ? line[next] : nil
+            }
+
+            func character(twoAfter position: String.Index) -> Character? {
+                let first = line.index(after: position)
+                guard first < line.endIndex else { return nil }
+                let second = line.index(after: first)
+                return second < line.endIndex ? line[second] : nil
+            }
+
+            func advance(_ position: String.Index, by count: Int) -> String.Index {
+                line.index(position, offsetBy: count, limitedBy: line.endIndex) ?? line.endIndex
+            }
+
+            func push(_ kind: NestingKind, delimiterDepth: Int, tokenLength: Int) {
+                state.frames[state.frames.count - 1].atWordStart = false
+                state.frames[state.frames.count - 1].atCommandStart = false
+                state.frames.append(LexFrame(kind: kind, delimiterDepth: delimiterDepth))
+                index = advance(index, by: tokenLength)
+            }
+
+            func finishToken(in frameIndex: Int) {
+                let token = state.frames[frameIndex].token
+                guard !token.isEmpty else { return }
+                let beganCommand = state.frames[frameIndex].tokenStartedCommand
+                state.frames[frameIndex].token = ""
+                state.frames[frameIndex].tokenStartedCommand = false
+
+                if beganCommand, token == "case" {
+                    state.frames[frameIndex].cases.append(.awaitingIn)
+                } else if state.frames[frameIndex].cases.last == .awaitingIn, token == "in" {
+                    state.frames[frameIndex].cases[state.frames[frameIndex].cases.count - 1] = .pattern
+                } else if beganCommand, token == "esac",
+                          !state.frames[frameIndex].cases.isEmpty {
+                    state.frames[frameIndex].cases.removeLast()
+                }
+                state.frames[frameIndex].atCommandStart = false
+            }
+
+            func appendToToken(_ ch: Character, in frameIndex: Int) {
+                if state.frames[frameIndex].token.isEmpty {
+                    state.frames[frameIndex].tokenStartedCommand =
+                        state.frames[frameIndex].atCommandStart
+                }
+                state.frames[frameIndex].token.append(ch)
+            }
+
+            /// Reads the delimiter word after `<<` without treating its quotes as shell
+            /// state. Heredoc delimiter quotes are removed by the shell, and the body is
+            /// lexically opaque until that exact word appears on a line by itself.
+            ///
+            /// Only delimiter words whose quote removal resolves entirely on this
+            /// physical line are recognized. Everything else — a trailing backslash
+            /// that continues the word across the newline, `$'…'`/`$"…"` quoting, a
+            /// quote still open at the newline, a backtick — is reported as
+            /// `.unsupported` rather than guessed at. Round 4 proved the cost of
+            /// guessing: a delimiter identity that diverges from zsh lets the
+            /// unresolved-heredoc counter balance to zero against a false terminator,
+            /// and the deletion orphans live heredoc payload as executable input.
+            /// An unsupported delimiter must poison the whole span so the edit is
+            /// refused, never quietly dropped or approximated.
+            enum HeredocWord {
+                case heredoc(Heredoc, String.Index)
+                case hereString(String.Index)
+                case unsupported(String.Index)
+            }
+
+            func heredoc(after operatorEnd: String.Index) -> HeredocWord {
+                var cursor = operatorEnd
+                var stripsTabs = false
+                if cursor < line.endIndex, line[cursor] == "-" {
+                    stripsTabs = true
+                    cursor = line.index(after: cursor)
+                } else if cursor < line.endIndex, line[cursor] == "<" {
+                    // `<<<` is a here-string: its word is an ordinary argument, not
+                    // deferred input. Hand back the position past the operator so the
+                    // ordinary lexer reads the word and the loop cannot rediscover the
+                    // trailing `<<` as a phantom heredoc.
+                    return .hereString(line.index(after: cursor))
+                }
+                while cursor < line.endIndex, line[cursor] == " " || line[cursor] == "\t" {
+                    cursor = line.index(after: cursor)
+                }
+                // `<<` with no delimiter word on this line is not valid zsh; whatever
+                // the file means by it, this span's extent cannot be trusted.
+                guard cursor < line.endIndex else { return .unsupported(cursor) }
+
+                var delimiter = ""
+                var quote: Character?
+                var sawDelimiterWord = false
+                while cursor < line.endIndex {
+                    let ch = line[cursor]
+                    if let activeQuote = quote {
+                        if ch == activeQuote {
+                            sawDelimiterWord = true
+                            quote = nil
+                            cursor = line.index(after: cursor)
+                            continue
+                        } else if activeQuote == "\"", ch == "\\" {
+                            let next = line.index(after: cursor)
+                            // A backslash against the newline continues the word onto
+                            // the next physical line, outside the recognized set.
+                            guard next < line.endIndex else { return .unsupported(cursor) }
+                            if line[next] == "$" || line[next] == "`" || line[next] == "\""
+                                || line[next] == "\\" {
+                                delimiter.append(line[next])
+                            } else {
+                                delimiter.append(ch)
+                                delimiter.append(line[next])
+                            }
+                            sawDelimiterWord = true
+                            cursor = line.index(after: next)
+                            continue
+                        } else {
+                            delimiter.append(ch)
+                            sawDelimiterWord = true
+                            cursor = line.index(after: cursor)
+                            continue
+                        }
+                    } else if ch == "(" || ch == ")" {
+                        // Parentheses are not a safe word boundary here: zsh accepts
+                        // forms such as `foo(bar)` literally as the delimiter. In other
+                        // contexts a parenthesis can be shell grammar instead. Refuse
+                        // both rather than choosing an extent that can orphan payload.
+                        return .unsupported(cursor)
+                    } else if ch == " " || ch == "\t" || ch == ";" || ch == "|" || ch == "&"
+                                || ch == "<" || ch == ">" {
+                        break
+                    } else if ch == "$",
+                              let next = character(after: cursor),
+                              next == "'" || next == "\"" || next == "("
+                                  || next == "{" || next == "[" {
+                        // `$'…'` and `$"…"` are quote-removal syntax whose result this
+                        // scanner does not model. zsh accepts `$(…)` and `${…}` as
+                        // delimiter syntax that can contain whitespace, while legacy
+                        // `$[…]` arithmetic syntax computes a different delimiter. The
+                        // ordinary token boundaries below cannot recover any of them.
+                        return .unsupported(cursor)
+                    } else if ch == "`" {
+                        return .unsupported(cursor)
+                    } else if ch == "'" || ch == "\"" {
+                        quote = ch
+                        sawDelimiterWord = true
+                        cursor = line.index(after: cursor)
+                        continue
+                    } else if ch == "\\" {
+                        let next = line.index(after: cursor)
+                        // Line continuation: the delimiter word carries onto the next
+                        // physical line, so its identity is not resolvable here.
+                        guard next < line.endIndex else { return .unsupported(cursor) }
+                        cursor = next
+                    }
+                    delimiter.append(line[cursor])
+                    sawDelimiterWord = true
+                    cursor = line.index(after: cursor)
+                }
+                // A quote still open at the newline continues the word across it, and a
+                // quoted-empty word (`<<''`) has no line a terminator scan could match
+                // the way zsh would.
+                guard quote == nil, sawDelimiterWord, !delimiter.isEmpty else {
+                    return .unsupported(cursor)
+                }
+                return .heredoc(Heredoc(delimiter: delimiter, stripsTabs: stripsTabs), cursor)
+            }
+
+            /// Expansions are active in unquoted and double-quoted text, but process
+            /// substitution is syntax only in an unquoted command context.
+            func openExpansion(allowProcess: Bool) -> Bool {
+                let next = character(after: index)
+                let afterNext = character(twoAfter: index)
+                if line[index] == "$", next == "(", afterNext == "(" {
+                    push(.arithmetic, delimiterDepth: 2, tokenLength: 3)
+                    return true
+                }
+                if line[index] == "$", next == "(" {
+                    push(.command, delimiterDepth: 1, tokenLength: 2)
+                    return true
+                }
+                if line[index] == "$", next == "{" {
+                    push(.parameter, delimiterDepth: 1, tokenLength: 2)
+                    return true
+                }
+                if allowProcess, (line[index] == "<" || line[index] == ">"), next == "(" {
+                    push(.process, delimiterDepth: 1, tokenLength: 2)
+                    return true
+                }
+                if line[index] == "`" {
+                    push(.backtick, delimiterDepth: 1, tokenLength: 1)
+                    return true
+                }
+                return false
+            }
+
+            if let frameIndex = state.frames.indices.last,
+               let active = state.frames[frameIndex].activeHeredoc {
+                let candidate = active.stripsTabs
+                    ? String(line.drop(while: { $0 == "\t" }))
+                    : line
+                if candidate == active.delimiter {
+                    state.frames[frameIndex].activeHeredoc = nil
+                    if state.unresolvedHeredocs > 0 {
+                        state.unresolvedHeredocs -= 1
+                    } else {
+                        state.heredocStateInvalid = true
+                    }
+                    if !state.frames[frameIndex].pendingHeredocs.isEmpty {
+                        state.frames[frameIndex].activeHeredoc =
+                            state.frames[frameIndex].pendingHeredocs.removeFirst()
+                    }
+                    state.frames[frameIndex].atWordStart = true
+                    state.frames[frameIndex].atCommandStart = true
+                }
+                state.continues =
+                    state.frames.count > 1 || state.hasUnconsumedHeredoc
+                return state
+            }
 
             while index < line.endIndex {
                 let ch = line[index]
                 trailingEscape = false
+                let frameIndex = state.frames.count - 1
 
-                switch state.quote {
+                switch state.frames[frameIndex].quote {
                 case .single:
                     // Wholly literal. A backslash here is just a backslash, so the very
                     // next apostrophe closes the string.
-                    if ch == "'" { state.quote = .unquoted }
-                    state.atWordStart = false
+                    if ch == "'" { state.frames[frameIndex].quote = .unquoted }
+                    state.frames[frameIndex].atWordStart = false
 
                 case .double:
                     if ch == "\\" {
@@ -886,51 +1178,170 @@ enum AliasWriter {
                         if next == line.endIndex { trailingEscape = true; index = next; continue }
                         index = next
                     } else if ch == "\"" {
-                        state.quote = .unquoted
+                        state.frames[frameIndex].quote = .unquoted
+                    } else if openExpansion(allowProcess: false) {
+                        continue
                     }
-                    state.atWordStart = false
+                    state.frames[frameIndex].atWordStart = false
 
                 case .unquoted:
-                    if ch == "\\" {
+                    if state.frames[frameIndex].kind == .backtick, ch == "`" {
+                        finishToken(in: frameIndex)
+                        state.frames.removeLast()
+                    } else if ch == "\\" {
                         let next = line.index(after: index)
                         if next == line.endIndex { trailingEscape = true; index = next; continue }
                         index = next
-                        state.atWordStart = false
+                        state.frames[frameIndex].atWordStart = false
                     } else if ch == "'" {
-                        state.quote = .single
-                        state.atWordStart = false
+                        state.frames[frameIndex].quote = .single
+                        state.frames[frameIndex].atWordStart = false
                     } else if ch == "\"" {
-                        state.quote = .double
-                        state.atWordStart = false
-                    } else if ch == "#" && state.atWordStart {
-                        // A real comment: runs to end of line, opens nothing, and
-                        // cannot carry a line continuation.
-                        state.continues = false
-                        return state
+                        state.frames[frameIndex].quote = .double
+                        state.frames[frameIndex].atWordStart = false
+                    } else if openExpansion(allowProcess: true) {
+                        continue
+                    } else if ch == "#",
+                              state.frames[frameIndex].kind.allowsComments,
+                              state.frames[frameIndex].atWordStart {
+                        // A comment cannot carry an escape across its newline. A root
+                        // comment ends the statement; a nested comment only ends this
+                        // physical line, and its substitution remains open.
+                        endedInComment = true
+                        break
+                    } else if state.frames[frameIndex].kind.allowsComments,
+                              ch == "<", character(after: index) == "<" {
+                        switch heredoc(after: advance(index, by: 2)) {
+                        case .heredoc(let parsed, let end):
+                            finishToken(in: frameIndex)
+                            state.frames[frameIndex].pendingHeredocs.append(parsed)
+                            state.unresolvedHeredocs += 1
+                            index = end
+                        case .hereString(let end):
+                            finishToken(in: frameIndex)
+                            state.frames[frameIndex].atWordStart = true
+                            index = end
+                        case .unsupported(let end):
+                            // The operator is real but its delimiter is outside the
+                            // recognized set, so the end of this heredoc cannot be
+                            // located. Count it as forever-unresolved and mark the
+                            // state: every span containing it must refuse the edit.
+                            finishToken(in: frameIndex)
+                            state.unresolvedHeredocs += 1
+                            state.unsupportedHeredocDelimiter = true
+                            index = end
+                        }
+                        continue
                     } else if ch == " " || ch == "\t" {
-                        state.atWordStart = true
+                        finishToken(in: frameIndex)
+                        state.frames[frameIndex].atWordStart = true
+                    } else if state.frames[frameIndex].kind == .root,
+                              ch == ";" || ch == "|" || ch == "&" {
+                        // A root separator ends the alias command, but heredocs anywhere
+                        // on this physical shell list are read only after its newline.
+                        // Keep scanning the complete line so delimiters both before and
+                        // after the separator remain owned by this removal span.
+                        finishToken(in: frameIndex)
+                        state.frames[frameIndex].atWordStart = true
+                        state.frames[frameIndex].atCommandStart = true
+                        crossedRootSeparator = true
+                    } else if state.frames[frameIndex].kind == .arithmetic, ch == "(" {
+                        state.frames[frameIndex].delimiterDepth += 1
+                        state.frames[frameIndex].atWordStart = false
+                    } else if state.frames[frameIndex].kind == .arithmetic, ch == ")" {
+                        state.frames[frameIndex].delimiterDepth -= 1
+                        if state.frames[frameIndex].delimiterDepth == 0 {
+                            state.frames.removeLast()
+                        }
+                    } else if state.frames[frameIndex].kind == .parameter, ch == "{" {
+                        state.frames[frameIndex].delimiterDepth += 1
+                        state.frames[frameIndex].atWordStart = false
+                    } else if state.frames[frameIndex].kind == .parameter, ch == "}" {
+                        state.frames[frameIndex].delimiterDepth -= 1
+                        if state.frames[frameIndex].delimiterDepth == 0 {
+                            state.frames.removeLast()
+                        }
+                    } else if state.frames[frameIndex].kind == .command
+                                || state.frames[frameIndex].kind == .process
+                                || state.frames[frameIndex].kind == .backtick {
+                        if ch == "(" {
+                            finishToken(in: frameIndex)
+                            // zsh accepts both `word)` and `(word)` case-arm forms.
+                            // The optional opening paren belongs to the pattern grammar,
+                            // not to the command substitution's structural depth.
+                            if state.frames[frameIndex].cases.last != .pattern {
+                                state.frames[frameIndex].delimiterDepth += 1
+                            }
+                            state.frames[frameIndex].atWordStart = true
+                        } else if ch == ")" {
+                            finishToken(in: frameIndex)
+                            if state.frames[frameIndex].cases.last == .pattern {
+                                state.frames[frameIndex].cases[
+                                    state.frames[frameIndex].cases.count - 1] = .body
+                                state.frames[frameIndex].atCommandStart = true
+                            } else {
+                                state.frames[frameIndex].delimiterDepth -= 1
+                                if state.frames[frameIndex].delimiterDepth == 0 {
+                                    state.frames.removeLast()
+                                }
+                            }
+                        } else if ch == ";" || ch == "|" || ch == "&" {
+                            finishToken(in: frameIndex)
+                            // Separators inside a substitution separate its commands,
+                            // not the outer alias statement.
+                            state.frames[frameIndex].atWordStart = true
+                            state.frames[frameIndex].atCommandStart = true
+                            if ch == ";",
+                               let terminator = character(after: index),
+                               terminator == ";" || terminator == "&" || terminator == "|",
+                               state.frames[frameIndex].cases.last == .body {
+                                state.frames[frameIndex].cases[
+                                    state.frames[frameIndex].cases.count - 1] = .pattern
+                                index = line.index(after: index)
+                            }
+                        } else {
+                            appendToToken(ch, in: frameIndex)
+                            state.frames[frameIndex].atWordStart = false
+                        }
                     } else {
-                        // Includes `#` mid-word, which zsh treats as an ordinary
-                        // character. Missing that would let `echo#tag\` hide a
-                        // continuation and orphan the next line as a live command.
-                        state.atWordStart = false
+                        state.frames[frameIndex].atWordStart = false
                     }
                 }
+                if endedInComment { break }
                 index = line.index(after: index)
             }
 
-            // The statement continues if a quote is still open, or if the line ended on
-            // an unescaped backslash. In single quotes a trailing backslash is literal,
-            // but the open quote already means continuation.
-            state.continues = state.quote != .unquoted || trailingEscape
-            // Deliberately does NOT force atWordStart false on a trailing backslash.
-            // zsh removes the backslash-newline pair but not the whitespace before it,
-            // so `alias x=1 \` resumes at a word boundary and a following `# comment`
-            // really is a comment, while `echo#tag\` resumes mid-word. The state left
-            // by the character before the backslash already encodes exactly that
-            // distinction, because the trailing-backslash branch returns before
-            // touching it. Overriding it here merged a comment line into the statement
-            // and let a deletion swallow the next alias.
+            if endedInComment {
+                state.frames[state.frames.count - 1].atWordStart = true
+            } else if !trailingEscape,
+                      state.frames[state.frames.count - 1].quote == .unquoted {
+                // A physical newline is a command boundary inside substitutions. A
+                // backslash-newline is removed instead, so it deliberately preserves
+                // the word-boundary state from before the backslash.
+                finishToken(in: state.frames.count - 1)
+                state.frames[state.frames.count - 1].atWordStart = true
+                state.frames[state.frames.count - 1].atCommandStart = true
+                if state.frames[state.frames.count - 1].activeHeredoc == nil,
+                   !state.frames[state.frames.count - 1].pendingHeredocs.isEmpty {
+                    state.frames[state.frames.count - 1].activeHeredoc =
+                        state.frames[state.frames.count - 1].pendingHeredocs.removeFirst()
+                }
+            }
+
+            // Any open nesting frame or quote carries the statement across a newline.
+            // A comment suppresses a trailing backslash, exactly as zsh does.
+            let rootQuoteOpen = state.frames.first?.quote != .unquoted
+            let heredocOpen = state.frames.contains {
+                $0.activeHeredoc != nil || !$0.pendingHeredocs.isEmpty
+            }
+            // Once a root separator has ended the alias command, later syntax on that
+            // physical line must not extend its span. Heredoc bodies are the exception:
+            // the shell consumes them after the newline, and leaving them behind would
+            // turn their payload into executable input.
+            state.continues = state.hasUnconsumedHeredoc
+                || (!crossedRootSeparator
+                    && (state.frames.count > 1 || rootQuoteOpen || heredocOpen
+                        || (!endedInComment && trailingEscape)))
             return state
         }
 
@@ -1017,14 +1428,17 @@ enum AliasWriter {
 
     // MARK: - Backup
 
-    /// Timestamped backup beside the original. Returns its path so the UI can name it.
+    /// Timestamped backup beside the original. The UUID keeps two writes in the same
+    /// second from selecting the same path and overwriting the first recovery point.
+    /// Returns its path so the UI can name it.
     private static func writeBackup(of contents: String, for path: String) throws -> String {
         guard !contents.isEmpty else { return "" }
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyy-MM-dd-HHmmss"
         formatter.timeZone = TimeZone.current
         let stamp = formatter.string(from: Date())
-        let backupPath = "\(path).aliasbar-backup-\(stamp)"
+        let unique = UUID().uuidString.lowercased()
+        let backupPath = "\(path).aliasbar-backup-\(stamp)-\(unique)"
         do {
             try contents.write(toFile: backupPath, atomically: true, encoding: .utf8)
         } catch {
