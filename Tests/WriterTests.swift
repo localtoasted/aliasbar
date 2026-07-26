@@ -2436,8 +2436,9 @@ check("onboarding source is readable",
 let onboardingAccessibilityBoundaries = [
     ".accessibilityLabel(\"Set up later\")",
     ".accessibilityLabel(\"Skip this setup step\")",
-    ".accessibilityLabel(step == Self.stepCount - 1",
+    ".accessibilityLabel(step == .look",
     ".accessibilityLabel(recordingHotkey",
+    ".accessibilityLabel(hotkeyRehearsed",
     ".accessibilityLabel(title)",
     ".accessibilityLabel(axPrompted",
     ".accessibilityLabel(\"Choose aliases file\")",
@@ -2447,6 +2448,8 @@ let onboardingAccessibilityBoundaries = [
     ".accessibilityLabel(\"Save appearance as a preset\")",
     ".accessibilityLabel(\"\\(appearance.name) appearance\")",
     ".accessibilityLabel(\"Re-grant Accessibility permission\")",
+    ".accessibilityLabel(\"\\(value) \\(label)\")",
+    ".accessibilityLabel(\"Rank \\(rank), \\(ranked.name), used \\(ranked.uses) times\")",
 ]
 for boundary in onboardingAccessibilityBoundaries {
     check("onboarding AX boundary \(boundary)",
@@ -2470,8 +2473,8 @@ for stateName in [
 let onboardingAccessibilityLabelCount =
     onboardingSource.components(separatedBy: ".accessibilityLabel(").count - 1
 check("all onboarding button boundaries own exactly one accessibility label",
-      onboardingAccessibilityLabelCount == 13,
-      "found \(onboardingAccessibilityLabelCount), expected 13")
+      onboardingAccessibilityLabelCount == onboardingAccessibilityBoundaries.count,
+      "found \(onboardingAccessibilityLabelCount), expected \(onboardingAccessibilityBoundaries.count)")
 
 // ---------------------------------------------------------------------------
 print("\n29. Foundation core seam")
@@ -6779,6 +6782,162 @@ do {
     check("an out-of-range selection previews nothing, rather than falling back to the first row",
           state.selectedShortcut == nil)
 }
+
+print("\n40. Onboarding rework: detect, show value, then ask (PRE-266)")
+
+// --- Step order: found leads, the rest keeps PRE-239/PRE-277's unchanged order --
+
+check("OnboardingStep is found first, then the unchanged PRE-239/PRE-277 order",
+      OnboardingStep.allCases == [.found, .shortcut, .enter, .file, .updates, .look])
+
+// --- OnboardingScanner: every count comes from the fixtures, never a canned number --
+
+let onboardingSandbox = "\(sandbox)/onboarding"
+try! FileManager.default.createDirectory(atPath: onboardingSandbox, withIntermediateDirectories: true)
+
+let onboardingRc = "\(onboardingSandbox)/zshrc"
+try! """
+# >>> aliasbar managed block >>>
+# Edited by AliasBar. Anything outside these markers is never touched.
+alias gs='git status'
+alias gp='git push'
+alias gl='git log --oneline'
+myfunc() {
+    echo hi
+}
+# <<< aliasbar managed block <<<
+""".write(toFile: onboardingRc, atomically: true, encoding: .utf8)
+
+// First words only, matching how HistoryScanner.commandWordCounts attributes usage:
+// "gs" run 5 times, "gp" run twice, "gl" and "myfunc" never run at all.
+let onboardingHistory = "\(onboardingSandbox)/history"
+try! Array(repeating: "gs", count: 5).joined(separator: "\n")
+    .appending("\n" + Array(repeating: "gp", count: 2).joined(separator: "\n"))
+    .write(toFile: onboardingHistory, atomically: true, encoding: .utf8)
+
+let claudeDirPresent = "\(onboardingSandbox)/dot-claude-present"
+try! FileManager.default.createDirectory(atPath: claudeDirPresent, withIntermediateDirectories: true)
+let claudeDirAbsent = "\(onboardingSandbox)/dot-claude-absent"
+
+let scanWithClaude = OnboardingScanner.scan(rcPath: onboardingRc, historyPath: onboardingHistory,
+                                            claudeDirectoryPath: claudeDirPresent)
+check("scan counts aliases straight from the fixture rc", scanWithClaude.aliasCount == 3)
+check("scan counts functions straight from the fixture rc", scanWithClaude.functionCount == 1)
+check("scan's never-run count matches entries with zero history usage (gl, myfunc)",
+      scanWithClaude.neverRunCount == 2)
+check("top-used is ordered by usage descending", scanWithClaude.topUsed.map(\.name) == ["gs", "gp"])
+check("top-used reflects the real usage counts, not placeholders",
+      scanWithClaude.topUsed.first?.uses == 5 && scanWithClaude.topUsed.last?.uses == 2)
+check("Claude Code reads as detected when the directory exists", scanWithClaude.claudeCodeDetected)
+
+let scanNoClaude = OnboardingScanner.scan(rcPath: onboardingRc, historyPath: onboardingHistory,
+                                          claudeDirectoryPath: claudeDirAbsent)
+check("Claude Code reads as not detected when the directory is absent", !scanNoClaude.claudeCodeDetected)
+
+let claudeFileNotDir = "\(onboardingSandbox)/dot-claude-file"
+try! "not a directory".write(toFile: claudeFileNotDir, atomically: true, encoding: .utf8)
+check("a plain file at the Claude Code path never reads as detected — presence means a directory",
+      !OnboardingScanner.scan(rcPath: onboardingRc, historyPath: onboardingHistory,
+                             claudeDirectoryPath: claudeFileNotDir).claudeCodeDetected)
+
+let missingFilesScan = OnboardingScanner.scan(rcPath: "\(onboardingSandbox)/no-such-rc",
+                                              historyPath: "\(onboardingSandbox)/no-such-history",
+                                              claudeDirectoryPath: claudeDirAbsent)
+check("scanning missing rc/history files never crashes and reads as all-zero",
+      missingFilesScan == OnboardingScanResult.empty)
+
+// --- OnboardingDecisions: defaults, and the checkbox → settings mapping ---------
+
+check("defaults pre-check usage ranking and leave clipboard watching off, regardless of detection",
+      OnboardingDecisions.defaults(for: scanWithClaude).historyUsageRanking
+          && !OnboardingDecisions.defaults(for: scanWithClaude).clipboardWatching
+          && !OnboardingDecisions.defaults(for: scanNoClaude).clipboardWatching)
+check("defaults pre-check Claude Code prompt features only when the scan actually detected it",
+      OnboardingDecisions.defaults(for: scanWithClaude).claudeCodePromptFeatures
+          && !OnboardingDecisions.defaults(for: scanNoClaude).claudeCodePromptFeatures)
+
+let (decisionSettings, decisionDefaults) = freshTestSettings()
+check("clipboardMonitoring starts false, before any onboarding decision is ever applied",
+      !decisionSettings.clipboardMonitoring)
+
+var decisions = OnboardingDecisions.defaults(for: scanWithClaude)
+decisions.apply(to: decisionSettings)
+check("applying defaults leaves clipboardMonitoring false unless the checkbox was actually ticked",
+      !decisionSettings.clipboardMonitoring)
+check("applying defaults turns usage ranking on", decisionSettings.historyUsageRankingEnabled)
+check("applying defaults turns Claude Code features on when the scan detected it",
+      decisionSettings.promptFeaturesEnabled)
+
+decisions.clipboardWatching = true
+decisions.apply(to: decisionSettings)
+check("ticking clipboard watching is the only way clipboardMonitoring becomes true",
+      decisionSettings.clipboardMonitoring)
+
+decisions.historyUsageRanking = false
+decisions.claudeCodePromptFeatures = false
+decisions.apply(to: decisionSettings)
+check("unticking the other two turns them off without resetting clipboard watching",
+      !decisionSettings.historyUsageRankingEnabled
+          && !decisionSettings.promptFeaturesEnabled
+          && decisionSettings.clipboardMonitoring)
+
+// --- Decisions persist: a fresh AppSettings reading the same store sees them ----
+
+let reloadedDecisionSettings = AppSettings(defaults: decisionDefaults)
+check("decisions persist across a fresh AppSettings instance reading the same UserDefaults suite",
+      reloadedDecisionSettings.clipboardMonitoring
+          && !reloadedDecisionSettings.historyUsageRankingEnabled
+          && !reloadedDecisionSettings.promptFeaturesEnabled)
+
+// --- The post-onboarding prompt hint: fires exactly once, gated correctly ------
+
+let hintEntry = RankedEntry(entry: ShellEntry(kind: .alias, name: "gs", command: "git status",
+                                              comment: nil, sourceFile: "/tmp/onboarding.zshrc",
+                                              line: 1, managed: true),
+                           uses: 3)
+
+let (hintSettings, _) = freshTestSettings()
+hintSettings.onboardingComplete = true
+let hintState = AppState(store: EntryStore(), settings: hintSettings)
+hintState.pasteboard = FakePasteboard()
+hintState.prepareForShow()
+
+check("the one-shot prompt hint has not fired before any alias recall", !hintSettings.hasShownPromptHint)
+
+hintState.perform(.copyName, on: hintEntry)
+check("hasShownPromptHint flips true after the first successful alias recall",
+      hintSettings.hasShownPromptHint)
+check("the hint is queued, not shown mid-delivery — the copy's own toast is still on screen",
+      hintState.toast == "Copied gs")
+
+hintState.prepareForShow()
+check("the queued hint is promoted into toast the next time the window opens",
+      hintState.toast == "Want the same for your AI prompts? ⌘I")
+
+hintState.perform(.copyName, on: hintEntry)
+check("a second alias recall after the flag is set queues no further hint — the ordinary copy toast shows",
+      hintState.toast == "Copied gs")
+hintState.prepareForShow()
+check("no hint is shown a second time on a later open, once already fired once",
+      hintState.toast == "Copied gs")
+
+let (gatedHintSettings, _) = freshTestSettings()
+gatedHintSettings.onboardingComplete = false
+let gatedHintState = AppState(store: EntryStore(), settings: gatedHintSettings)
+gatedHintState.pasteboard = FakePasteboard()
+gatedHintState.prepareForShow()
+gatedHintState.perform(.copyName, on: hintEntry)
+check("no hint is queued before onboarding is complete", !gatedHintSettings.hasShownPromptHint)
+
+let (noFeatureHintSettings, _) = freshTestSettings()
+noFeatureHintSettings.onboardingComplete = true
+noFeatureHintSettings.promptFeaturesEnabled = false
+let noFeatureHintState = AppState(store: EntryStore(), settings: noFeatureHintSettings)
+noFeatureHintState.pasteboard = FakePasteboard()
+noFeatureHintState.prepareForShow()
+noFeatureHintState.perform(.copyName, on: hintEntry)
+check("no hint is queued when prompt features have been turned off",
+      !noFeatureHintSettings.hasShownPromptHint)
 
 // ---------------------------------------------------------------------------
 print("\n" + String(repeating: "-", count: 60))

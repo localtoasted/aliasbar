@@ -699,4 +699,16 @@ enum CorePaths {
         }
         return homeDirectory + "/.aliasbar/suggestion-ignores.json"
     }
+
+    /// Where `OnboardingScanner` looks for a Claude Code install to detect. Same
+    /// shape again: no stored setting, just an environment override so the
+    /// first-run scan can be pointed at a fixture directory in tests instead of a
+    /// real `~/.claude`.
+    static func resolveClaudeDirectory(environmentOverride: String?,
+                                       homeDirectory: String) -> String {
+        if let environmentOverride, !environmentOverride.isEmpty {
+            return (environmentOverride as NSString).expandingTildeInPath
+        }
+        return homeDirectory + "/.claude"
+    }
 }

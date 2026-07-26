@@ -53,6 +53,7 @@ swiftc -target "$(uname -m)-apple-macos13.0" \
     "${PROJECT_DIR}/Sources/SharedDocument.swift" \
     "${PROJECT_DIR}/Sources/SettingsSync.swift" \
     "${PROJECT_DIR}/Sources/SnippetCore.swift" \
+    "${PROJECT_DIR}/Sources/OnboardingScan.swift" \
     "${PROJECT_DIR}/Sources/Store.swift" \
     "${PROJECT_DIR}/Sources/Diag.swift" \
     "${PROJECT_DIR}/Sources/Hotkey.swift" \

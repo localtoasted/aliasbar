@@ -58,6 +58,16 @@ enum AppPaths {
         )
     }
 
+    /// Where onboarding's first-run scan looks for a Claude Code install.
+    /// `ALIASBAR_CLAUDE_DIR` exists purely for testability, matching
+    /// `promptsDirectory` — there is no per-app setting for this either.
+    static var claudeDirectory: String {
+        CorePaths.resolveClaudeDirectory(
+            environmentOverride: ProcessInfo.processInfo.environment["ALIASBAR_CLAUDE_DIR"],
+            homeDirectory: NSHomeDirectory()
+        )
+    }
+
     // Existing call sites (including WriterTests.swift) reach the resolvers through
     // AppPaths. Kept as thin forwarders so nothing outside this file has to change,
     // while CorePaths remains the one place the actual precedence logic lives.

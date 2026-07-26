@@ -265,6 +265,9 @@ final class AppSettings: ObservableObject {
         static let resultLimit = "resultLimit"
         static let onboardingComplete = "onboardingComplete"
         static let hasEverPasted = "hasEverPasted"
+        static let historyUsageRankingEnabled = "historyUsageRankingEnabled"
+        static let promptFeaturesEnabled = "promptFeaturesEnabled"
+        static let hasShownPromptHint = "hasShownPromptHint"
         static let clipboardMonitoring = "clipboardMonitoring"
         static let clipboardPersistence = "clipboardPersistence"
         static let clipboardInSyncFile = "clipboardInSyncFile"
@@ -404,6 +407,31 @@ final class AppSettings: ObservableObject {
     /// rebuild" — only the second deserves a warning banner.
     @Published var hasEverPasted: Bool {
         didSet { defaults.set(hasEverPasted, forKey: Key.hasEverPasted) }
+    }
+
+    /// One of onboarding's three found-treasure checkboxes: whether usage counts
+    /// from shell history are allowed to influence ranking. On by default. Not yet
+    /// consulted anywhere — the same "declare now, wire later" pattern
+    /// `clipboardPersistence` already shipped with; a later slice gates
+    /// `EntryStore`'s ranking behind it.
+    @Published var historyUsageRankingEnabled: Bool {
+        didSet { defaults.set(historyUsageRankingEnabled, forKey: Key.historyUsageRankingEnabled) }
+    }
+    /// The second found-treasure checkbox: whether the AI-native side of the app
+    /// (the prompt dialect, Claude Code delivery) is something this user wants
+    /// surfaced at all. Onboarding pre-checks it only when its scan actually finds
+    /// `~/.claude`; the stored default here is `true` so an upgrade that skips
+    /// onboarding entirely does not silently switch existing prompt features off.
+    /// Like `historyUsageRankingEnabled`, not yet consulted anywhere.
+    @Published var promptFeaturesEnabled: Bool {
+        didSet { defaults.set(promptFeaturesEnabled, forKey: Key.promptFeaturesEnabled) }
+    }
+
+    /// Whether the post-onboarding "want the same for your AI prompts? ⌘I" hint has
+    /// already fired once. Same one-shot shape as `hasEverPasted`: a fact recorded
+    /// the moment it happens, checked before it is ever shown again.
+    @Published var hasShownPromptHint: Bool {
+        didSet { defaults.set(hasShownPromptHint, forKey: Key.hasShownPromptHint) }
     }
 
     // MARK: Clipboard
@@ -556,6 +584,9 @@ final class AppSettings: ObservableObject {
         hotkeyEnabled = store.object(forKey: Key.hotkeyEnabled) as? Bool ?? true
         onboardingComplete = store.object(forKey: Key.onboardingComplete) as? Bool ?? false
         hasEverPasted = store.object(forKey: Key.hasEverPasted) as? Bool ?? false
+        historyUsageRankingEnabled = store.object(forKey: Key.historyUsageRankingEnabled) as? Bool ?? true
+        promptFeaturesEnabled = store.object(forKey: Key.promptFeaturesEnabled) as? Bool ?? true
+        hasShownPromptHint = store.object(forKey: Key.hasShownPromptHint) as? Bool ?? false
         resultLimit = store.object(forKey: Key.resultLimit) as? Int ?? 6
 
         // Off until the user turns it on. Watching the clipboard is this product's
