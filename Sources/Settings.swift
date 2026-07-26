@@ -242,7 +242,7 @@ final class AppSettings: ObservableObject {
         return UserDefaults.standard
     }()
 
-    private let defaults = AppSettings.store
+    private let defaults: UserDefaults
 
     private enum Key {
         static let enterAction = "enterAction"
@@ -268,24 +268,40 @@ final class AppSettings: ObservableObject {
         static let clipboardMonitoring = "clipboardMonitoring"
         static let clipboardPersistence = "clipboardPersistence"
         static let clipboardInSyncFile = "clipboardInSyncFile"
+        static let syncFileURL = "syncFileURL"
     }
 
     // MARK: Behaviour
 
     @Published var enterAction: EnterAction {
-        didSet { defaults.set(enterAction.rawValue, forKey: Key.enterAction) }
+        didSet {
+            defaults.set(enterAction.rawValue, forKey: Key.enterAction)
+            syncCoordinator?.push(.enterAction)
+        }
     }
     @Published var afterAction: AfterAction {
-        didSet { defaults.set(afterAction.rawValue, forKey: Key.afterAction) }
+        didSet {
+            defaults.set(afterAction.rawValue, forKey: Key.afterAction)
+            syncCoordinator?.push(.afterAction)
+        }
     }
     @Published var defaultView: ViewMode {
-        didSet { defaults.set(defaultView.rawValue, forKey: Key.defaultView) }
+        didSet {
+            defaults.set(defaultView.rawValue, forKey: Key.defaultView)
+            syncCoordinator?.push(.defaultView)
+        }
     }
     @Published var searchScope: SearchScope {
-        didSet { defaults.set(searchScope.rawValue, forKey: Key.searchScope) }
+        didSet {
+            defaults.set(searchScope.rawValue, forKey: Key.searchScope)
+            syncCoordinator?.push(.searchScope)
+        }
     }
     @Published var sortOrder: SortOrder {
-        didSet { defaults.set(sortOrder.rawValue, forKey: Key.sortOrder) }
+        didSet {
+            defaults.set(sortOrder.rawValue, forKey: Key.sortOrder)
+            syncCoordinator?.push(.sortOrder)
+        }
     }
 
     // MARK: Appearance
@@ -295,13 +311,19 @@ final class AppSettings: ObservableObject {
     /// what lets someone start from Clay, change the accent, and still have Clay mean
     /// Clay tomorrow.
     @Published var appearance: Appearance {
-        didSet { persist(appearance, forKey: Key.appearance) }
+        didSet {
+            persist(appearance, forKey: Key.appearance)
+            syncCoordinator?.push(.appearance)
+        }
     }
 
     /// Looks the user saved. The built-in three are not in here — they are code, they
     /// cannot be edited, and they cannot be deleted.
     @Published var savedPresets: [Appearance] {
-        didSet { persist(savedPresets, forKey: Key.savedPresets) }
+        didSet {
+            persist(savedPresets, forKey: Key.savedPresets)
+            syncCoordinator?.pushPresets()
+        }
     }
 
     /// When true and the current look defines a second ground, the window follows macOS
@@ -362,7 +384,10 @@ final class AppSettings: ObservableObject {
         didSet { defaults.set(showAliases, forKey: Key.showAliases) }
     }
     @Published var resultLimit: Int {
-        didSet { defaults.set(resultLimit, forKey: Key.resultLimit) }
+        didSet {
+            defaults.set(resultLimit, forKey: Key.resultLimit)
+            syncCoordinator?.push(.resultLimit)
+        }
     }
 
     // MARK: First run
@@ -400,6 +425,67 @@ final class AppSettings: ObservableObject {
         didSet { defaults.set(clipboardInSyncFile, forKey: Key.clipboardInSyncFile) }
     }
 
+    // MARK: Sync
+
+    /// Where settings and presets roam to, if anywhere. `nil` means sync is off.
+    ///
+    /// LOCAL-ONLY (see `SettingsSync` for the full roaming boundary): this value could
+    /// never itself be a roamed setting without contradiction — a shared document
+    /// telling a second machine where sync lives on the *first* machine's disk is
+    /// nonsense, and would make turning sync on somewhere new overwrite the very path
+    /// that got it there.
+    @Published var syncFileURL: URL? {
+        didSet {
+            persistSyncFileURL()
+            // Reassigning the same path (e.g. SwiftUI re-publishing an unchanged
+            // binding) must not tear down and rebuild the coordinator, which would
+            // otherwise force a spurious re-merge on every redundant write.
+            guard syncFileURL?.path != oldValue?.path else { return }
+            syncCoordinator?.stop()
+            syncCoordinator = nil
+            syncError = nil
+            activateSyncCoordinatorIfConfigured()
+        }
+    }
+
+    /// The last problem enabling or reloading sync ran into, if any. Deliberately not
+    /// persisted: a fresh launch gets a fresh chance rather than carrying a stale
+    /// banner from a file that has since been fixed or moved.
+    @Published var syncError: String?
+
+    /// Owns the live read/merge/write/watch wiring for as long as `syncFileURL` is set.
+    /// Not `@Published` — nothing renders from this directly, only from the settings it
+    /// mutates and from `syncError`.
+    private var syncCoordinator: SettingsSyncCoordinator?
+
+    private func persistSyncFileURL() {
+        if let value = syncFileURL, !value.path.isEmpty {
+            defaults.set(value.path, forKey: Key.syncFileURL)
+        } else {
+            defaults.removeObject(forKey: Key.syncFileURL)
+        }
+    }
+
+    /// Builds and starts the coordinator if `syncFileURL` is set. The one path both
+    /// "sync was already on at the previous launch" (called once at the end of `init`,
+    /// since property observers do not fire for values set during initialization) and
+    /// "the user just turned sync on or repointed it" (called from `syncFileURL`'s
+    /// `didSet`) go through, so enabling sync behaves identically either way.
+    private func activateSyncCoordinatorIfConfigured() {
+        guard let url = syncFileURL else { return }
+        let coordinator = SettingsSyncCoordinator(settings: self, url: url)
+        syncCoordinator = coordinator
+        coordinator.enableAndStart()
+    }
+
+    /// Re-reads the sync file right now and applies it, without waiting for the
+    /// debounced filesystem watcher. A no-op when sync is off. Exposed so tests (and a
+    /// manual "check now" affordance) don't have to depend on real filesystem event
+    /// timing to observe an external change landing.
+    func reloadSyncNow() {
+        syncCoordinator?.reloadNow()
+    }
+
     // MARK: Hotkey
 
     @Published var hotkey: HotkeyCombo {
@@ -412,11 +498,18 @@ final class AppSettings: ObservableObject {
         didSet { defaults.set(hotkeyEnabled, forKey: Key.hotkeyEnabled) }
     }
 
-    private init() {
+    /// `defaults` defaults to the shared, environment-aware store (see `AppSettings.store`)
+    /// so `AppSettings.shared` behaves exactly as before. Tests pass an isolated
+    /// `UserDefaults(suiteName:)` instance instead, so each test case gets a fresh
+    /// `AppSettings` unentangled from the process-wide singleton — `.shared` can only
+    /// ever be constructed once, which a sync feature with real merge/seed/reload
+    /// state machines needs to exercise far more than once per test run.
+    init(defaults: UserDefaults = AppSettings.store) {
+        self.defaults = defaults
         // Reads a stored raw value, falling back when the key is absent or holds a
         // value from an older build. Free-standing rather than a method because `self`
         // is not usable until every stored property is initialized.
-        let store = AppSettings.store
+        let store = defaults
         func decode<T: RawRepresentable>(_ key: String, _ fallback: T) -> T where T.RawValue == String {
             guard let raw = store.string(forKey: key), let value = T(rawValue: raw) else {
                 return fallback
@@ -471,12 +564,26 @@ final class AppSettings: ObservableObject {
         clipboardPersistence = store.object(forKey: Key.clipboardPersistence) as? Bool ?? false
         clipboardInSyncFile = store.object(forKey: Key.clipboardInSyncFile) as? Bool ?? false
 
+        if let path = store.string(forKey: Key.syncFileURL), !path.isEmpty {
+            syncFileURL = URL(fileURLWithPath: path)
+        } else {
+            syncFileURL = nil
+        }
+
         if let code = store.object(forKey: Key.hotkeyKeyCode) as? Int,
            let mods = store.object(forKey: Key.hotkeyModifiers) as? Int {
             hotkey = HotkeyCombo(keyCode: UInt32(code), modifiers: UInt32(mods))
         } else {
             hotkey = .fallbackDefault
         }
+
+        // Property observers do not fire for values assigned during `init`, so a
+        // `syncFileURL` carried over from a previous launch would otherwise sit there
+        // inert with no coordinator ever built for it. This is the one call site for
+        // that — `syncFileURL`'s own `didSet` calls the same method for every later
+        // change, so "sync was already on" and "sync was just turned on" both start
+        // the coordinator through identical code.
+        activateSyncCoordinatorIfConfigured()
     }
 
     /// One-time migration: if the user launched with ALIASBAR_ZSHRC set and has no
