@@ -427,7 +427,7 @@ enum PromptStore {
     @discardableResult
     static func delete(name: String, from directory: URL) throws -> String? {
         let targetURL = directory.appendingPathComponent("\(name).md")
-        guard let priorContent = try? String(contentsOf: targetURL, encoding: .utf8) else {
+        guard let priorContent = try? Data(contentsOf: targetURL) else {
             return nil
         }
         let backupPath = try writeBackup(of: priorContent, name: name, in: directory)
