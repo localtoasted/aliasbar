@@ -72,6 +72,11 @@ final class AppState: ObservableObject {
     /// know: `.shell` for a terminal-shaped previous app, `.prompt` for an AI-native
     /// one. Recomputed fresh on every summon by `ContextDetector`; ⇥ flips it by hand
     /// from there, independent of whatever the guess said.
+    ///
+    /// BOARD reads the same field to decide which deck is on screen — the shell keycap
+    /// grid for `.shell`, the prompt card wall for `.prompt` — so opening on "the deck
+    /// matching the guess" and flipping decks with the same ⇥ FIND already uses falls
+    /// out of sharing one field rather than needing a second one kept in sync with it.
     @Published var dialect: Dialect = .shell
     /// The inference copy the title bar shows, or nil when the guess has nothing worth
     /// saying (an unrecognized app). Frozen at the guess made when the popover opened —
@@ -215,10 +220,11 @@ final class AppState: ObservableObject {
         return list[selection]
     }
 
-    /// ⇥ in FIND: swap which dialect is favored, without touching the query. A no-op
-    /// everywhere else — BOARD and MANAGE have nothing to flip.
+    /// ⇥ swaps `dialect`, without touching the query: in FIND that changes which kind
+    /// of shortcut ranking favors, in BOARD it changes which deck is on screen. A no-op
+    /// in MANAGE and in FIND's history mode, neither of which has anything to flip.
     func flipDialect() {
-        guard mode == .find, !historyMode else { return }
+        guard (mode == .find && !historyMode) || mode == .board else { return }
         dialect = dialect == .shell ? .prompt : .shell
         selection = 0
     }
@@ -242,6 +248,18 @@ final class AppState: ObservableObject {
             show(toast: "Copied \(shortcut.name)")
             dismiss(restoringFocus: true)
         }
+    }
+
+    /// BOARD's Enter on the prompt deck: copy the raw body, slots and all, and close —
+    /// the same interim action `performFind` takes on a `.prompt` shortcut. Kept as one
+    /// small function, deliberately, so the paste/slot-fill flow a concurrent slice is
+    /// building can swap it in here with a single edit rather than a hunt through the
+    /// keyboard switch.
+    func performBoardPrompt(_ prompt: Prompt) {
+        PasteboardBroker.write(transient: prompt.body)
+        PromptUsageCounter.recordUse(of: prompt.name, path: AppPaths.promptUsagePath)
+        show(toast: "Copied \(prompt.name)")
+        dismiss(restoringFocus: true)
     }
 
     // MARK: - History
@@ -330,6 +348,30 @@ final class AppState: ObservableObject {
         Ranker.matches(entry, query: query, scope: settings.searchScope)
     }
 
+    /// BOARD's second deck: every stored prompt, always — the direct counterpart to
+    /// `boardEntries`, and for the same reason. `promptCache` is already in the stable
+    /// name order `PromptStore.scan` returns, so no further sort happens here; a bucket
+    /// has no meaning for a prompt (see `Shortcut`'s doc comment on the same point), so
+    /// unlike `boardEntries` this ignores `bucket` entirely rather than narrowing to
+    /// nothing the moment a shell-only bucket is selected.
+    var boardPrompts: [Prompt] { promptCache }
+
+    /// Whether `prompt` matches the live query, for the prompt deck's dim-not-remove
+    /// behaviour — `boardMatches`'s counterpart. Checks name, description, and body; a
+    /// pure membership test with no ranking, since BOARD's grid never reorders.
+    func boardPromptMatches(_ prompt: Prompt) -> Bool {
+        let q = query.lowercased().trimmingCharacters(in: .whitespaces)
+        guard !q.isEmpty else { return true }
+        if prompt.name.lowercased().contains(q) { return true }
+        if let description = prompt.description, description.lowercased().contains(q) { return true }
+        return prompt.body.lowercased().contains(q)
+    }
+
+    /// A prompt card's usage badge, from the same cache FIND's union pool reads.
+    func promptUsage(for name: String) -> Int {
+        promptUsageCache[name]?.count ?? 0
+    }
+
     var bucketEntries: [RankedEntry] {
         guard !query.isEmpty else {
             switch bucket {
@@ -355,11 +397,13 @@ final class AppState: ObservableObject {
         }
     }
 
-    /// The count `move`, `clampSelection`, and the header's live counter share:
-    /// FIND's own shell+prompt union while in FIND, `activeList`'s count everywhere
-    /// else.
+    /// The count `move`, `clampSelection`, and the header's live counter share: FIND's
+    /// own shell+prompt union while in FIND, BOARD's prompt deck while BOARD is showing
+    /// it, `activeList`'s count everywhere else.
     var activeCount: Int {
-        mode == .find ? findResults.count : activeList.count
+        if mode == .find { return findResults.count }
+        if mode == .board && dialect == .prompt { return boardPrompts.count }
+        return activeList.count
     }
 
     /// The selected entry, or nil when the selection no longer points at anything.
@@ -368,8 +412,26 @@ final class AppState: ObservableObject {
     /// into a list that reloads whenever the rc file changes, so after an edit the same
     /// index can name a different alias. Silently substituting `list.first` would mean
     /// Enter acts on something the user never highlighted. Better to do nothing.
+    ///
+    /// Also nil whenever BOARD is showing its prompt deck: `activeList` still yields
+    /// `boardEntries` regardless of `dialect` (nothing else needs it to change), so
+    /// without this guard the same selection index would silently resolve against the
+    /// shell grid sitting underneath a screen that's actually showing prompt cards.
+    /// `selectedPrompt` is that deck's own counterpart.
     var selectedEntry: RankedEntry? {
+        if mode == .board && dialect == .prompt { return nil }
         let list = activeList
+        guard list.indices.contains(selection) else { return nil }
+        return list[selection]
+    }
+
+    /// BOARD's prompt-deck counterpart to `selectedEntry` — nil in every mode/deck
+    /// combination except BOARD-showing-prompts, and nil there too once the selection
+    /// has drifted off the end of `boardPrompts`, for the same "no fallback to first"
+    /// reason `selectedEntry` gives.
+    var selectedPrompt: Prompt? {
+        guard mode == .board, dialect == .prompt else { return nil }
+        let list = boardPrompts
         guard list.indices.contains(selection) else { return nil }
         return list[selection]
     }
@@ -487,9 +549,19 @@ final class AppState: ObservableObject {
             performFind(shortcut, secondary: command)
             return true
 
-        // ⇥ in FIND flips the dialect boost instead of cycling the view — BOARD and
-        // MANAGE keep ⇥ as a view switch below, since neither has a dialect to flip.
-        case kVK_Tab where mode == .find && !historyMode:
+        // BOARD's prompt deck has its own Enter target — a card, not a `RankedEntry` —
+        // so it routes here rather than through the generic case below. Same interim
+        // contract PRE-259/260 established for FIND's prompt rows: no ⌘⏎ distinction
+        // yet, just copy the raw body and close.
+        case kVK_Return where mode == .board && dialect == .prompt:
+            guard let prompt = selectedPrompt else { return true }
+            performBoardPrompt(prompt)
+            return true
+
+        // ⇥ flips the dialect boost in FIND and the deck in BOARD, instead of cycling
+        // the view — MANAGE keeps ⇥ as a view switch below, since it has no dialect to
+        // flip.
+        case kVK_Tab where (mode == .find && !historyMode) || mode == .board:
             flipDialect()
             return true
 
@@ -633,8 +705,16 @@ final class AppState: ObservableObject {
         selection = 0
     }
 
+    /// Columns for whichever deck BOARD is showing. The prompt deck's cards are wider
+    /// than a keycap, so it fits fewer columns at the same density — `WindowLayout`'s
+    /// column math doesn't change, only which width it's handed.
     var boardColumns: Int {
-        WindowLayout.boardColumns(keyWidth: settings.boardDensity.keyWidth)
+        switch dialect {
+        case .shell:
+            return WindowLayout.boardColumns(keyWidth: settings.boardDensity.keyWidth)
+        case .prompt:
+            return WindowLayout.boardColumns(keyWidth: PromptCardMetrics.width(for: settings.boardDensity))
+        }
     }
 
     /// Walks the buckets in place. Every view draws from the bucketed pool, so this
@@ -838,5 +918,38 @@ final class AppState: ObservableObject {
         let work = DispatchWorkItem { [weak self] in self?.toast = nil }
         toastWorkItem = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.2, execute: work)
+    }
+}
+
+// MARK: - Prompt deck support
+
+/// Sizing for BOARD's prompt cards, kept beside `AppState.boardColumns` (the one place
+/// that reads it) rather than in `PromptBoardView.swift` — that file is SwiftUI-only
+/// and isn't part of the state-layer test target, while `AppState.swift` already is.
+enum PromptCardMetrics {
+    /// A card carries a name, a two-line gist, and two small badges — meaningfully
+    /// wider than a keycap, which is exactly why "fewer tiles per screen than keycaps"
+    /// is the expected, honest trade for the prompt deck.
+    static func width(for density: BoardDensity) -> CGFloat {
+        density == .dense ? 148 : 172
+    }
+
+    static func height(for density: BoardDensity) -> CGFloat {
+        density == .dense ? 72 : 86
+    }
+}
+
+/// The description-or-first-line fallback a prompt card (and its BOARD readout) shows.
+/// Pulled out as its own pure function, rather than computed inline in the view, so the
+/// fallback rule is testable at the state layer and the card can never disagree with
+/// itself about what a prompt's gist is.
+enum PromptGist {
+    static func line(for prompt: Prompt) -> String {
+        if let description = prompt.description, !description.isEmpty { return description }
+        for rawLine in prompt.body.components(separatedBy: "\n") {
+            let trimmed = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty { return trimmed }
+        }
+        return "No description"
     }
 }
