@@ -114,6 +114,7 @@ struct OnboardingView: View {
                 .buttonStyle(.plain)
                 .font(.system(size: 11.5))
                 .foregroundStyle(theme.faint)
+                .accessibilityLabel("Set up later")
 
             Spacer()
 
@@ -132,6 +133,7 @@ struct OnboardingView: View {
                 .font(.system(size: 11.5))
                 .foregroundStyle(theme.dim)
                 .opacity(step == Self.stepCount - 1 ? 0 : 1)
+                .accessibilityLabel("Skip this setup step")
 
             Button(action: advance) {
                 Text(step == Self.stepCount - 1 ? "Finish" : "Continue")
@@ -144,6 +146,9 @@ struct OnboardingView: View {
             }
             .liveButton()
             .keyboardShortcut(.defaultAction)
+            .accessibilityLabel(step == Self.stepCount - 1
+                                ? "Finish setup"
+                                : "Continue to next setup step")
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 14)
@@ -183,6 +188,9 @@ struct OnboardingView: View {
                                           lineWidth: recordingHotkey ? 1.5 : 1))
                 }
                 .liveButton(pressDrop: 1)
+                .accessibilityLabel(recordingHotkey
+                                    ? "Stop recording keyboard shortcut"
+                                    : "Change keyboard shortcut, currently \(settings.hotkey.displayString)")
 
                 VStack(alignment: .leading, spacing: 4) {
                     Text(recordingHotkey ? "Recording — press the combination you want."
@@ -304,6 +312,7 @@ struct OnboardingView: View {
                           lineWidth: 1))
         .contentShape(Rectangle())
         .live(action: choose)
+        .accessibilityLabel(title)
     }
 
     /// The in-app explanation that always precedes the macOS Accessibility dialog.
@@ -336,6 +345,9 @@ struct OnboardingView: View {
                         axPrompted = true
                         Typist.requestTrust()
                     }
+                    .accessibilityLabel(axPrompted
+                                        ? "Show the macOS Accessibility permission prompt again"
+                                        : "Allow typing by showing the macOS Accessibility permission prompt")
                     Text("Until it’s granted, Enter copies instead — nothing breaks.")
                         .font(.system(size: 10.5))
                         .foregroundStyle(theme.faint)
@@ -394,6 +406,7 @@ struct OnboardingView: View {
                             .strokeBorder(theme.rule.opacity(0.6), lineWidth: 1))
 
                         ThemedButton("Choose…") { chooseFile() }
+                            .accessibilityLabel("Choose aliases file")
                     }
                 }
             }
@@ -467,6 +480,9 @@ struct OnboardingView: View {
                 ThemedButton(customising ? "Hide the controls" : "Customise") {
                     withAnimation(motion(Motion.standard)) { customising.toggle() }
                 }
+                .accessibilityLabel(customising
+                                    ? "Hide appearance controls"
+                                    : "Customise appearance")
                 Spacer()
             }
 
@@ -549,12 +565,15 @@ struct OnboardingView: View {
                                 .strokeBorder(theme.rule.opacity(0.6), lineWidth: 1))
                             .onSubmit { savePreset() }
                         ThemedButton("Save") { savePreset() }
+                            .accessibilityLabel("Save appearance preset")
                         ThemedButton("Cancel") { savingPreset = false }
+                            .accessibilityLabel("Cancel saving appearance preset")
                     } else {
                         ThemedButton("Save as a preset…") {
                             savingPreset = true
                             newPresetName = suggestedPresetName
                         }
+                        .accessibilityLabel("Save appearance as a preset")
                         Text("Named looks appear alongside the built-in three, here and in Settings.")
                             .font(.system(size: 10.5))
                             .foregroundStyle(theme.faint)
@@ -659,6 +678,7 @@ struct MiniPalettePreview: View {
                           lineWidth: selected ? 2 : 1))
         .contentShape(Rectangle())
         .live(pressDrop: 1, action: choose)
+        .accessibilityLabel("\(appearance.name) appearance")
     }
 
     private func miniRow(chip: String, chipFill: Color, onChip: Color,
@@ -731,6 +751,7 @@ struct AccessibilityRegrantBanner: ViewModifier {
                             NSWorkspace.shared.open(url)
                         }
                     }
+                    .accessibilityLabel("Re-grant Accessibility permission")
                 }
                 .padding(.horizontal, 12)
                 .padding(.vertical, 8)

@@ -2413,6 +2413,60 @@ for mode in ViewMode.allCases {
           Bucket.functions.showsHeaderFilter(in: mode) == (mode != .manage))
 }
 
+// ---------------------------------------------------------------------------
+print("\n28. Onboarding actions have explicit accessibility names")
+
+// The lightweight test binary does not compile SwiftUI views. Inspect the shipped source
+// instead so every button-producing boundary stays explicitly named even when its visible
+// label is only a glyph, shortcut, or composite preview.
+let projectRoot = URL(fileURLWithPath: CommandLine.arguments[0])
+    .deletingLastPathComponent()
+    .deletingLastPathComponent()
+    .deletingLastPathComponent()
+let onboardingSource = read(projectRoot.appendingPathComponent("Sources/Onboarding.swift").path)
+check("onboarding source is readable",
+      onboardingSource != "<unreadable>")
+
+let onboardingAccessibilityBoundaries = [
+    ".accessibilityLabel(\"Set up later\")",
+    ".accessibilityLabel(\"Skip this setup step\")",
+    ".accessibilityLabel(step == Self.stepCount - 1",
+    ".accessibilityLabel(recordingHotkey",
+    ".accessibilityLabel(title)",
+    ".accessibilityLabel(axPrompted",
+    ".accessibilityLabel(\"Choose aliases file\")",
+    ".accessibilityLabel(customising",
+    ".accessibilityLabel(\"Save appearance preset\")",
+    ".accessibilityLabel(\"Cancel saving appearance preset\")",
+    ".accessibilityLabel(\"Save appearance as a preset\")",
+    ".accessibilityLabel(\"\\(appearance.name) appearance\")",
+    ".accessibilityLabel(\"Re-grant Accessibility permission\")",
+]
+for boundary in onboardingAccessibilityBoundaries {
+    check("onboarding AX boundary \(boundary)",
+          onboardingSource.contains(boundary))
+}
+
+for stateName in [
+    "\"Finish setup\"",
+    "\"Continue to next setup step\"",
+    "\"Stop recording keyboard shortcut\"",
+    "\"Change keyboard shortcut, currently \\(settings.hotkey.displayString)\"",
+    "\"Show the macOS Accessibility permission prompt again\"",
+    "\"Allow typing by showing the macOS Accessibility permission prompt\"",
+    "\"Hide appearance controls\"",
+    "\"Customise appearance\"",
+] {
+    check("onboarding dynamic AX name \(stateName)",
+          onboardingSource.contains(stateName))
+}
+
+let onboardingAccessibilityLabelCount =
+    onboardingSource.components(separatedBy: ".accessibilityLabel(").count - 1
+check("all onboarding button boundaries own exactly one accessibility label",
+      onboardingAccessibilityLabelCount == 13,
+      "found \(onboardingAccessibilityLabelCount), expected 13")
+
 
 // ---------------------------------------------------------------------------
 print("\n" + String(repeating: "-", count: 60))
