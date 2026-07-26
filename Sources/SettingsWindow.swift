@@ -190,7 +190,7 @@ struct SettingsView: View {
                 let active = section == item
                 HStack(spacing: 8) {
                     Image(systemName: item.symbol)
-                        .font(.system(size: 11))
+                        .font(.system(size: 11, weight: .semibold))
                         .frame(width: 16)
                         .foregroundStyle(active ? theme.accent : theme.dim)
                     Text(item.label)
@@ -803,7 +803,7 @@ struct NoticeText: View {
     var body: some View {
         HStack(alignment: .top, spacing: 6) {
             Image(systemName: tone == .warning ? "exclamationmark.triangle.fill" : "info.circle")
-                .font(.system(size: 9.5))
+                .font(.system(size: 9.5, weight: .semibold))
                 .foregroundStyle(tone == .warning ? .orange : theme.faint)
                 .padding(.top, 1)
             Text(text)
@@ -822,7 +822,7 @@ struct PermissionNotice: View {
     var body: some View {
         HStack(spacing: 7) {
             Image(systemName: granted ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
-                .font(.system(size: 11))
+                .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(granted ? .green : .orange)
             Text(granted
                  ? "Accessibility granted. AliasBar can type into other apps."
@@ -919,7 +919,7 @@ struct ThemeSwatch: View {
                 Spacer()
                 if selected {
                     Image(systemName: "checkmark.circle.fill")
-                        .font(.system(size: 11))
+                        .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(t.accent)
                 }
             }
