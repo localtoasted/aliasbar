@@ -1798,6 +1798,49 @@ checkExactSpanDelete(
     removes: ["alias doomed=", "payload )"],
     survives: ["alias heredocKeeper='13'"])
 
+// 14. A root alias's heredoc body and terminator belong to the alias statement. Leaving
+// either behind would turn opaque payload into executable shell input.
+checkExactSpanDelete(
+    "heredoc on root alias",
+    statement: """
+    alias doomed=print <<EOF
+    payload from heredoc
+    EOF
+    alias rootHeredocKeeper='14'
+    """,
+    removes: ["alias doomed=", "payload from heredoc", "\nEOF\n"],
+    survives: ["alias rootHeredocKeeper='14'"])
+
+// 15. Every zsh case terminator returns the grammar to pattern position. In particular,
+// the next arm's ) cannot close the surrounding command substitution.
+for (label, terminator) in [
+    ("fallthrough", ";&"),
+    ("continue", ";|"),
+] {
+    checkExactSpanDelete(
+        "case \(label) terminator",
+        statement: """
+        alias doomed=$(case x in; x) print one \(terminator); y) print two ;; esac)
+        alias caseTerminatorKeeper='15'
+        """,
+        removes: ["alias doomed=", "y) print two"],
+        survives: ["alias caseTerminatorKeeper='15'"])
+}
+
+// 16. Quote removal applies across the entire heredoc delimiter word, not only when its
+// first character is quoted.
+checkExactSpanDelete(
+    "mixed-quoted heredoc delimiter",
+    statement: """
+    alias doomed=$(cat <<E'OF'
+    payload )
+    EOF
+    )
+    alias mixedHeredocKeeper='16'
+    """,
+    removes: ["alias doomed=", "payload )"],
+    survives: ["alias mixedHeredocKeeper='16'"])
+
 
 // ===========================================================================
 // HISTORY

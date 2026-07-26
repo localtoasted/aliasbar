@@ -975,28 +975,51 @@ enum AliasWriter {
 
                 var delimiter = ""
                 var quote: Character?
-                if line[cursor] == "'" || line[cursor] == "\"" {
-                    quote = line[cursor]
-                    cursor = line.index(after: cursor)
-                }
+                var sawDelimiterWord = false
                 while cursor < line.endIndex {
                     let ch = line[cursor]
-                    if let quote {
-                        if ch == quote {
+                    if let activeQuote = quote {
+                        if ch == activeQuote {
+                            sawDelimiterWord = true
+                            quote = nil
                             cursor = line.index(after: cursor)
-                            break
+                            continue
+                        } else if activeQuote == "\"", ch == "\\" {
+                            let next = line.index(after: cursor)
+                            guard next < line.endIndex else { break }
+                            if line[next] == "$" || line[next] == "`" || line[next] == "\""
+                                || line[next] == "\\" {
+                                delimiter.append(line[next])
+                            } else {
+                                delimiter.append(ch)
+                                delimiter.append(line[next])
+                            }
+                            sawDelimiterWord = true
+                            cursor = line.index(after: next)
+                            continue
+                        } else {
+                            delimiter.append(ch)
+                            sawDelimiterWord = true
+                            cursor = line.index(after: cursor)
+                            continue
                         }
                     } else if ch == " " || ch == "\t" || ch == ";" || ch == "|" || ch == "&" {
                         break
+                    } else if ch == "'" || ch == "\"" {
+                        quote = ch
+                        sawDelimiterWord = true
+                        cursor = line.index(after: cursor)
+                        continue
                     } else if ch == "\\" {
                         let next = line.index(after: cursor)
                         guard next < line.endIndex else { break }
                         cursor = next
                     }
                     delimiter.append(line[cursor])
+                    sawDelimiterWord = true
                     cursor = line.index(after: cursor)
                 }
-                guard !delimiter.isEmpty else { return nil }
+                guard quote == nil, sawDelimiterWord else { return nil }
                 return (Heredoc(delimiter: delimiter, stripsTabs: stripsTabs), cursor)
             }
 
@@ -1042,7 +1065,8 @@ enum AliasWriter {
                     state.frames[frameIndex].atWordStart = true
                     state.frames[frameIndex].atCommandStart = true
                 }
-                state.continues = true
+                state.continues =
+                    state.frames.count > 1 || state.frames[frameIndex].activeHeredoc != nil
                 return state
             }
 
@@ -1095,6 +1119,13 @@ enum AliasWriter {
                         // physical line, and its substitution remains open.
                         endedInComment = true
                         break
+                    } else if state.frames[frameIndex].kind.allowsComments,
+                              ch == "<", character(after: index) == "<",
+                              let parsed = heredoc(after: advance(index, by: 2)) {
+                        finishToken(in: frameIndex)
+                        state.frames[frameIndex].pendingHeredocs.append(parsed.0)
+                        index = parsed.1
+                        continue
                     } else if ch == " " || ch == "\t" {
                         finishToken(in: frameIndex)
                         state.frames[frameIndex].atWordStart = true
@@ -1145,19 +1176,15 @@ enum AliasWriter {
                                     state.frames.removeLast()
                                 }
                             }
-                        } else if ch == "<", character(after: index) == "<",
-                                  let parsed = heredoc(after: advance(index, by: 2)) {
-                            finishToken(in: frameIndex)
-                            state.frames[frameIndex].pendingHeredocs.append(parsed.0)
-                            index = parsed.1
-                            continue
                         } else if ch == ";" || ch == "|" || ch == "&" {
                             finishToken(in: frameIndex)
                             // Separators inside a substitution separate its commands,
                             // not the outer alias statement.
                             state.frames[frameIndex].atWordStart = true
                             state.frames[frameIndex].atCommandStart = true
-                            if ch == ";", character(after: index) == ";",
+                            if ch == ";",
+                               let terminator = character(after: index),
+                               terminator == ";" || terminator == "&" || terminator == "|",
                                state.frames[frameIndex].cases.last == .body {
                                 state.frames[frameIndex].cases[
                                     state.frames[frameIndex].cases.count - 1] = .pattern
@@ -1195,7 +1222,11 @@ enum AliasWriter {
             // Any open nesting frame or quote carries the statement across a newline.
             // A comment suppresses a trailing backslash, exactly as zsh does.
             let rootQuoteOpen = state.frames.first?.quote != .unquoted
-            state.continues = state.frames.count > 1 || rootQuoteOpen || (!endedInComment && trailingEscape)
+            let heredocOpen = state.frames.contains {
+                $0.activeHeredoc != nil || !$0.pendingHeredocs.isEmpty
+            }
+            state.continues = state.frames.count > 1 || rootQuoteOpen || heredocOpen
+                || (!endedInComment && trailingEscape)
             return state
         }
 
