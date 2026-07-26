@@ -351,6 +351,11 @@ final class AppState: ObservableObject {
         case .mostUsed:
             return entries.filter { $0.uses > 0 }.sorted { $0.uses > $1.uses }
         case .neverRun:
+            // Mirrors `EntryStore.neverRun`'s own guard: `entries` already carries
+            // zeroed `uses` when history usage ranking is off (`EntryStore.reload`),
+            // and without this a plain `uses == 0` filter would call every entry a
+            // graveyard resident instead of admitting there's no data to judge by.
+            guard settings.historyUsageRankingEnabled else { return [] }
             return entries.filter { $0.uses == 0 }
         case .conflicts:
             let names = Set(store.conflicts.map(\.name))
@@ -434,7 +439,13 @@ final class AppState: ObservableObject {
     /// ⇥ swaps `dialect`, without touching the query: in FIND that changes which kind
     /// of shortcut ranking favors, in BOARD it changes which deck is on screen. A no-op
     /// in MANAGE and in FIND's history mode, neither of which has anything to flip.
+    ///
+    /// Also a no-op — falling back to plain shell behavior — while
+    /// `promptFeaturesEnabled` is off: with nothing prompt-shaped anywhere to flip to,
+    /// `dialect` never leaves `.shell`, which is what actually removes the prompt
+    /// dialect from FIND/BOARD rather than merely hiding an already-flipped state.
     func flipDialect() {
+        guard settings.promptFeaturesEnabled else { return }
         guard (mode == .find && findSource == .aliases) || mode == .board else { return }
         dialect = dialect == .shell ? .prompt : .shell
         selection = 0
@@ -445,7 +456,11 @@ final class AppState: ObservableObject {
     /// FIND's ⇥ flip above. A dedicated function rather than widening `flipDialect`'s
     /// own guard: MANAGE has no `historyMode` to worry about, and keeping the two
     /// call sites separate means each view's flip can be read on its own.
+    ///
+    /// Same `promptFeaturesEnabled` no-op as `flipDialect` — MANAGE's prompt sidebar
+    /// (Library/Delivery/Health/Inbox) is unreachable while it's off.
     func flipManageDialect() {
+        guard settings.promptFeaturesEnabled else { return }
         guard mode == .manage else { return }
         dialect = dialect == .shell ? .prompt : .shell
         selection = 0
@@ -776,6 +791,14 @@ final class AppState: ObservableObject {
     /// store. Called at `prepareForShow` and again after anything that could change
     /// membership: dismissing a suggestion or saving a new alias.
     private func refreshSuggestions() {
+        // Suggested is mined from raw shell history same as `EntryStore`'s usage
+        // counts are — a different signal (whole commands, not per-name counts) but
+        // the same "history usage ranking" toggle governs both, so disabling it empties
+        // this bucket exactly the way it empties the graveyard.
+        guard settings.historyUsageRankingEnabled else {
+            suggestionCache = []
+            return
+        }
         suggestionCache = SuggestionEngine.suggest(
             history: AppPaths.historyPath,
             existingEntries: store.ranked.map(\.entry),
@@ -1105,7 +1128,7 @@ final class AppState: ObservableObject {
             errorMessage = nil
             show(toast: "Approved \(result.name)")
             finishInboxFileIfDone(file)
-            refreshPromptCaches()
+            loadPromptCache()
         } catch let error as PromptInbox.ApproveError {
             errorMessage = error.errorDescription
         } catch {
@@ -1174,11 +1197,19 @@ final class AppState: ObservableObject {
         inboxReviews.removeValue(forKey: file)
     }
 
-    /// Re-reads the prompt library and its usage after a write that happened
-    /// outside `commitPromptEditor` (an inbox approval), the same reload
-    /// `commitPromptEditor` already does after its own save — so FIND/BOARD/MANAGE
-    /// see an inbox-approved prompt without waiting for the next summon.
-    private func refreshPromptCaches() {
+    /// The one place `promptCache`/`promptUsageCache` are ever loaded — at summon
+    /// (`prepareForShow`), after an inbox approval, and after a Composer prompt save.
+    /// `promptFeaturesEnabled` off means an empty pool rather than a skipped scan: the
+    /// requirement is "the prompt pool is empty" everywhere it's read (`findPool`,
+    /// `promptShortcuts`, `promptLibraryEmpty`, the Inbox badge), and emptying the
+    /// cache here is what makes every one of those true without a conditional at each
+    /// of their call sites.
+    private func loadPromptCache() {
+        guard settings.promptFeaturesEnabled else {
+            promptCache = []
+            promptUsageCache = [:]
+            return
+        }
         let promptsDirectory = URL(fileURLWithPath: AppPaths.promptsDirectory)
         promptCache = PromptStore.scan(directory: promptsDirectory).prompts
         promptUsageCache = PromptUsageCounter.all(path: AppPaths.promptUsagePath)
@@ -1538,13 +1569,21 @@ final class AppState: ObservableObject {
         // The one place dialect is ever guessed: from the app that was frontmost right
         // before this summon, which `PreviousApp.remember()` already captured on the
         // way in. No new tracking, and no look at anything but that app's bundle ID.
+        //
+        // While `promptFeaturesEnabled` is off, the guess never gets a chance to name
+        // `.prompt` at all — `dialect` starts (and, per `flipDialect`/
+        // `flipManageDialect`'s own guards, stays) `.shell` for the whole summon, and
+        // the chip goes quiet with it rather than advertise a flip that goes nowhere.
         let guess = ContextDetector.guess(for: PreviousApp.stored)
-        dialect = guess.dialect ?? .shell
-        contextChip = guess.chip
+        if settings.promptFeaturesEnabled {
+            dialect = guess.dialect ?? .shell
+            contextChip = guess.chip
+        } else {
+            dialect = .shell
+            contextChip = nil
+        }
 
-        let promptsDirectory = URL(fileURLWithPath: AppPaths.promptsDirectory)
-        promptCache = PromptStore.scan(directory: promptsDirectory).prompts
-        promptUsageCache = PromptUsageCounter.all(path: AppPaths.promptUsagePath)
+        loadPromptCache()
         refreshSuggestions()
         refreshSnippetCache()
         refreshInbox()
@@ -2039,6 +2078,9 @@ final class AppState: ObservableObject {
     /// raw ⌘⏎ copy is: this text is meant for pasting into a chat window, never for
     /// pasting into whatever app was frontmost.
     func copyAuditPrompt(ending: AuditPrompt.Ending) {
+        // Inert while the prompt side of the app is switched off — nothing to audit,
+        // and no inbox for a `.localAgent` ending to write into.
+        guard settings.promptFeaturesEnabled else { return }
         let text = AuditPrompt.generate(library: promptCache, ending: ending)
         PasteboardBroker.write(transient: text, to: pasteboard)
         show(toast: "Audit prompt copied — paste it into ChatGPT/Claude")
@@ -2386,9 +2428,7 @@ final class AppState: ObservableObject {
         // Refreshed immediately so FIND/BOARD/MANAGE see the change without waiting
         // for the next summon — the same reasoning `commitAliasEditor` reloads
         // `store` right after a successful write.
-        let promptsDirectory = URL(fileURLWithPath: AppPaths.promptsDirectory)
-        promptCache = PromptStore.scan(directory: promptsDirectory).prompts
-        promptUsageCache = PromptUsageCounter.all(path: AppPaths.promptUsagePath)
+        loadPromptCache()
     }
 
     func delete(_ entry: ShellEntry) {

@@ -8792,6 +8792,208 @@ do {
 }
 
 // ---------------------------------------------------------------------------
+print("\n42. Final polish: onboarding flag wiring + ranking dedup")
+
+// --- historyUsageRankingEnabled: gates ranking, mostUsed, neverRun, Suggested --
+
+/// `EntryStore` and `AppState` sharing one `AppSettings` instance is the point:
+/// `EntryStore(settings:)` defaults to `.shared` (so every pre-existing `EntryStore()`
+/// call site in this file and in the app keeps working unchanged), but a test that
+/// actually wants to flip `historyUsageRankingEnabled` has to hand the *same* instance
+/// to both, or the store would gate against a different settings object than the one
+/// the test is changing.
+func freshHistoryGateFixture(historyUsageRankingEnabled: Bool)
+    -> (state: AppState, settings: AppSettings, store: EntryStore) {
+    caseIndex += 1
+    let base = "\(sandbox)/history-gate-case\(caseIndex)"
+    try! FileManager.default.createDirectory(atPath: base, withIntermediateDirectories: true)
+
+    let rcPath = "\(base)/zshrc"
+    try! """
+    # >>> aliasbar managed block >>>
+    # Edited by AliasBar. Anything outside these markers is never touched.
+    alias aa='echo aa'
+    alias gp='echo gp'
+    alias zz='echo zz'
+    # <<< aliasbar managed block <<<
+    """.write(toFile: rcPath, atomically: true, encoding: .utf8)
+
+    // zz typed 10x, gp typed 1x, aa never typed; "docker compose up -d" repeated
+    // 5x/4-words qualifies Suggested's own history-mining threshold independently.
+    let historyPath = "\(base)/history"
+    try! (String(repeating: "zz\n", count: 10)
+          + "gp\n"
+          + String(repeating: "docker compose up -d\n", count: 5))
+        .write(toFile: historyPath, atomically: true, encoding: .utf8)
+
+    setenv("ALIASBAR_ZSHRC", rcPath, 1)
+    setenv("ALIASBAR_HISTORY", historyPath, 1)
+    setenv("ALIASBAR_SUGGESTION_IGNORES", "\(base)/suggestion-ignores.json", 1)
+
+    let (settings, _) = freshTestSettings()
+    settings.historyUsageRankingEnabled = historyUsageRankingEnabled
+    let store = EntryStore(settings: settings)
+    let state = AppState(store: store, settings: settings)
+    state.pasteboard = FakePasteboard()
+    return (state, settings, store)
+}
+
+do {
+    // Defaults on: proven against the exact same expectations the pre-flag
+    // behavior always had.
+    let (state, _, store) = freshHistoryGateFixture(historyUsageRankingEnabled: true)
+    state.prepareForShow()
+
+    check("usage counts reach RankedEntry when the setting is on",
+          store.ranked.first { $0.name == "zz" }?.uses == 10
+              && store.ranked.first { $0.name == "gp" }?.uses == 1
+              && store.ranked.first { $0.name == "aa" }?.uses == 0)
+    check("mostUsed lists zz then gp, most-used first, when the setting is on",
+          store.mostUsed.map(\.name) == ["zz", "gp"])
+    check("neverRun lists exactly aa when the setting is on",
+          store.neverRun.map(\.name) == ["aa"])
+
+    state.mode = .find
+    state.bucket = .all
+    state.query = ""
+    check("FIND's rest order favors the most-used alias when the setting is on",
+          state.results.first?.name == "zz")
+
+    state.bucket = .neverRun
+    check("FIND's neverRun bucket lists exactly aa when the setting is on",
+          state.results.map(\.name) == ["aa"])
+
+    state.mode = .manage
+    state.dialect = .shell
+    state.bucket = .suggested
+    check("Suggested mines a 5+ times, 2+ word repeat from history when the setting is on",
+          state.suggestedEntries.contains { $0.command == "docker compose up -d" })
+}
+
+do {
+    // Off: usage counts must not influence ranking or be displayed anywhere.
+    let (state, _, store) = freshHistoryGateFixture(historyUsageRankingEnabled: false)
+    state.prepareForShow()
+
+    check("every RankedEntry carries a zeroed use count when the setting is off",
+          store.ranked.allSatisfy { $0.uses == 0 })
+    check("mostUsed is empty when the setting is off — real usage exists but isn't shown",
+          store.mostUsed.isEmpty)
+    check("neverRun is empty, not every entry, when the setting is off — no data to judge by, not a false graveyard",
+          store.neverRun.isEmpty)
+
+    state.mode = .find
+    state.bucket = .all
+    state.query = ""
+    check("FIND's rest order falls back to alphabetical, not real usage, when the setting is off",
+          state.results.first?.name == "aa")
+
+    state.bucket = .neverRun
+    check("FIND's neverRun bucket is empty, not every entry, when the setting is off",
+          state.results.isEmpty)
+
+    state.mode = .manage
+    state.dialect = .shell
+    state.bucket = .suggested
+    check("Suggested is empty when the setting is off, even though history still repeats 5+ times",
+          state.suggestedEntries.isEmpty)
+}
+
+do {
+    // Toggling back on takes effect on the very next reload, no relaunch needed.
+    let (state, settings, store) = freshHistoryGateFixture(historyUsageRankingEnabled: false)
+    state.prepareForShow()
+    check("usage starts zeroed with the setting off", store.ranked.allSatisfy { $0.uses == 0 })
+
+    settings.historyUsageRankingEnabled = true
+    store.reload()
+    check("re-enabling and reloading brings real usage counts straight back",
+          store.ranked.first { $0.name == "zz" }?.uses == 10)
+}
+
+// --- promptFeaturesEnabled: no prompt dialect, empty pool, ⌘I inert -----------
+
+do {
+    let (state, promptsDir, _, fake) = freshInboxFixture()
+    writeRawPromptFile(promptFixture(["---", "schema: 1", "description: Ship it", "---", "Ship the release."]),
+                        name: "shipit", in: promptsDir)
+    state.prepareForShow()
+
+    check("with the feature on, the prompt still shows up in FIND's union pool",
+          state.findResults.contains { $0.name == "shipit" && $0.kind == .prompt })
+
+    // Simulate having already been in the prompt dialect a moment ago, so the
+    // guard below is proven to actively reset it rather than merely start there.
+    state.dialect = .prompt
+    state.mode = .find
+
+    state.settings.promptFeaturesEnabled = false
+    state.prepareForShow()
+
+    check("dialect is forced back to .shell on summon once the feature is off, even if it was .prompt a moment ago",
+          state.dialect == .shell)
+    check("the prompt pool is empty once the feature is off, even though the file is still on disk",
+          !state.findResults.contains { $0.kind == .prompt })
+    check("contextChip goes quiet once the feature is off",
+          state.contextChip == nil)
+
+    state.mode = .find
+    state.dialect = .shell
+    state.flipDialect()
+    check("⇥ no-ops back to shell behavior in FIND once the feature is off",
+          state.dialect == .shell)
+
+    state.mode = .manage
+    state.flipManageDialect()
+    check("⇥ no-ops back to shell behavior in MANAGE once the feature is off",
+          state.dialect == .shell)
+
+    state.copyAuditPrompt(ending: .web)
+    check("⌘I is inert once the feature is off — nothing reaches the pasteboard",
+          fake.string(forType: .string) == nil)
+    check("⌘I is inert once the feature is off — no toast either",
+          state.toast == nil)
+
+    // Turning it back on restores the pool without waiting for a relaunch.
+    state.settings.promptFeaturesEnabled = true
+    state.prepareForShow()
+    check("re-enabling the feature and re-summoning brings the prompt pool straight back",
+          state.findResults.contains { $0.name == "shipit" && $0.kind == .prompt })
+}
+
+// --- ShortcutRanker shares Ranker's scoring ladder, one implementation --------
+
+do {
+    check("Ranker's shared field-score ladder still returns the historical exact-match value",
+          Ranker.shellFieldScore(name: "gs", comment: "", command: "", query: "gs", scope: .everything) == 500_000)
+    check("the shared ladder's prefix tier matches the historical value",
+          Ranker.shellFieldScore(name: "gstash", comment: "", command: "", query: "gs", scope: .everything) == 400_000)
+    check("the shared ladder's substring tier matches the historical value",
+          Ranker.shellFieldScore(name: "xgsx", comment: "", command: "", query: "gs", scope: .everything) == 300_000)
+    check("the shared ladder's comment tier matches the historical value",
+          Ranker.shellFieldScore(name: "x", comment: "gs here", command: "", query: "gs", scope: .everything) == 200_000)
+    check("the shared ladder's command tier matches the historical value",
+          Ranker.shellFieldScore(name: "x", comment: "", command: "gs here", query: "gs", scope: .everything) == 100_000)
+    check("scope .name still blocks the comment/command tiers",
+          Ranker.shellFieldScore(name: "x", comment: "gs here", command: "gs", query: "gs", scope: .name) == nil)
+    check("scope .nameComment still blocks only the command tier",
+          Ranker.shellFieldScore(name: "x", comment: "gs here", command: "gs", query: "gs", scope: .nameComment) == 200_000)
+}
+
+do {
+    // End-to-end through `ShortcutRanker.rank` itself (not just the shared function
+    // in isolation), proving the dedup didn't change what a caller actually sees.
+    let exactEntry = ShellEntry(kind: .alias, name: "gs", command: "git status",
+                                comment: nil, sourceFile: "/tmp/dedup.zshrc", line: 1, managed: true)
+    let prefixEntry = ShellEntry(kind: .alias, name: "gstash", command: "git stash",
+                                 comment: nil, sourceFile: "/tmp/dedup.zshrc", line: 2, managed: true)
+    let dedupOrder = ShortcutRanker.rank([Shortcut(entry: prefixEntry), Shortcut(entry: exactEntry)],
+                                        query: "gs", scope: .everything, dialect: .shell)
+    check("ShortcutRanker.rank, now backed by Ranker.shellFieldScore, still ranks an exact name match ahead of a prefix match",
+          dedupOrder.map(\.name) == ["gs", "gstash"])
+}
+
+// ---------------------------------------------------------------------------
 print("\n" + String(repeating: "-", count: 60))
 print("\(passes) passed, \(failures) failed")
 exit(failures == 0 ? 0 : 1)

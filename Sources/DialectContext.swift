@@ -105,28 +105,18 @@ enum ContextDetector {
 /// steps aside and lets relevance decide on its own, because by then the user's own
 /// keystrokes know more than the frontmost app did.
 enum ShortcutRanker {
-    /// Mirrors `Ranker`'s private tiering exactly, over `Shortcut`'s shell-shaped
-    /// fields instead of `ShellEntry`'s. Duplicated rather than shared because
-    /// `Ranker.score` is private to `Model.swift` and reads a different type; keeping
-    /// the two numeric ladders identical (500_000 down to 100_000) is what lets a
-    /// mixed shell+prompt list sort as one ladder instead of two that happen to
-    /// interleave.
+    /// `Shortcut`'s shell-shaped fields, scored through `Ranker.shellFieldScore` —
+    /// the exact same numeric ladder (500_000 down to 100_000) `Ranker` itself uses
+    /// for `ShellEntry`, which is what lets a mixed shell+prompt list sort as one
+    /// ladder instead of two that happen to interleave. One scoring implementation,
+    /// shared rather than duplicated: this used to keep its own copy of the same five
+    /// numbers, which was one edit away from silently drifting out of sync with
+    /// `Ranker`'s.
     private static func shellTier(_ shortcut: Shortcut, query: String, scope: SearchScope) -> Int? {
-        let name = shortcut.name.lowercased()
-        let comment = (shortcut.comment ?? "").lowercased()
-        let command = shortcut.body.lowercased()
-
-        if name == query { return 500_000 }
-        if name.hasPrefix(query) { return 400_000 }
-        if name.contains(query) { return 300_000 }
-
-        if scope == .name { return nil }
-        if comment.contains(query) { return 200_000 }
-
-        if scope == .nameComment { return nil }
-        if command.contains(query) { return 100_000 }
-
-        return nil
+        Ranker.shellFieldScore(name: shortcut.name.lowercased(),
+                              comment: (shortcut.comment ?? "").lowercased(),
+                              command: shortcut.body.lowercased(),
+                              query: query, scope: scope)
     }
 
     /// Prompts have no `scope` setting of their own — that control is about which

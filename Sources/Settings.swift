@@ -437,8 +437,10 @@ final class AppSettings: ObservableObject {
 
     // MARK: Clipboard
 
-    /// Whether `ClipboardMonitor` polls the pasteboard at all. On by default — off
-    /// means AliasBar never reads the clipboard outside of its own deliveries.
+    /// Whether `ClipboardMonitor` polls the pasteboard at all. Off by default — this
+    /// is the product's trust wedge, and starting the read silently on launch would
+    /// undercut it. On means AliasBar reads the clipboard; off means it never does,
+    /// outside of its own deliveries.
     @Published var clipboardMonitoring: Bool {
         didSet { defaults.set(clipboardMonitoring, forKey: Key.clipboardMonitoring) }
     }

@@ -382,11 +382,19 @@ struct SuggestedManageView: View {
         return ScrollViewReader { proxy in
             ScrollView {
                 if results.isEmpty {
+                    // `state.suggestedEntries` is unconditionally empty while
+                    // `historyUsageRankingEnabled` is off (`refreshSuggestions`'s own
+                    // guard), so the reason worth stating changes too — this isn't
+                    // "nothing repeats yet", it's "nothing is being mined at all".
                     EmptyStateView(symbol: "sparkles",
-                                   title: state.query.isEmpty
-                                       ? "Nothing repeats often enough yet"
-                                       : "Nothing matches \"\(state.query)\"",
-                                   hint: "A command has to show up 5+ times, at 2+ words, to qualify.")
+                                   title: !settings.historyUsageRankingEnabled
+                                       ? "History-based suggestions are off"
+                                       : (state.query.isEmpty
+                                           ? "Nothing repeats often enough yet"
+                                           : "Nothing matches \"\(state.query)\""),
+                                   hint: !settings.historyUsageRankingEnabled
+                                       ? "Turn on history usage ranking in Settings to mine your shell history for repeats."
+                                       : "A command has to show up 5+ times, at 2+ words, to qualify.")
                         .padding(.top, 40)
                 } else {
                     LazyVStack(spacing: 1) {

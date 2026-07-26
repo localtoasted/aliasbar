@@ -769,7 +769,7 @@ struct SettingsView: View {
             }
 
             SettingsGroup("Privacy") {
-                NoticeText("AliasBar reads two files on your disk: your shell config, and your shell history for usage counts. Neither is ever sent anywhere. Its only network access is checking for and downloading app updates — automatic checks are on unless you switch them off, downloads only when you accept an update.",
+                NoticeText("AliasBar reads your shell config and shell history for usage counts, and keeps its own files under ~/.aliasbar (prompts, usage, and — only if you turn on the toggles above — clipboard history and snippets). It checks whether ~/.claude exists, and writes there only when you install a prompt as a command. Nothing here is ever sent anywhere. Its only network access is checking for and downloading app updates — automatic checks are on unless you switch them off, downloads only when you accept an update.",
                            tone: .info)
             }
 
