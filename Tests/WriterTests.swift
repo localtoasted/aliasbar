@@ -2905,6 +2905,306 @@ for forbiddenAPI in [
 
 
 // ---------------------------------------------------------------------------
+print("\n31. SharedDocumentStore")
+
+func sharedStoreDir() -> String {
+    caseIndex += 1
+    let dir = "\(sandbox)/shared-store-case\(caseIndex)"
+    try! FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+    return dir
+}
+
+struct DummyPreset: SharedRecordConvertible, Equatable {
+    var name: String
+    var body: String
+}
+
+// -- SHA-256, cross-checked against the system implementation ---------------
+func systemSHA256(_ data: Data) -> String? {
+    let task = Process()
+    task.executableURL = URL(fileURLWithPath: "/usr/bin/shasum")
+    task.arguments = ["-a", "256"]
+    let inPipe = Pipe()
+    let outPipe = Pipe()
+    task.standardInput = inPipe
+    task.standardOutput = outPipe
+    task.standardError = Pipe()
+    guard (try? task.run()) != nil else { return nil }
+    inPipe.fileHandleForWriting.write(data)
+    inPipe.fileHandleForWriting.closeFile()
+    let out = outPipe.fileHandleForReading.readDataToEndOfFile()
+    task.waitUntilExit()
+    guard let text = String(data: out, encoding: .utf8) else { return nil }
+    return text.split(separator: " ").first.map(String.init)
+}
+
+for input in ["", "abc", "The quick brown fox jumps over the lazy dog",
+              String(repeating: "x", count: 5000)] {
+    let data = Data(input.utf8)
+    let ours = SHA256Digest.hexString(data)
+    if let system = systemSHA256(data) {
+        check("SHA-256 matches system shasum (\(data.count) bytes)", ours == system,
+              "ours=\(ours) system=\(system)")
+    } else {
+        check("shasum available to cross-check", false, "could not run /usr/bin/shasum")
+    }
+}
+check("known vector: SHA-256(\"\")",
+      SHA256Digest.hexString(Data())
+          == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+check("known vector: SHA-256(\"abc\")",
+      SHA256Digest.hexString(Data("abc".utf8))
+          == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+
+// -- Round trip and unknown-field passthrough --------------------------------
+let t0 = Date(timeIntervalSince1970: 1_700_000_000)
+var doc = SharedDocument()
+doc.settings["theme"] = SettingRecord(value: .string("dark"), modifiedAt: t0)
+doc.settings["fontSize"] = SettingRecord(value: .number(13), modifiedAt: t0)
+doc.settings["betaFeatures"] = SettingRecord(value: .bool(true), modifiedAt: t0)
+let presetPayload = try! JSONEncoder.aliasBarDocument.encode(DummyPreset(name: "p1", body: "echo hi"))
+doc.records["presets"] = [SyncedRecord(id: "p1", modifiedAt: t0, deleted: false, payload: presetPayload)]
+
+let docEncoded = try! JSONEncoder.aliasBarDocument.encode(doc)
+let docDecoded = try! JSONDecoder.aliasBarDocument.decode(SharedDocument.self, from: docEncoded)
+check("round trip preserves settings and records", docDecoded == doc)
+
+let unknownFieldJSON = """
+{"schema":1,"settings":{},"records":{},"futureFeature":{"nested":[1,2,"three",null,true]}}
+"""
+let decoded1 = try! JSONDecoder.aliasBarDocument.decode(SharedDocument.self,
+                                                         from: Data(unknownFieldJSON.utf8))
+check("unknown top-level field is captured", decoded1.unknownFields["futureFeature"] != nil)
+let reencoded = try! JSONEncoder.aliasBarDocument.encode(decoded1)
+let decoded2 = try! JSONDecoder.aliasBarDocument.decode(SharedDocument.self, from: reencoded)
+check("unknown field survives a decode-encode-decode cycle", decoded2 == decoded1)
+
+// -- Store basics -------------------------------------------------------------
+let dir1 = sharedStoreDir()
+let docURL1 = URL(fileURLWithPath: "\(dir1)/settings.json")
+let store1 = SharedDocumentStore(url: docURL1)
+
+switch store1.read() {
+case .success(let d): check("missing file reads as a fresh empty document", d == SharedDocument())
+case .failure: check("missing file reads as a fresh empty document", false)
+}
+
+let afterUpsert = try! store1.upsert(DummyPreset(name: "p1", body: "ls -la"),
+                                     id: "p1", in: "presets", modifiedAt: t0)
+check("upsert returns the merged document", afterUpsert.records["presets"]?.count == 1)
+switch store1.read() {
+case .success(let d):
+    check("upsert persisted to disk", d.records["presets"]?.first?.id == "p1")
+case .failure:
+    check("upsert persisted to disk", false)
+}
+
+_ = try! store1.setSetting(.string("dark"), forKey: "theme", modifiedAt: t0)
+switch store1.read() {
+case .success(let d): check("setting persisted", d.settings["theme"]?.value == .string("dark"))
+case .failure: check("setting persisted", false)
+}
+
+// -- Tombstones and last-writer-wins -----------------------------------------
+let tA = Date(timeIntervalSince1970: 1_700_000_100)
+let tB = tA.addingTimeInterval(10)
+
+let dir2 = sharedStoreDir()
+let store2 = SharedDocumentStore(url: URL(fileURLWithPath: "\(dir2)/doc.json"))
+_ = try! store2.upsert(DummyPreset(name: "a", body: "one"), id: "a", in: "presets", modifiedAt: tA)
+let afterDelete = try! store2.tombstone(id: "a", in: "presets", modifiedAt: tB)
+check("a newer tombstone beats an older live record",
+      afterDelete.records["presets"]?.first(where: { $0.id == "a" })?.deleted == true)
+
+// An older tombstone must not undo a newer live write.
+let dir3 = sharedStoreDir()
+let store3 = SharedDocumentStore(url: URL(fileURLWithPath: "\(dir3)/doc.json"))
+_ = try! store3.tombstone(id: "b", in: "presets", modifiedAt: tA)
+let afterRevive = try! store3.upsert(DummyPreset(name: "b", body: "two"), id: "b", in: "presets", modifiedAt: tB)
+check("a newer live write beats an older tombstone",
+      afterRevive.records["presets"]?.first(where: { $0.id == "b" })?.deleted == false)
+
+// -- Two-writer race: exact-timestamp tie between a tombstone and a live edit ---
+let dir4 = sharedStoreDir()
+let racePath4 = "\(dir4)/doc.json"
+let store4 = SharedDocumentStore(url: URL(fileURLWithPath: racePath4))
+_ = try! store4.upsert(DummyPreset(name: "c", body: "three"), id: "c", in: "presets", modifiedAt: tA)
+SharedDocumentStore.testRaceHook = {
+    // A second writer lands a live edit at the exact instant our tombstone commits.
+    let raw = try! Data(contentsOf: URL(fileURLWithPath: racePath4))
+    var current = try! JSONDecoder.aliasBarDocument.decode(SharedDocument.self, from: raw)
+    let payload = try! JSONEncoder.aliasBarDocument.encode(
+        DummyPreset(name: "c", body: "edited-concurrently"))
+    current.records["presets"] = [SyncedRecord(id: "c", modifiedAt: tA, deleted: false, payload: payload)]
+    try! JSONEncoder.aliasBarDocument.encode(current)
+        .write(to: URL(fileURLWithPath: racePath4), options: .atomic)
+}
+let afterTie = try! store4.tombstone(id: "c", in: "presets", modifiedAt: tA)
+check("an exact-timestamp tie between a live record and a tombstone favors the tombstone",
+      afterTie.records["presets"]?.first(where: { $0.id == "c" })?.deleted == true)
+
+// -- Two-writer race: an unrelated concurrent write must survive the retry -----
+let dir5 = sharedStoreDir()
+let racePath5 = "\(dir5)/doc.json"
+let store5 = SharedDocumentStore(url: URL(fileURLWithPath: racePath5))
+_ = try! store5.upsert(DummyPreset(name: "seed", body: "seed"), id: "seed", in: "presets", modifiedAt: tA)
+SharedDocumentStore.testRaceHook = {
+    let raw = try! Data(contentsOf: URL(fileURLWithPath: racePath5))
+    var current = try! JSONDecoder.aliasBarDocument.decode(SharedDocument.self, from: raw)
+    let payload = try! JSONEncoder.aliasBarDocument.encode(
+        DummyPreset(name: "other", body: "from another writer"))
+    current.records["presets", default: []]
+        .append(SyncedRecord(id: "other", modifiedAt: tB, deleted: false, payload: payload))
+    try! JSONEncoder.aliasBarDocument.encode(current)
+        .write(to: URL(fileURLWithPath: racePath5), options: .atomic)
+}
+let afterRace = try! store5.upsert(DummyPreset(name: "seed", body: "seed-updated"),
+                                    id: "seed", in: "presets", modifiedAt: tB)
+check("a concurrent unrelated write survives the retry",
+      afterRace.records["presets"]?.contains(where: { $0.id == "other" }) == true)
+check("our own write also landed",
+      afterRace.records["presets"]?.first(where: { $0.id == "seed" })?.deleted == false)
+switch store5.read() {
+case .success(let d):
+    check("both records are present on disk after the race",
+          Set((d.records["presets"] ?? []).map(\.id)) == Set(["seed", "other"]))
+case .failure:
+    check("both records are present on disk after the race", false)
+}
+
+// -- Corruption and schema refusal --------------------------------------------
+let dir6 = sharedStoreDir()
+let corruptPath = "\(dir6)/doc.json"
+let garbage = "{ this is not valid json"
+try! garbage.write(toFile: corruptPath, atomically: true, encoding: .utf8)
+let store6 = SharedDocumentStore(url: URL(fileURLWithPath: corruptPath))
+
+var corruptError: SharedDocumentStore.StoreError?
+do {
+    _ = try store6.upsert(DummyPreset(name: "x", body: "y"), id: "x", in: "presets", modifiedAt: tA)
+} catch let error as SharedDocumentStore.StoreError {
+    corruptError = error
+} catch {}
+
+if case .corrupt(let original, let copy, _) = corruptError {
+    check("corrupt document is refused with the right error", true)
+    check("original path reported matches", original == corruptPath)
+    check("original file is untouched", read(corruptPath) == garbage)
+    if let copy {
+        check("a conflict copy was written", FileManager.default.fileExists(atPath: copy))
+        check("the conflict copy preserves the bad bytes", read(copy) == garbage)
+    } else {
+        check("a conflict copy was written", false)
+    }
+} else {
+    check("corrupt document is refused with the right error", false, "\(String(describing: corruptError))")
+}
+
+let dir7 = sharedStoreDir()
+let futurePath = "\(dir7)/doc.json"
+let futureSchemaJSON = #"{"schema":999,"settings":{},"records":{}}"#
+try! futureSchemaJSON.write(toFile: futurePath, atomically: true, encoding: .utf8)
+let store7 = SharedDocumentStore(url: URL(fileURLWithPath: futurePath))
+
+var schemaError: SharedDocumentStore.StoreError?
+do {
+    _ = try store7.setSetting(.bool(true), forKey: "x", modifiedAt: tA)
+} catch let error as SharedDocumentStore.StoreError {
+    schemaError = error
+} catch {}
+
+if case .unknownSchema(let found, let original, let copy) = schemaError {
+    check("unknown schema is refused", found == 999)
+    check("original path reported matches", original == futurePath)
+    check("original file is untouched", read(futurePath) == futureSchemaJSON)
+    check("a conflict copy exists for the unknown-schema file",
+          copy.map { FileManager.default.fileExists(atPath: $0) } == true)
+} else {
+    check("unknown schema is refused", false, "\(String(describing: schemaError))")
+}
+
+// A bare read also refuses an unknown schema, but writes no conflict copy: nothing
+// was about to be written, so there is nothing at risk of being lost.
+switch store7.read() {
+case .failure(.unknownSchema(_, _, let copy)):
+    check("a bare read does not manufacture a conflict copy", copy == nil)
+default:
+    check("a bare read refuses the unknown schema too", false)
+}
+
+// -- Atomicity ------------------------------------------------------------------
+let dir8 = sharedStoreDir()
+let atomicPath = "\(dir8)/doc.json"
+let store8 = SharedDocumentStore(url: URL(fileURLWithPath: atomicPath))
+_ = try! store8.setSetting(.string("baseline"), forKey: "k", modifiedAt: tA)
+
+// A stray temp file left behind by a hypothetical crashed writer (temp write
+// succeeded, rename never ran) must not corrupt a later, unrelated write: the
+// target is only ever replaced by `rename`, never assembled from a temp sibling.
+let strayTemp = "\(dir8)/.aliasbar-shared-\(UUID().uuidString)"
+try! "not a real document".write(toFile: strayTemp, atomically: true, encoding: .utf8)
+_ = try! store8.setSetting(.string("next"), forKey: "k", modifiedAt: tB)
+let afterStray = read(atomicPath)
+check("a stray leftover temp file does not leak into the committed document",
+      !afterStray.contains("not a real document"))
+check("the real write still landed", afterStray.contains("\"next\""))
+try? FileManager.default.removeItem(atPath: strayTemp)
+
+// Making the directory unwritable forces the temp-file write itself to fail, before
+// any rename is attempted. The target must be provably unaffected, byte for byte.
+let beforeFailedAttempt = try! Data(contentsOf: URL(fileURLWithPath: atomicPath))
+try! FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: dir8)
+var writeFailed = false
+do {
+    _ = try store8.setSetting(.string("should-not-land"), forKey: "k",
+                              modifiedAt: tA.addingTimeInterval(20))
+} catch {
+    writeFailed = true
+}
+try! FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: dir8)
+check("a write that cannot create its temp file throws", writeFailed)
+let afterFailedAttempt = try! Data(contentsOf: URL(fileURLWithPath: atomicPath))
+check("the target file is byte-for-byte unchanged after a failed write",
+      afterFailedAttempt == beforeFailedAttempt)
+check("the target file does not contain the failed write's value",
+      !read(atomicPath).contains("should-not-land"))
+
+// -- Watcher ----------------------------------------------------------------------
+let dir9 = sharedStoreDir()
+let watchedPath = "\(dir9)/doc.json"
+let store9 = SharedDocumentStore(url: URL(fileURLWithPath: watchedPath))
+_ = try! store9.setSetting(.string("v1"), forKey: "k", modifiedAt: tA)
+
+let watcherQueue = DispatchQueue(label: "aliasbar-watcher-test")
+let fired = DispatchSemaphore(value: 0)
+var reloadResult: Result<SharedDocument, SharedDocumentStore.StoreError>?
+let watcher = SharedDocumentWatcher(url: URL(fileURLWithPath: watchedPath), queue: watcherQueue,
+                                    debounceInterval: 0.3) { result in
+    reloadResult = result
+    fired.signal()
+}
+try! watcher.start()
+Thread.sleep(forTimeInterval: 0.2) // let the DispatchSource install before acting
+
+// Simulate another process (an iCloud sync, a second Mac) replacing the file
+// wholesale, the same way this store's own atomic write does.
+let replacement = try! JSONEncoder.aliasBarDocument.encode(
+    SharedDocument(settings: ["k": SettingRecord(value: .string("from-elsewhere"), modifiedAt: tB)]))
+let replacementTemp = "\(dir9)/.replacement-\(UUID().uuidString)"
+try! replacement.write(to: URL(fileURLWithPath: replacementTemp))
+_ = rename(replacementTemp, watchedPath)
+
+let waited = fired.wait(timeout: .now() + 3.0)
+watcher.stop()
+check("the watcher fires after a file replace", waited == .success)
+if case .success(let watchedDoc)? = reloadResult {
+    check("the watcher's reload sees the replaced content",
+          watchedDoc.settings["k"]?.value == .string("from-elsewhere"))
+} else {
+    check("the watcher's reload sees the replaced content", false, "\(String(describing: reloadResult))")
+}
+
+// ---------------------------------------------------------------------------
 print("\n" + String(repeating: "-", count: 60))
 print("\(passes) passed, \(failures) failed")
 exit(failures == 0 ? 0 : 1)
