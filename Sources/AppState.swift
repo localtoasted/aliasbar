@@ -182,6 +182,8 @@ struct SnippetEditTarget: Identifiable {
         SnippetEditTarget(mode: .edit, trigger: snippet.trigger, template: snippet.template,
                           originalID: snippet.id)
     }
+}
+
 /// What FIND is currently searching: your defined aliases and functions, your shell
 /// history, or your clipboard. Three sources sharing one surface, not three views —
 /// see `AppState.findSource`'s own doc comment for why this replaced a plain
