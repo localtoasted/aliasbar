@@ -79,6 +79,19 @@ struct RootView: View {
             RemovalConfirmSheet(state: state, confirmation: confirmation)
                 .environment(\.theme, theme)
         }
+        .sheet(item: $state.fillIn) { target in
+            // `FillInSheet` itself knows nothing about prompts — the unwrap and the
+            // prompt-specific `render` closure happen here, at the one call site
+            // that already knows this is `AppState.fillIn`.
+            if let wrapped = Binding($state.fillIn) {
+                FillInSheet(title: "Fill in \(target.shortcut.name)",
+                            state: wrapped.fill,
+                            render: { $0.rendered(target.shortcut.body) },
+                            onConfirm: { state.confirmFillIn() },
+                            onCancel: { state.cancelFillIn() })
+                    .environment(\.theme, theme)
+            }
+        }
         .onAppear {
             searchFocused = true
             enter()
@@ -685,58 +698,71 @@ struct FindView: View {
                     NoMatchView(query: state.query,
                                 create: { state.editor = .create(name: state.query) })
                 }
+            } else if state.dialect == .prompt {
+                // The prompt-favoring half of FIND grows a preview pane (PRE-260);
+                // the list itself — rows, selection, keyboard handling — is exactly
+                // `resultsList` below, unmodified.
+                PromptFindPreviewLayout(state: state, listContent: resultsList)
             } else {
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 5) {
-                        // At rest there is no answer yet, so nothing gets the primary
-                        // treatment. Promoting an arbitrary entry into a big card would
-                        // be the interface asserting something it does not know.
-                        if state.query.isEmpty {
-                            Text(restLabel)
-                                .font(.system(size: 9, weight: .bold))
-                                .kerning(0.7)
-                                .foregroundStyle(theme.faint)
-                                .padding(.horizontal, 10)
-                                .padding(.bottom, 2)
-                        }
-
-                        ForEach(Array(results.enumerated()), id: \.element.id) { index, shortcut in
-                            Group {
-                                // Prompts are new to FIND this slice and deliberately
-                                // plain — PromptRow, not Primary/Alternate — since
-                                // PRE-260 rebuilds prompt presentation from scratch.
-                                if shortcut.kind == .prompt {
-                                    PromptRow(shortcut: shortcut,
-                                              selected: state.selection == index,
-                                              highlight: highlight)
-                                        .onTapGesture { state.selection = index; activate(shortcut) }
-                                } else if index == 0 && !state.query.isEmpty {
-                                    PrimaryResult(entry: rankedEntry(for: shortcut),
-                                                  selected: state.selection == 0,
-                                                  conflicts: state.store.conflicts(for: shortcut.name),
-                                                  highlight: highlight)
-                                        .onTapGesture { state.selection = 0; activate(shortcut) }
-                                } else {
-                                    AlternateRow(entry: rankedEntry(for: shortcut),
-                                                 selected: state.selection == index,
-                                                 highlight: highlight)
-                                        .onTapGesture { state.selection = index; activate(shortcut) }
-                                }
-                            }
-                            .arriving(index)
-                        }
-                    }
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 9)
-                    // The capsule below only travels if the selection change is animated.
-                    // Animating the container rather than each caller means every route
-                    // into the selection — arrows, typing, a click — moves it the same way.
-                    .animation(motion(Motion.standard), value: state.selection)
-                }
-                .frame(maxHeight: .infinity)
+                resultsList
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+    }
+
+    /// FIND's result list. Identical regardless of dialect — `aliases` above either
+    /// shows this alone (shell dialect, unchanged since PRE-259) or beside a preview
+    /// pane (prompt dialect, `PromptFindPreviewLayout` in PromptFindView.swift).
+    private var resultsList: some View {
+        let results = state.findResults
+        return ScrollView {
+            VStack(alignment: .leading, spacing: 5) {
+                // At rest there is no answer yet, so nothing gets the primary
+                // treatment. Promoting an arbitrary entry into a big card would
+                // be the interface asserting something it does not know.
+                if state.query.isEmpty {
+                    Text(restLabel)
+                        .font(.system(size: 9, weight: .bold))
+                        .kerning(0.7)
+                        .foregroundStyle(theme.faint)
+                        .padding(.horizontal, 10)
+                        .padding(.bottom, 2)
+                }
+
+                ForEach(Array(results.enumerated()), id: \.element.id) { index, shortcut in
+                    Group {
+                        // Prompts keep the plain PromptRow shape regardless of
+                        // dialect — the preview pane is what changes with dialect,
+                        // not this row.
+                        if shortcut.kind == .prompt {
+                            PromptRow(shortcut: shortcut,
+                                      selected: state.selection == index,
+                                      highlight: highlight)
+                                .onTapGesture { state.selection = index; activate(shortcut) }
+                        } else if index == 0 && !state.query.isEmpty {
+                            PrimaryResult(entry: rankedEntry(for: shortcut),
+                                          selected: state.selection == 0,
+                                          conflicts: state.store.conflicts(for: shortcut.name),
+                                          highlight: highlight)
+                                .onTapGesture { state.selection = 0; activate(shortcut) }
+                        } else {
+                            AlternateRow(entry: rankedEntry(for: shortcut),
+                                         selected: state.selection == index,
+                                         highlight: highlight)
+                                .onTapGesture { state.selection = index; activate(shortcut) }
+                        }
+                    }
+                    .arriving(index)
+                }
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 9)
+            // The capsule below only travels if the selection change is animated.
+            // Animating the container rather than each caller means every route
+            // into the selection — arrows, typing, a click — moves it the same way.
+            .animation(motion(Motion.standard), value: state.selection)
+        }
+        .frame(maxHeight: .infinity)
     }
 
     /// Names the rest state honestly. With no shell history to rank by, calling the list

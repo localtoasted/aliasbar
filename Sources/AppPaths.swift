@@ -41,6 +41,15 @@ enum AppPaths {
         (promptsDirectory as NSString).deletingLastPathComponent + "/usage.json"
     }
 
+    /// Where `PromptCompiler` records what it has installed to `~/.claude/commands`.
+    /// FIND's delivery chip (PRE-260) is the one app-side reader of this — it never
+    /// writes here, only asks `PromptCompiler.installedCommands(registryPath:)`.
+    static var compiledRegistryPath: String {
+        CorePaths.resolveCompiledRegistryPath(
+            environmentOverride: ProcessInfo.processInfo.environment["ALIASBAR_COMPILED_REGISTRY"],
+            homeDirectory: NSHomeDirectory())
+    }
+
     // Existing call sites (including WriterTests.swift) reach the resolvers through
     // AppPaths. Kept as thin forwarders so nothing outside this file has to change,
     // while CorePaths remains the one place the actual precedence logic lives.
