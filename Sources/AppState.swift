@@ -253,6 +253,14 @@ final class AppState: ObservableObject {
 
     private var toastWorkItem: DispatchWorkItem?
 
+    /// Set the moment the one-shot "want the same for your AI prompts?" hint earns
+    /// itself, then shown the *next* time the window opens rather than fighting
+    /// whatever the delivery that triggered it is already doing to the window (a
+    /// paste closes it immediately; a copy's own toast is already occupying this
+    /// same channel). `prepareForShow` promotes it into `toast` and clears it, so
+    /// it can only ever be shown once no matter how it was queued.
+    private var pendingPromptHint: String?
+
     init(store: EntryStore, settings: AppSettings) {
         self.store = store
         self.settings = settings
@@ -962,6 +970,11 @@ final class AppState: ObservableObject {
         promptUsageCache = PromptUsageCounter.all(path: AppPaths.promptUsagePath)
         refreshSuggestions()
 
+        if let hint = pendingPromptHint {
+            pendingPromptHint = nil
+            show(toast: hint)
+        }
+
         showCount += 1
     }
 
@@ -1297,6 +1310,20 @@ final class AppState: ObservableObject {
         deliver(payload,
                 pasting: pasting,
                 toast: action == .copyName ? "Copied \(entry.name)" : "Copied command")
+        queuePromptHintIfEarned()
+    }
+
+    /// Onboarding deliberately never mentions the prompt side of the app up front —
+    /// no mode picker, dialects are discovered via ⇥. Instead, the first successful
+    /// alias recall after setup earns a one-time nudge toward it. Same one-shot
+    /// shape `hasEverPasted` uses: check, act, record, never again.
+    private func queuePromptHintIfEarned() {
+        guard settings.onboardingComplete,
+              settings.promptFeaturesEnabled,
+              !settings.hasShownPromptHint
+        else { return }
+        settings.hasShownPromptHint = true
+        pendingPromptHint = "Want the same for your AI prompts? ⌘I"
     }
 
     /// A history command goes out by the same route an alias command would.

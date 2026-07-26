@@ -58,6 +58,16 @@ enum AppPaths {
         )
     }
 
+    /// Where onboarding's first-run scan looks for a Claude Code install.
+    /// `ALIASBAR_CLAUDE_DIR` exists purely for testability, matching
+    /// `promptsDirectory` — there is no per-app setting for this either.
+    static var claudeDirectory: String {
+        CorePaths.resolveClaudeDirectory(
+            environmentOverride: ProcessInfo.processInfo.environment["ALIASBAR_CLAUDE_DIR"],
+            homeDirectory: NSHomeDirectory()
+        )
+    }
+
     /// Where MANAGE's Delivery bucket asks `PromptCompiler` to write/remove Claude
     /// Code slash commands. `ALIASBAR_CLAUDE_COMMANDS_DIR` exists purely for
     /// testability, matching every other override in this file.
