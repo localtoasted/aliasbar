@@ -265,6 +265,9 @@ final class AppSettings: ObservableObject {
         static let resultLimit = "resultLimit"
         static let onboardingComplete = "onboardingComplete"
         static let hasEverPasted = "hasEverPasted"
+        static let clipboardMonitoring = "clipboardMonitoring"
+        static let clipboardPersistence = "clipboardPersistence"
+        static let clipboardInSyncFile = "clipboardInSyncFile"
     }
 
     // MARK: Behaviour
@@ -378,6 +381,25 @@ final class AppSettings: ObservableObject {
         didSet { defaults.set(hasEverPasted, forKey: Key.hasEverPasted) }
     }
 
+    // MARK: Clipboard
+
+    /// Whether `ClipboardMonitor` polls the pasteboard at all. On by default — off
+    /// means AliasBar never reads the clipboard outside of its own deliveries.
+    @Published var clipboardMonitoring: Bool {
+        didSet { defaults.set(clipboardMonitoring, forKey: Key.clipboardMonitoring) }
+    }
+    /// Whether safe clips are written to disk. Off by default: this slice only ever
+    /// keeps clipboard history in memory (see `ClipboardMonitor`); a later slice gates
+    /// persistence behind this setting.
+    @Published var clipboardPersistence: Bool {
+        didSet { defaults.set(clipboardPersistence, forKey: Key.clipboardPersistence) }
+    }
+    /// Whether persisted clips are included in the synced settings document. Off by
+    /// default, and meaningless while `clipboardPersistence` is off.
+    @Published var clipboardInSyncFile: Bool {
+        didSet { defaults.set(clipboardInSyncFile, forKey: Key.clipboardInSyncFile) }
+    }
+
     // MARK: Hotkey
 
     @Published var hotkey: HotkeyCombo {
@@ -442,6 +464,10 @@ final class AppSettings: ObservableObject {
         onboardingComplete = store.object(forKey: Key.onboardingComplete) as? Bool ?? false
         hasEverPasted = store.object(forKey: Key.hasEverPasted) as? Bool ?? false
         resultLimit = store.object(forKey: Key.resultLimit) as? Int ?? 6
+
+        clipboardMonitoring = store.object(forKey: Key.clipboardMonitoring) as? Bool ?? true
+        clipboardPersistence = store.object(forKey: Key.clipboardPersistence) as? Bool ?? false
+        clipboardInSyncFile = store.object(forKey: Key.clipboardInSyncFile) as? Bool ?? false
 
         if let code = store.object(forKey: Key.hotkeyKeyCode) as? Int,
            let mods = store.object(forKey: Key.hotkeyModifiers) as? Int {

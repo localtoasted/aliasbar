@@ -16,6 +16,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private var settingsWindow: NSWindow?
     private var onboardingWindow: NSWindow?
     private var keyMonitor: Any?
+    private var clipboardMonitor: ClipboardMonitor?
 
     // MARK: Launch
 
@@ -37,6 +38,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         installKeyMonitor()
         HotkeyRecorder.shared.start()
         registerHotkey()
+
+        // Off means AliasBar never reads the clipboard outside of its own
+        // deliveries — no monitor gets constructed at all, not merely a disabled one.
+        if settings.clipboardMonitoring {
+            let monitor = ClipboardMonitor()
+            clipboardMonitor = monitor
+            monitor.start()
+        }
 
         NotificationCenter.default.addObserver(
             forName: .aliasBarHotkeyFired, object: nil, queue: .main

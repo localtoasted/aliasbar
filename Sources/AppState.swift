@@ -547,9 +547,7 @@ final class AppState: ObservableObject {
     private func deliver(_ payload: String, pasting: Bool, toast: String) {
         switch pasting {
         case false:
-            let pasteboard = NSPasteboard.general
-            pasteboard.clearContents()
-            pasteboard.setString(payload, forType: .string)
+            PasteboardBroker.write(transient: payload)
             show(toast: toast)
             finish()
 
@@ -559,9 +557,7 @@ final class AppState: ObservableObject {
             guard Typist.isTrusted else {
                 // Never fail silently and never lose the user's action: put it on the
                 // clipboard anyway, so the worst case is one extra ⌘V.
-                let pasteboard = NSPasteboard.general
-                pasteboard.clearContents()
-                pasteboard.setString(payload, forType: .string)
+                PasteboardBroker.write(transient: payload)
                 // Deliberately no `finish()`. Closing here is what made this look like
                 // the app doing nothing at all: the window carrying the only explanation
                 // went away in the same frame the explanation was written to it, and the

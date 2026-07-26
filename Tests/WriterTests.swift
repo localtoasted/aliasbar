@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 
 // Test harness for AliasWriter. Runs against scratch files only.
@@ -3048,6 +3049,535 @@ check("MemoryClip does not conform to Encodable",
 let sampleCapturedClip = capturedClip("x")
 check("CapturedClip does not conform to Encodable",
       (sampleCapturedClip as Any) as? any Encodable == nil)
+
+// ---------------------------------------------------------------------------
+print("\n32. PasteboardBroker: self-write tracking and guarded restore")
+
+// A single fake serves both the broker (write side) and the monitor (read side)
+// below, the way `NSPasteboard.general` is one object serving both in the app —
+// conforming to both protocols is what lets `PasteboardBroker.isSelfWrite(on:)`
+// recognize a write the same fake instance just received.
+final class FakePasteboard: PasteboardReading, PasteboardWriting {
+    private(set) var changeCount = 0
+    private var stringValue: String?
+    private var concealedFlag = false
+
+    var types: [NSPasteboard.PasteboardType]? {
+        guard stringValue != nil || concealedFlag else { return nil }
+        var declared: [NSPasteboard.PasteboardType] = stringValue != nil ? [.string] : []
+        if concealedFlag { declared.append(NSPasteboard.PasteboardType("org.nspasteboard.ConcealedType")) }
+        return declared
+    }
+
+    func string(forType type: NSPasteboard.PasteboardType) -> String? {
+        type == .string ? stringValue : nil
+    }
+
+    @discardableResult
+    func clearContents() -> Int {
+        stringValue = nil
+        concealedFlag = false
+        changeCount += 1
+        return changeCount
+    }
+
+    @discardableResult
+    func setString(_ string: String, forType type: NSPasteboard.PasteboardType) -> Bool {
+        guard type == .string else { return false }
+        stringValue = string
+        changeCount += 1
+        return true
+    }
+
+    /// Simulates some other application copying something — bypasses the broker
+    /// entirely, the way a real external app's copy would.
+    func simulateExternalCopy(_ string: String?, concealed: Bool = false) {
+        stringValue = string
+        concealedFlag = concealed
+        changeCount += 1
+    }
+}
+
+let brokerFake = FakePasteboard()
+let brokerWriteCount = PasteboardBroker.write(transient: "alias git-status", to: brokerFake)
+check("write() lands the content on the pasteboard",
+      brokerFake.string(forType: .string) == "alias git-status")
+check("write() reports the changeCount it produced",
+      brokerWriteCount == brokerFake.changeCount)
+check("isSelfWrite recognizes the changeCount write() just produced",
+      PasteboardBroker.isSelfWrite(changeCount: brokerWriteCount, on: brokerFake))
+check("isSelfWrite rejects a changeCount never written through the broker",
+      !PasteboardBroker.isSelfWrite(changeCount: brokerWriteCount + 1, on: brokerFake))
+
+let otherFake = FakePasteboard()
+check("self-write tracking is scoped per pasteboard identity, not global",
+      !PasteboardBroker.isSelfWrite(changeCount: brokerWriteCount, on: otherFake))
+
+// Restore: nothing external happened in between, so the prior content comes back.
+let restoreFake = FakePasteboard()
+restoreFake.simulateExternalCopy("what the user had copied")
+let priorSnapshot = PasteboardBroker.snapshot(of: restoreFake)
+let transientCount = PasteboardBroker.write(transient: "temporary alias body", to: restoreFake)
+let restored = PasteboardBroker.restoreUserContent(
+    priorSnapshot, ifStillChangeCount: transientCount, on: restoreFake)
+check("restoreUserContent succeeds when nothing wrote in between", restored)
+check("restoreUserContent puts the prior content back",
+      restoreFake.string(forType: .string) == "what the user had copied")
+
+// Restore: a genuine external copy landed after the transient write, so restoring
+// would clobber it — must refuse rather than guess.
+let clobberFake = FakePasteboard()
+clobberFake.simulateExternalCopy("original")
+let clobberSnapshot = PasteboardBroker.snapshot(of: clobberFake)
+let clobberTransientCount = PasteboardBroker.write(transient: "temporary", to: clobberFake)
+clobberFake.simulateExternalCopy("a second, unrelated copy")
+let clobberRestoreAttempt = PasteboardBroker.restoreUserContent(
+    clobberSnapshot, ifStillChangeCount: clobberTransientCount, on: clobberFake)
+check("restoreUserContent refuses when something else wrote in between",
+      !clobberRestoreAttempt)
+check("a refused restore leaves the intervening content alone",
+      clobberFake.string(forType: .string) == "a second, unrelated copy")
+
+// ---------------------------------------------------------------------------
+print("\n33. ClipboardMonitor: the 248-D gate proof")
+
+func makeMonitor(
+    pasteboard: FakePasteboard, clock: @escaping () -> Date = { quarantineBase }
+) -> ClipboardMonitor {
+    ClipboardMonitor(pasteboard: pasteboard, quarantine: QuarantineStore(clock: clock), clock: clock)
+}
+
+let ordinaryPasteboard = FakePasteboard()
+let ordinaryMonitor = makeMonitor(pasteboard: ordinaryPasteboard)
+ordinaryPasteboard.simulateExternalCopy("git status -sb")
+ordinaryMonitor.poll()
+check("an ordinary external copy is persisted to history",
+      ordinaryMonitor.history.map(\.content) == ["git status -sb"])
+check("an ordinary external copy produces no quarantine entry",
+      ordinaryMonitor.activeQuarantine.isEmpty)
+
+let concealedPasteboard = FakePasteboard()
+let concealedMonitor = makeMonitor(pasteboard: concealedPasteboard)
+concealedPasteboard.simulateExternalCopy("just a normal-looking word", concealed: true)
+concealedMonitor.poll()
+check("concealed content is quarantined even though the text itself is innocuous",
+      concealedMonitor.history.isEmpty
+          && concealedMonitor.activeQuarantine.first?.reason == .concealedPasteboardType)
+
+let hotPasteboard = FakePasteboard()
+let hotMonitor = makeMonitor(pasteboard: hotPasteboard)
+hotPasteboard.simulateExternalCopy("ghp_\(providerTokenBody)")
+hotMonitor.poll()
+check("classifier-hot content is quarantined, not persisted",
+      hotMonitor.history.isEmpty && hotMonitor.activeQuarantine.first?.reason == .githubToken)
+
+let selfWritePasteboard = FakePasteboard()
+let selfWriteMonitor = makeMonitor(pasteboard: selfWritePasteboard)
+PasteboardBroker.write(transient: "delivered alias body", to: selfWritePasteboard)
+selfWriteMonitor.poll()
+check("a broker self-write produces no history entry", selfWriteMonitor.history.isEmpty)
+check("a broker self-write produces no quarantine entry either",
+      selfWriteMonitor.activeQuarantine.isEmpty)
+
+// Self-write suppression must not swallow the *next* real change too.
+selfWritePasteboard.simulateExternalCopy("a real copy right after a delivery")
+selfWriteMonitor.poll()
+check("a real copy following a self-write is still captured",
+      selfWriteMonitor.history.map(\.content) == ["a real copy right after a delivery"])
+
+let oversizedPasteboard = FakePasteboard()
+let oversizedMonitor = makeMonitor(pasteboard: oversizedPasteboard)
+oversizedPasteboard.simulateExternalCopy(String(repeating: "a", count: ClipboardMonitor.byteCap + 1))
+oversizedMonitor.poll()
+check("an oversized clip produces no history entry", oversizedMonitor.history.isEmpty)
+check("an oversized clip produces no quarantine entry (skipped, not classified)",
+      oversizedMonitor.activeQuarantine.isEmpty)
+
+let atCapPasteboard = FakePasteboard()
+let atCapMonitor = makeMonitor(pasteboard: atCapPasteboard)
+atCapPasteboard.simulateExternalCopy(String(repeating: "b", count: ClipboardMonitor.byteCap))
+atCapMonitor.poll()
+check("a clip exactly at the byte cap is still captured", atCapMonitor.history.count == 1)
+
+let imageOnlyPasteboard = FakePasteboard()
+let imageOnlyMonitor = makeMonitor(pasteboard: imageOnlyPasteboard)
+imageOnlyPasteboard.simulateExternalCopy(nil)
+imageOnlyMonitor.poll()
+check("a copy with no string representation produces no entry and does not crash",
+      imageOnlyMonitor.history.isEmpty && imageOnlyMonitor.activeQuarantine.isEmpty)
+
+let dedupePasteboard = FakePasteboard()
+let dedupeMonitor = makeMonitor(pasteboard: dedupePasteboard)
+dedupePasteboard.simulateExternalCopy("same thing")
+dedupeMonitor.poll()
+dedupePasteboard.simulateExternalCopy("same thing")
+dedupeMonitor.poll()
+check("copying the same content twice in a row produces one history entry",
+      dedupeMonitor.history.count == 1)
+dedupePasteboard.simulateExternalCopy("something different")
+dedupeMonitor.poll()
+check("history is newest first",
+      dedupeMonitor.history.map(\.content) == ["something different", "same thing"])
+
+let capPasteboard = FakePasteboard()
+let capMonitor = makeMonitor(pasteboard: capPasteboard)
+for i in 0..<205 {
+    capPasteboard.simulateExternalCopy("clip \(i)")
+    capMonitor.poll()
+}
+check("history is capped at 200 entries", capMonitor.history.count == 200)
+check("the cap keeps the most recent entries", capMonitor.history.first?.content == "clip 204")
+
+var monitorClockValue = quarantineBase
+let expiryPasteboard = FakePasteboard()
+let expiryMonitor = ClipboardMonitor(
+    pasteboard: expiryPasteboard,
+    quarantine: QuarantineStore(clock: { monitorClockValue }),
+    clock: { monitorClockValue })
+expiryPasteboard.simulateExternalCopy("ghp_\(providerTokenBody)")
+expiryMonitor.poll()
+check("a freshly quarantined clip is active through the monitor",
+      expiryMonitor.activeQuarantine.count == 1)
+monitorClockValue = quarantineBase.addingTimeInterval(91)
+check("the monitor's exposed quarantine listing honors a fake clock's expiry",
+      expiryMonitor.activeQuarantine.isEmpty)
+
+// Structural proof, in the same spirit as the classifier's dependency scan above:
+// the only way into `history` is through the `ClipIngestor.decide` switch.
+let monitorSource = read(projectRoot.appendingPathComponent("Sources/ClipboardMonitor.swift").path)
+check("ClipboardMonitor source is readable", monitorSource != "<unreadable>")
+check("ClipboardMonitor's capture path calls ClipIngestor.decide",
+      monitorSource.contains("ClipIngestor.decide"))
+check("history is appended to in exactly one place, inside the decide switch",
+      monitorSource.components(separatedBy: "history.insert").count == 2)
+
+// ---------------------------------------------------------------------------
+print("\n34. ClipKind: detection precedence")
+
+let jwtSample = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"
+    + ".eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ"
+    + ".SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"
+check("a JWT is detected as .jwt", ClipKind.detect(jwtSample) == .jwt)
+
+check("a 10-digit epoch is detected", ClipKind.detect("1700000000") == .epochTimestamp)
+check("a 13-digit millisecond epoch is detected", ClipKind.detect("1700000000000") == .epochTimestamp)
+check("an 11-digit number is not treated as an epoch", ClipKind.detect("17000000000") != .epochTimestamp)
+
+check("a JSON object is detected", ClipKind.detect(#"{"a":1}"#) == .json)
+check("a JSON array is detected", ClipKind.detect("[1,2,3]") == .json)
+
+check("a base64 blob is detected", ClipKind.detect("SGVsbG8gV29ybGQh") == .base64)
+
+check("a URL with a query string is detected",
+      ClipKind.detect("https://example.com/path?a=1&b=2") == .urlWithQuery)
+check("a URL without a query string is not detected as urlWithQuery",
+      ClipKind.detect("https://example.com/path") != .urlWithQuery)
+
+check("a 6-digit hex color is detected", ClipKind.detect("#4B5BC4") == .hexColor)
+check("a 3-digit hex color is detected", ClipKind.detect("#FFF") == .hexColor)
+check("an 8-digit hex color with alpha is detected", ClipKind.detect("#4B5BC4FF") == .hexColor)
+
+check("an absolute file path is detected", ClipKind.detect("/usr/local/bin/aliasbar") == .filePath)
+check("a home-relative path is detected", ClipKind.detect("~/src/aliasbar/build.sh") == .filePath)
+check("a bare tilde is detected as a file path", ClipKind.detect("~") == .filePath)
+check("an absolute path is not misdetected as base64 despite a base64-legal charset",
+      ClipKind.detect("/usr/bin/xyz") == .filePath)
+
+check("a UUID is detected", ClipKind.detect("550e8400-e29b-41d4-a716-446655440000") == .uuid)
+
+check("ordinary prose is plain text", ClipKind.detect("just some words I copied") == .plainText)
+check("a short, non-timestamp digit run is plain text", ClipKind.detect("12345") == .plainText)
+
+// ---------------------------------------------------------------------------
+print("\n35. ClipTransformer: per-kind actions (fixed date/timezone for determinism)")
+
+let transformNow = Date(timeIntervalSince1970: 1_700_000_000) // 2023-11-14T22:13:20Z
+let transformTZ = TimeZone(identifier: "America/New_York")!
+
+func base64url(_ s: String) -> String {
+    Data(s.utf8).base64EncodedString()
+        .replacingOccurrences(of: "+", with: "-")
+        .replacingOccurrences(of: "/", with: "_")
+        .replacingOccurrences(of: "=", with: "")
+}
+
+// --- JWT --------------------------------------------------------------
+
+let jwtActionsResult = ClipTransformer.actions(for: jwtSample, now: transformNow, timeZone: transformTZ)
+check("JWT actions include the decoded header",
+      jwtActionsResult.contains { $0.title == "Decoded header" && $0.output.contains("\"alg\"") })
+check("JWT actions include the decoded payload",
+      jwtActionsResult.contains { $0.title == "Decoded payload" && $0.output.contains("\"sub\"") })
+check("JWT actions surface a past iat as '... ago'",
+      jwtActionsResult.contains { $0.title.hasPrefix("iat") && $0.output.contains("ago") })
+
+let futureExpSeconds = Int(transformNow.timeIntervalSince1970) + 3600
+let futureJWT = "\(base64url(#"{"alg":"none"}"#)).\(base64url(#"{"exp":\#(futureExpSeconds)}"#))."
+let futureJWTActions = ClipTransformer.actions(for: futureJWT, now: transformNow, timeZone: transformTZ)
+check("JWT actions render a future exp as 'in ...'",
+      futureJWTActions.contains { $0.title.hasPrefix("exp") && $0.output.contains("in 1 hour") })
+
+// --- Epoch timestamps ---------------------------------------------------
+
+let epochNowSeconds = String(Int(transformNow.timeIntervalSince1970))
+let epochNowActions = ClipTransformer.actions(for: epochNowSeconds, now: transformNow, timeZone: transformTZ)
+check("epoch (10-digit seconds) UTC matches the exact reference instant",
+      epochNowActions.first { $0.title == "UTC" }?.output == "2023-11-14T22:13:20Z")
+check("epoch (10-digit seconds) relative reads 'in 0 seconds' at the reference instant",
+      epochNowActions.first { $0.title == "Relative" }?.output == "in 0 seconds")
+check("epoch local action names the timezone identifier",
+      epochNowActions.first { $0.title.hasPrefix("Local") }?.title == "Local (America/New_York)")
+
+let epochPastSeconds = String(Int(transformNow.timeIntervalSince1970) - 45)
+let epochPastActions = ClipTransformer.actions(for: epochPastSeconds, now: transformNow, timeZone: transformTZ)
+check("a past epoch reads as '... ago'",
+      epochPastActions.first { $0.title == "Relative" }?.output == "45 seconds ago")
+
+let epochPastMillis = epochPastSeconds + "000"
+check("millisecond fixture is exactly 13 digits", epochPastMillis.count == 13)
+let epochMillisActions = ClipTransformer.actions(for: epochPastMillis, now: transformNow, timeZone: transformTZ)
+check("a 13-digit millisecond epoch resolves to the same instant as its second form",
+      epochMillisActions.first { $0.title == "UTC" }?.output
+          == epochPastActions.first { $0.title == "UTC" }?.output)
+
+// --- JSON ---------------------------------------------------------------
+
+let jsonSample = #"{"b":2,"a":1}"#
+let jsonActionsResult = ClipTransformer.actions(for: jsonSample, now: transformNow, timeZone: transformTZ)
+check("JSON pretty-print sorts keys alphabetically",
+      {
+          let pretty = jsonActionsResult.first { $0.title == "Pretty-print" }?.output ?? ""
+          guard let aRange = pretty.range(of: "\"a\""), let bRange = pretty.range(of: "\"b\"") else { return false }
+          return aRange.lowerBound < bRange.lowerBound
+      }())
+check("JSON pretty-print is indented, distinct from minify",
+      jsonActionsResult.first { $0.title == "Pretty-print" }?.output
+          != jsonActionsResult.first { $0.title == "Minify" }?.output)
+check("JSON minify collapses to compact, sorted-key form",
+      jsonActionsResult.first { $0.title == "Minify" }?.output == #"{"a":1,"b":2}"#)
+check("JSON top-level keys are listed, sorted",
+      jsonActionsResult.first { $0.title == "Top-level keys" }?.output == "a\nb")
+check("a JSON array has no 'Top-level keys' action",
+      !ClipTransformer.actions(for: "[1,2,3]", now: transformNow, timeZone: transformTZ)
+          .contains { $0.title == "Top-level keys" })
+
+// --- Base64, including recursion and its bound ---------------------------
+
+let base64Simple = Data("hello world".utf8).base64EncodedString()
+let base64ActionsResult = ClipTransformer.actions(for: base64Simple, now: transformNow, timeZone: transformTZ)
+check("base64 decodes to UTF-8 text",
+      base64ActionsResult.first { $0.title == "Decoded (base64)" }?.output == "hello world")
+
+let nestedJSON = #"{"x":1}"#
+let onceEncoded = Data(nestedJSON.utf8).base64EncodedString()
+let twiceEncoded = Data(onceEncoded.utf8).base64EncodedString()
+let nestedActions = ClipTransformer.actions(for: twiceEncoded, now: transformNow, timeZone: transformTZ)
+check("nested base64 recurses into the JSON it eventually decodes to",
+      nestedActions.contains { $0.title.hasSuffix("Pretty-print") })
+
+var deeplyNested = nestedJSON
+for _ in 0..<5 { deeplyNested = Data(deeplyNested.utf8).base64EncodedString() }
+let deepActions = ClipTransformer.actions(for: deeplyNested, now: transformNow, timeZone: transformTZ)
+check("recursion is bounded — a 5-layer base64 nest does not fully unwind to JSON",
+      !deepActions.contains { $0.title.hasSuffix("Pretty-print") })
+check("recursion still surfaces the outermost decode layer",
+      deepActions.contains { $0.title == "Decoded (base64)" })
+
+// --- URL with query -------------------------------------------------------
+
+let urlSample = "https://example.com/search?q=shoes&utm_source=newsletter"
+    + "&utm_medium=email&fbclid=abc123&page=2"
+let urlActionsResult = ClipTransformer.actions(for: urlSample, now: transformNow, timeZone: transformTZ)
+check("URL parameters are listed one per line",
+      urlActionsResult.first { $0.title == "Parameters" }?.output.contains("q = shoes") ?? false)
+check("stripped URL drops utm_* and known tracker params, keeps the rest",
+      {
+          let stripped = urlActionsResult.first { $0.title == "Strip trackers" }?.output ?? ""
+          return stripped.contains("q=shoes") && stripped.contains("page=2")
+              && !stripped.contains("utm_") && !stripped.contains("fbclid")
+      }())
+check("a URL with no trackers offers no redundant 'Strip trackers' action",
+      !ClipTransformer.actions(for: "https://example.com/search?q=shoes",
+                               now: transformNow, timeZone: transformTZ)
+          .contains { $0.title == "Strip trackers" })
+check("query values are percent-decoded in the parameter table",
+      ClipTransformer.actions(for: "https://example.com/?q=hello%20world",
+                              now: transformNow, timeZone: transformTZ)
+          .first { $0.title == "Parameters" }?.output == "q = hello world")
+
+// --- Hex color -------------------------------------------------------------
+
+func oklchLightness(_ output: String) -> Double? {
+    guard output.hasPrefix("oklch(") else { return nil }
+    let inner = output.dropFirst("oklch(".count).dropLast()
+    return Double(inner.split(separator: " ").first ?? "")
+}
+
+let hexActions6 = ClipTransformer.actions(for: "#4B5BC4", now: transformNow, timeZone: transformTZ)
+check("hex color rgb() action", hexActions6.first { $0.title == "rgb()" }?.output == "rgb(75, 91, 196)")
+check("hex color hsl() action exists", hexActions6.contains { $0.title == "hsl()" })
+check("hex color oklch() action exists", hexActions6.contains { $0.title == "oklch()" })
+
+let hexActions3 = ClipTransformer.actions(for: "#FFF", now: transformNow, timeZone: transformTZ)
+check("shorthand 3-digit hex expands each nibble",
+      hexActions3.first { $0.title == "rgb()" }?.output == "rgb(255, 255, 255)")
+
+let hexActions8 = ClipTransformer.actions(for: "#4B5BC480", now: transformNow, timeZone: transformTZ)
+check("8-digit hex with alpha produces rgba() rather than rgb()",
+      hexActions8.contains { $0.title == "rgba()" } && !hexActions8.contains { $0.title == "rgb()" })
+check("8-digit hex alpha value is carried through",
+      hexActions8.first { $0.title == "rgba()" }?.output.contains(", 0.50)") ?? false)
+
+let blackOklch = ClipTransformer.actions(for: "#000000", now: transformNow, timeZone: transformTZ)
+    .first { $0.title == "oklch()" }?.output ?? ""
+let whiteOklch = ClipTransformer.actions(for: "#FFFFFF", now: transformNow, timeZone: transformTZ)
+    .first { $0.title == "oklch()" }?.output ?? ""
+check("white has strictly greater OKLCH lightness than black",
+      (oklchLightness(whiteOklch) ?? -1) > (oklchLightness(blackOklch) ?? 2))
+check("black has (approximately) zero OKLCH lightness",
+      abs((oklchLightness(blackOklch) ?? 1)) < 0.001)
+
+// --- File path ---------------------------------------------------------
+
+let pathActions = ClipTransformer.actions(for: "/usr/local/bin/aliasbar",
+                                           now: transformNow, timeZone: transformTZ)
+check("file path actions include the POSIX form unchanged",
+      pathActions.first { $0.title == "POSIX path" }?.output == "/usr/local/bin/aliasbar")
+check("file path actions include a file:// URL form",
+      pathActions.first { $0.title == "file:// URL" }?.output == "file:///usr/local/bin/aliasbar")
+check("file path actions include a shell-escaped form",
+      pathActions.first { $0.title == "Shell-escaped" }?.output == "'/usr/local/bin/aliasbar'")
+
+let spacedPathActions = ClipTransformer.actions(for: "/Users/x/My Documents/file.txt",
+                                                 now: transformNow, timeZone: transformTZ)
+check("a path with a space percent-encodes the file:// URL form",
+      spacedPathActions.first { $0.title == "file:// URL" }?.output
+          == "file:///Users/x/My%20Documents/file.txt")
+check("a path with a space is shell-escaped, not percent-encoded",
+      spacedPathActions.first { $0.title == "Shell-escaped" }?.output
+          == "'/Users/x/My Documents/file.txt'")
+
+let quotedPathActions = ClipTransformer.actions(for: "/tmp/it's a file.txt",
+                                                 now: transformNow, timeZone: transformTZ)
+check("an embedded single quote is escaped in the shell form",
+      quotedPathActions.first { $0.title == "Shell-escaped" }?.output
+          == "'/tmp/it'\\''s a file.txt'")
+
+let tildeActions = ClipTransformer.actions(for: "~/src/aliasbar",
+                                            now: transformNow, timeZone: transformTZ)
+check("a tilde path expands to the home directory in the file:// URL form",
+      {
+          let url = tildeActions.first { $0.title == "file:// URL" }?.output ?? ""
+          return url.hasPrefix("file://") && !url.contains("~")
+      }())
+
+// --- UUID ----------------------------------------------------------------
+
+let v4UUID = "550e8400-e29b-41d4-a716-446655440000"
+let v4Actions = ClipTransformer.actions(for: v4UUID, now: transformNow, timeZone: transformTZ)
+check("UUID version is read from the version nibble", v4Actions.first { $0.title == "Version" }?.output == "v4")
+check("UUID variant is read as RFC 4122", v4Actions.first { $0.title == "Variant" }?.output == "RFC 4122")
+check("a v4 UUID has no embedded-timestamp action",
+      !v4Actions.contains { $0.title == "Embedded timestamp" })
+check("UUID actions always offer a fresh v4 sibling",
+      v4Actions.contains { $0.title == "Sibling (fresh v4)" })
+check("the v4 sibling is a different, valid UUID",
+      {
+          let sibling = v4Actions.first { $0.title == "Sibling (fresh v4)" }?.output ?? ""
+          return UUID(uuidString: sibling) != nil && sibling != v4UUID
+      }())
+
+// Fixtures built with the same byte math the implementation uses to decode, so the
+// expected embedded timestamp is exactly computable rather than asserted by faith.
+func makeV1UUID(secondsSinceEpoch: Double) -> String {
+    let gregorianOffsetIn100ns: UInt64 = 0x01B2_1DD2_1381_4000
+    let intervals100ns = gregorianOffsetIn100ns + UInt64(secondsSinceEpoch * 10_000_000)
+    let timeLow = UInt32(intervals100ns & 0xFFFF_FFFF)
+    let timeMid = UInt16((intervals100ns >> 32) & 0xFFFF)
+    let timeHiAndVersion = UInt16(((intervals100ns >> 48) & 0x0FFF) | 0x1000)
+    let bytes: [UInt8] = [
+        UInt8((timeLow >> 24) & 0xFF), UInt8((timeLow >> 16) & 0xFF),
+        UInt8((timeLow >> 8) & 0xFF), UInt8(timeLow & 0xFF),
+        UInt8((timeMid >> 8) & 0xFF), UInt8(timeMid & 0xFF),
+        UInt8((timeHiAndVersion >> 8) & 0xFF), UInt8(timeHiAndVersion & 0xFF),
+        0x80, 0x00, 0x00, 0x0c, 0x29, 0x00, 0x00, 0x01,
+    ]
+    let hex = bytes.map { String(format: "%02x", $0) }
+    return "\(hex[0])\(hex[1])\(hex[2])\(hex[3])-\(hex[4])\(hex[5])-\(hex[6])\(hex[7])"
+        + "-\(hex[8])\(hex[9])-\(hex[10])\(hex[11])\(hex[12])\(hex[13])\(hex[14])\(hex[15])"
+}
+func makeV7UUID(millisSinceEpoch: UInt64) -> String {
+    let bytes: [UInt8] = [
+        UInt8((millisSinceEpoch >> 40) & 0xFF), UInt8((millisSinceEpoch >> 32) & 0xFF),
+        UInt8((millisSinceEpoch >> 24) & 0xFF), UInt8((millisSinceEpoch >> 16) & 0xFF),
+        UInt8((millisSinceEpoch >> 8) & 0xFF), UInt8(millisSinceEpoch & 0xFF),
+        0x70, 0x00, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    ]
+    let hex = bytes.map { String(format: "%02x", $0) }
+    return "\(hex[0])\(hex[1])\(hex[2])\(hex[3])-\(hex[4])\(hex[5])-\(hex[6])\(hex[7])"
+        + "-\(hex[8])\(hex[9])-\(hex[10])\(hex[11])\(hex[12])\(hex[13])\(hex[14])\(hex[15])"
+}
+func parsedISOInstant(_ s: String) -> Date? {
+    let formatter = ISO8601DateFormatter()
+    formatter.timeZone = TimeZone(identifier: "UTC")
+    return formatter.date(from: s)
+}
+
+let v1TargetSeconds: Double = 1_600_000_000
+let v1UUIDString = makeV1UUID(secondsSinceEpoch: v1TargetSeconds)
+check("constructed v1 fixture parses as a UUID", UUID(uuidString: v1UUIDString) != nil)
+let v1Actions = ClipTransformer.actions(for: v1UUIDString, now: transformNow, timeZone: transformTZ)
+check("UUID v1 version is read correctly", v1Actions.first { $0.title == "Version" }?.output == "v1")
+check("UUID v1 embeds a timestamp matching the source instant",
+      {
+          guard let embedded = v1Actions.first(where: { $0.title == "Embedded timestamp" })?.output,
+                let parsed = parsedISOInstant(embedded)
+          else { return false }
+          return abs(parsed.timeIntervalSince1970 - v1TargetSeconds) < 1
+      }())
+
+let v7TargetMillis: UInt64 = 1_650_000_000_000
+let v7UUIDString = makeV7UUID(millisSinceEpoch: v7TargetMillis)
+check("constructed v7 fixture parses as a UUID", UUID(uuidString: v7UUIDString) != nil)
+let v7Actions = ClipTransformer.actions(for: v7UUIDString, now: transformNow, timeZone: transformTZ)
+check("UUID v7 version is read correctly", v7Actions.first { $0.title == "Version" }?.output == "v7")
+check("UUID v7 embeds its exact millisecond timestamp",
+      {
+          guard let embedded = v7Actions.first(where: { $0.title == "Embedded timestamp" })?.output,
+                let parsed = parsedISOInstant(embedded)
+          else { return false }
+          return abs(parsed.timeIntervalSince1970 - Double(v7TargetMillis) / 1000) < 0.001
+      }())
+
+// ---------------------------------------------------------------------------
+print("\n36. ClipTransforms: malformed input never crashes and never produces actions")
+
+let malformedClipSamples: [String] = [
+    "eyJhbGciOiJIUzI1NiJ9.not-valid-base64!!!.sig",
+    "eyJhbGciOiJIUzI1NiJ9..sig",
+    String(repeating: "e", count: 40) + ".dGVzdA.sig",
+    "SGVsbG8==",
+    "not@@base64!!",
+    "{\"unterminated\": ",
+    "[1, 2,",
+    "http://[::badurl",
+    "https://",
+    "#GGGGGG",
+    "#12345",
+    "12345678-1234-1234-1234-12345678901",
+    "12345678-1234-1234-1234-1234567890123",
+    "",
+    "   ",
+]
+for sample in malformedClipSamples {
+    let result = ClipTransformer.actions(for: sample, now: transformNow, timeZone: transformTZ)
+    check("malformed input produces no actions rather than crashing: \(sample.prefix(24))",
+          result.isEmpty, "got \(result.count) action(s): \(result.map(\.title))")
+}
+
+let hugeGarbage = String(repeating: "x", count: 200_000) + "!!!not-base64-or-anything"
+check("a large, non-matching input completes without crashing",
+      ClipTransformer.actions(for: hugeGarbage, now: transformNow, timeZone: transformTZ).isEmpty)
 
 // ---------------------------------------------------------------------------
 print("\n" + String(repeating: "-", count: 60))

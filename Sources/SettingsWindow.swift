@@ -384,9 +384,7 @@ struct SettingsView: View {
                     }
                     Spacer(minLength: 0)
                     ThemedButton("Copy") {
-                        NSPasteboard.general.clearContents()
-                        NSPasteboard.general.setString(
-                            PresetTransfer.export(settings.appearance), forType: .string)
+                        PasteboardBroker.write(transient: PresetTransfer.export(settings.appearance))
                         transferNotice = "Copied this look to the clipboard."
                     }
                     ThemedButton("Paste") { importFromClipboard() }
