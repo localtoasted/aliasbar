@@ -73,7 +73,7 @@ struct RootView: View {
         .environment(\.theme, theme)
         .overlay(alignment: .bottom) { toast }
         .sheet(item: $state.editor) { _ in
-            EditorSheet(state: state).environment(\.theme, theme)
+            ComposerSheet(state: state).environment(\.theme, theme)
         }
         .sheet(item: $state.confirmRemoval) { confirmation in
             RemovalConfirmSheet(state: state, confirmation: confirmation)
@@ -560,6 +560,10 @@ private struct TeachingEmptyState: View {
 private struct NoMatchView: View {
     @Environment(\.theme) private var theme
     let query: String
+    /// Whether this dead-end is in FIND's prompt dialect — changes only the copy
+    /// ("alias" vs "prompt"), never the interaction: either way Enter opens the
+    /// Composer with the name already filled in.
+    var isPrompt: Bool = false
     let create: () -> Void
 
     var body: some View {
@@ -578,7 +582,7 @@ private struct NoMatchView: View {
                     Image(systemName: "plus.circle.fill")
                         .font(.system(size: 13, weight: .semibold))
                         .foregroundStyle(theme.accent)
-                    Text("Create an alias named")
+                    Text(isPrompt ? "Create a prompt named" : "Create an alias named")
                         .font(.system(size: 12.5, weight: .medium))
                         .foregroundStyle(theme.text)
                     Text(query)
@@ -606,7 +610,7 @@ private struct NoMatchView: View {
                 .contentShape(Rectangle())
                 .live { create() }
 
-                Text("The editor opens with the name filled in.")
+                Text("The Composer opens with the name filled in.")
                     .font(.system(size: 10.5))
                     .foregroundStyle(theme.faint)
             }
@@ -695,11 +699,20 @@ struct FindView: View {
                         TeachingEmptyState(hotkey: settings.hotkeyEnabled
                                                ? settings.hotkey.displayString
                                                : nil,
-                                           create: { state.editor = .create() })
+                                           create: {
+                                               state.openComposer(prefill: ComposerPrefill(kind: .alias))
+                                           })
                     }
                 } else {
-                    NoMatchView(query: state.query,
-                                create: { state.editor = .create(name: state.query) })
+                    // Shell dialect keeps its exact pre-existing alias-creation
+                    // behavior; the prompt dialect gets the prompt-side Composer
+                    // instead, prefilled with the query as the name.
+                    NoMatchView(query: state.query, isPrompt: state.dialect == .prompt,
+                                create: {
+                                    state.openComposer(prefill: ComposerPrefill(
+                                        kind: state.dialect == .prompt ? .prompt : .alias,
+                                        name: state.query, source: "find-no-match"))
+                                })
                 }
             } else if state.dialect == .prompt {
                 // The prompt-favoring half of FIND grows a preview pane (PRE-260);
@@ -1234,24 +1247,18 @@ struct ManageView: View {
                     promptBucketRow(bucket)
                 }
                 Spacer()
+                newButton("New prompt") {
+                    state.openComposer(prefill: ComposerPrefill(kind: .prompt))
+                }
                 dialectFlipHint
             } else {
                 ForEach(Bucket.allCases) { bucket in
                     bucketRow(bucket)
                 }
                 Spacer()
-                Button { state.editor = .create() } label: {
-                    HStack(spacing: 5) {
-                        Image(systemName: "plus").font(.system(size: 9, weight: .bold))
-                        Text("New alias").font(.system(size: 11, weight: .medium))
-                    }
-                    .foregroundStyle(theme.onAccent)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 6)
-                    .background(theme.accent, in: RoundedRectangle(cornerRadius: theme.cornerRadius + 1))
+                newButton("New alias") {
+                    state.openComposer(prefill: ComposerPrefill(kind: .alias))
                 }
-                .buttonStyle(.plain)
-                .help("New alias — ⌘N")
                 dialectFlipHint
             }
         }
@@ -1260,6 +1267,23 @@ struct ManageView: View {
         // they can spare so the detail pane — the one holding a whole command — keeps a
         // usable width at 660.
         .frame(width: 172)
+    }
+
+    /// The one control both sidebar shapes need, differing only in label and which
+    /// kind it opens the Composer on.
+    private func newButton(_ label: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 5) {
+                Image(systemName: "plus").font(.system(size: 9, weight: .bold))
+                Text(label).font(.system(size: 11, weight: .medium))
+            }
+            .foregroundStyle(theme.onAccent)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 6)
+            .background(theme.accent, in: RoundedRectangle(cornerRadius: theme.cornerRadius + 1))
+        }
+        .buttonStyle(.plain)
+        .help("\(label) — ⌘N")
     }
 
     /// The one thing both sidebar shapes share: a small, constant reminder that ⇥
@@ -1513,74 +1537,6 @@ struct ManageView: View {
         }
         .buttonStyle(.plain)
         .foregroundStyle(theme.dim)
-    }
-}
-
-// MARK: - Editor
-
-struct EditorSheet: View {
-    @ObservedObject var state: AppState
-    @Environment(\.theme) private var theme
-    @FocusState private var nameFocused: Bool
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text(state.editor?.mode == .create ? "New alias" : "Edit alias")
-                .font(.system(size: 14, weight: .bold, design: theme.bodyDesign))
-                .foregroundStyle(theme.text)
-
-            if let binding = Binding($state.editor) {
-                field("Name", binding.name, mono: true, focused: true)
-                field("Command", binding.command, mono: true, focused: false)
-            }
-
-            Text("Saved into AliasBar's managed block in \(ZshrcParser.displayPath). Everything outside that block is left alone, and a timestamped backup is written first.")
-                .font(.system(size: 10))
-                .foregroundStyle(theme.faint)
-                .fixedSize(horizontal: false, vertical: true)
-
-            if let error = state.errorMessage {
-                Text(error)
-                    .font(.system(size: 10.5))
-                    .foregroundStyle(.orange)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-
-            HStack(spacing: 8) {
-                Spacer()
-                Button("Cancel") { state.editor = nil; state.errorMessage = nil }
-                    .keyboardShortcut(.cancelAction)
-                Button("Save") { state.commitEditor() }
-                    .keyboardShortcut(.defaultAction)
-                    .disabled(state.editor?.name.isEmpty ?? true
-                              || state.editor?.command.isEmpty ?? true)
-            }
-        }
-        .padding(16)
-        .frame(width: 380)
-        .background(theme.background)
-        .onAppear { nameFocused = true }
-    }
-
-    private func field(_ label: String, _ text: Binding<String>,
-                       mono: Bool, focused: Bool) -> some View {
-        VStack(alignment: .leading, spacing: 3) {
-            Text(label.uppercased())
-                .font(.system(size: 9, weight: .bold))
-                .kerning(0.6)
-                .foregroundStyle(theme.faint)
-            TextField("", text: text)
-                .textFieldStyle(.plain)
-                .font(.system(size: 12.5, design: mono ? .monospaced : theme.bodyDesign))
-                .foregroundStyle(theme.text)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 6)
-                .background(theme.surface,
-                            in: RoundedRectangle(cornerRadius: theme.cornerRadius + 1))
-                .overlay(RoundedRectangle(cornerRadius: theme.cornerRadius + 1)
-                    .strokeBorder(theme.rule.opacity(0.5), lineWidth: 1))
-                .focused($nameFocused, equals: focused)
-        }
     }
 }
 

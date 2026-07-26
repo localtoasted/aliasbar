@@ -142,6 +142,13 @@ struct PromptManageView: View {
                 .font(.system(size: 17, weight: .semibold, design: theme.nameDesign))
                 .foregroundStyle(theme.text)
             Spacer()
+            // Present in every bucket, including Health: an Edit/view action is
+            // explicitly fine even for a stale-only or colliding-only diagnosis — it's
+            // the destructive actions Health withholds, never this one. ⌘E does the
+            // same thing from the keyboard.
+            actionButton("Edit", "pencil", prominent: false) {
+                state.beginEditPrompt(shortcut)
+            }
         }
     }
 

@@ -7103,6 +7103,553 @@ do {
 }
 
 // ---------------------------------------------------------------------------
+print("\n40. Composer: unified alias/prompt sheet (PRE-267)")
+
+/// A synthetic key-down event, matching the style already used above for MANAGE's
+/// ⌘↓ test — raw keycodes with a comment rather than `import Carbon.HIToolbox` in
+/// the test target.
+func composerKeyEvent(_ keyCode: UInt16, command: Bool = false) -> NSEvent {
+    NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: command ? [.command] : [],
+                     timestamp: 0, windowNumber: 0, context: nil,
+                     characters: "", charactersIgnoringModifiers: "",
+                     isARepeat: false, keyCode: keyCode)!
+}
+
+// --- Prefill routes: openComposer is the one entry point -----------------------
+
+do {
+    let (state, _, _, _, _, _, _) = freshManageFixture()
+    state.prepareForShow()
+
+    state.openComposer(prefill: ComposerPrefill(kind: .alias, name: "gs", body: "git status", source: "test"))
+    check("openComposer(alias) opens an alias-kind target", state.editor?.kind == .alias)
+    check("openComposer(alias) prefills name from ComposerPrefill.name", state.editor?.name == "gs")
+    check("openComposer(alias) prefills the alias command from ComposerPrefill.body (the hook's shared field)",
+          state.editor?.command == "git status")
+
+    state.openComposer(prefill: ComposerPrefill(kind: .prompt, name: "review", description: "Reviews a diff",
+                                                body: "Please review {{diff}}", deliverToClaudeCode: true,
+                                                source: "test"))
+    check("openComposer(prompt) opens a prompt-kind target", state.editor?.kind == .prompt)
+    check("openComposer(prompt) prefills description", state.editor?.description == "Reviews a diff")
+    check("openComposer(prompt) prefills body", state.editor?.body == "Please review {{diff}}")
+    check("openComposer(prompt) prefills the delivery checkbox", state.editor?.deliverToClaudeCode == true)
+    check("openComposer carries the source tag through for provenance", state.editor?.source == "test")
+}
+
+// --- Prefill routes: ⌘N follows AppState.dialect --------------------------------
+
+do {
+    let (state, _, _, _, _, _, _) = freshManageFixture()
+    state.prepareForShow()
+    state.mode = .find
+    state.dialect = .shell
+    _ = state.handleKey(composerKeyEvent(45, command: true)) // ⌘N
+    check("⌘N in shell dialect opens an alias-kind Composer", state.editor?.kind == .alias)
+
+    state.editor = nil
+    state.dialect = .prompt
+    _ = state.handleKey(composerKeyEvent(45, command: true))
+    check("⌘N in prompt dialect opens a prompt-kind Composer", state.editor?.kind == .prompt)
+}
+
+// --- Prefill routes: no-match Enter in FIND, both dialects ----------------------
+
+do {
+    let (state, _, _, _, _, _, _) = freshManageFixture()
+    state.prepareForShow()
+    state.mode = .find
+    state.dialect = .shell
+    state.query = "nonexistentquery"
+    _ = state.handleKey(composerKeyEvent(36)) // Return
+    check("shell dialect's no-match Enter keeps its exact pre-existing alias-creation behavior",
+          state.editor?.kind == .alias && state.editor?.name == "nonexistentquery")
+
+    state.editor = nil
+    state.dialect = .prompt
+    state.query = "anotherquery"
+    _ = state.handleKey(composerKeyEvent(36))
+    check("prompt dialect's no-match Enter prefills a prompt-kind Composer from the query",
+          state.editor?.kind == .prompt && state.editor?.name == "anotherquery")
+}
+
+// --- Prefill routes: ⌘E on a prompt row opens a prompt edit target --------------
+
+do {
+    let (state, promptsDir, _, _, _, _, _) = freshManageFixture()
+    writeRawPromptFile(promptFixture(["---", "schema: 1", "description: Reviews a diff", "---", "Please review {{diff}}"]),
+                        name: "review", in: promptsDir)
+    state.prepareForShow()
+    state.mode = .find
+    state.dialect = .prompt
+    state.query = "review"
+    guard let idx = state.findResults.firstIndex(where: { $0.name == "review" }) else {
+        check("the review prompt appears in FIND's results", false)
+        fatalError("unreachable — check() above already failed")
+    }
+    state.selection = idx
+    _ = state.handleKey(composerKeyEvent(14, command: true)) // ⌘E
+    check("⌘E on a prompt row in FIND opens a prompt-kind edit target",
+          state.editor?.kind == .prompt && state.editor?.mode == .edit)
+    check("⌘E prefills name/description/body from the prompt",
+          state.editor?.name == "review" && state.editor?.description == "Reviews a diff"
+              && state.editor?.body == "Please review {{diff}}")
+    check("⌘E prefills originalName so a rename can find the old file",
+          state.editor?.originalName == "review")
+}
+
+// --- Prefill routes: ⌘E on the prompt Board deck and MANAGE's prompt dialect ----
+
+do {
+    let (state, promptsDir, _, _, _, _, _) = freshManageFixture()
+    writeRawPromptFile(promptFixture(["---", "schema: 1", "---", "Board body"]), name: "boardprompt", in: promptsDir)
+    state.prepareForShow()
+    state.mode = .board
+    state.dialect = .prompt
+    guard let idx = state.boardPrompts.firstIndex(where: { $0.name == "boardprompt" }) else {
+        check("boardprompt appears in the Board prompt deck", false)
+        fatalError("unreachable — check() above already failed")
+    }
+    state.selection = idx
+    _ = state.handleKey(composerKeyEvent(14, command: true))
+    check("⌘E on a prompt card in BOARD opens a prompt edit target",
+          state.editor?.kind == .prompt && state.editor?.name == "boardprompt")
+}
+
+do {
+    let (state, promptsDir, _, _, _, _, _) = freshManageFixture()
+    writeRawPromptFile(promptFixture(["---", "schema: 1", "---", "Manage body"]), name: "manageprompt", in: promptsDir)
+    state.prepareForShow()
+    state.mode = .manage
+    state.dialect = .prompt
+    state.promptBucket = .library
+    state.selection = 0
+    _ = state.handleKey(composerKeyEvent(14, command: true))
+    check("⌘E on a prompt row in MANAGE's prompt dialect opens a prompt edit target",
+          state.editor?.kind == .prompt && state.editor?.name == "manageprompt")
+}
+
+// --- Prefill routes: functions refuse creation/editing (frozen ruling A6) ------
+
+do {
+    let (state, _, _, _, rcPath, _, _) = freshManageFixture()
+    try! """
+    myfunc() { echo hi; }
+    # >>> aliasbar managed block >>>
+    # <<< aliasbar managed block <<<
+    """.write(toFile: rcPath, atomically: true, encoding: .utf8)
+    state.prepareForShow()
+
+    state.mode = .find
+    state.dialect = .shell
+    state.query = "myfunc"
+    guard let idx = state.findResults.firstIndex(where: { $0.name == "myfunc" }) else {
+        check("myfunc appears in FIND", false)
+        fatalError("unreachable — check() above already failed")
+    }
+    state.selection = idx
+    _ = state.handleKey(composerKeyEvent(14, command: true))
+    check("⌘E on a function in FIND never opens the Composer", state.editor == nil)
+    check("⌘E on a function in FIND shows the existing read-only toast",
+          state.toast == "AliasBar edits aliases, not functions")
+
+    state.toast = nil
+    state.mode = .board
+    state.dialect = .shell
+    state.query = ""
+    guard let boardIdx = state.boardEntries.firstIndex(where: { $0.name == "myfunc" }) else {
+        check("myfunc appears in BOARD", false)
+        fatalError("unreachable — check() above already failed")
+    }
+    state.selection = boardIdx
+    _ = state.handleKey(composerKeyEvent(14, command: true))
+    check("⌘E on a function keycap in BOARD never opens the Composer", state.editor == nil)
+
+    state.toast = nil
+    state.mode = .manage
+    state.dialect = .shell
+    state.bucket = .functions
+    state.selection = 0
+    _ = state.handleKey(composerKeyEvent(14, command: true))
+    check("⌘E on a function row in MANAGE never opens the Composer", state.editor == nil)
+}
+
+// --- Kind control: always switchable, converts an edit to a create -------------
+
+do {
+    let (state, _, _, _, _, _, _) = freshManageFixture()
+    state.prepareForShow()
+
+    state.openComposer(prefill: ComposerPrefill(kind: .alias, name: "shared", body: "git status"))
+    state.switchComposerKind(to: .prompt)
+    check("switching kind mid-create converts to the new kind", state.editor?.kind == .prompt)
+    check("switching kind carries the name across", state.editor?.name == "shared")
+    check("switching kind never carries an alias command into the prompt body",
+          state.editor?.body.isEmpty == true)
+    check("switching kind stays in create mode", state.editor?.mode == .create)
+
+    let before = state.editor
+    state.switchComposerKind(to: .prompt)
+    check("switching to the already-selected kind is a no-op",
+          state.editor?.id == before?.id && state.editor?.name == before?.name)
+}
+
+do {
+    let (state, promptsDir, _, _, _, _, _) = freshManageFixture()
+    writeRawPromptFile(promptFixture(["---", "schema: 1", "---", "Body"]), name: "existingprompt", in: promptsDir)
+    state.prepareForShow()
+    guard case .success(let existing) = PromptStore.read(url: promptsDir.appendingPathComponent("existingprompt.md")) else {
+        check("fixture existingprompt readable", false)
+        fatalError("unreachable — check() above already failed")
+    }
+    state.beginEditPrompt(Shortcut(prompt: existing))
+    check("beginEditPrompt opens an edit-mode target", state.editor?.mode == .edit)
+
+    state.switchComposerKind(to: .alias)
+    check("switching kind mid-edit converts the sheet to create mode — a shell alias and a prompt share no identity to hand off",
+          state.editor?.kind == .alias && state.editor?.mode == .create)
+    check("the name still carries across the kind switch", state.editor?.name == "existingprompt")
+}
+
+// --- Live validation: alias half ------------------------------------------------
+
+do {
+    let (state, _, _, _, rcPath, _, _) = freshManageFixture()
+    try! """
+    alias gs='old status, hand-written'
+    # >>> aliasbar managed block >>>
+    myfunc() { echo hi; }
+    # <<< aliasbar managed block <<<
+    """.write(toFile: rcPath, atomically: true, encoding: .utf8)
+    state.prepareForShow()
+
+    let empty = state.composerAliasValidation(name: "", command: "git status", originalName: "")
+    check("an empty name produces no live alias validation message",
+          empty.blocking == nil && empty.advisory == nil)
+
+    let reserved = state.composerAliasValidation(name: "if", command: "true", originalName: "")
+    check("a reserved word is blocking, matching AliasWriter.validate's own message verbatim",
+          reserved.blocking == AliasWriter.WriteError.reservedName("if").errorDescription)
+
+    let outsideBlock = state.composerAliasValidation(name: "gs", command: "git status", originalName: "")
+    check("a name already defined outside the managed block is blocking, in the packet's terse phrasing",
+          outsideBlock.blocking == "gs already defined at zshrc:1 — outside the managed block, can't edit it",
+          outsideBlock.blocking ?? "nil")
+
+    // `myfunc` sits *inside* the managed block in this fixture (managed: true), so
+    // it is not caught by the "outside the block" blocking check above — it
+    // exercises the milder, advisory-only alias/function name clash instead.
+    let functionClash = state.composerAliasValidation(name: "myfunc", command: "echo x", originalName: "")
+    check("a name colliding with an existing (managed) function is advisory, never blocking",
+          functionClash.blocking == nil && functionClash.advisory != nil)
+
+    let fakeDir = sandbox + "/composer-path-test"
+    try! FileManager.default.createDirectory(atPath: fakeDir, withIntermediateDirectories: true)
+    let fakeBin = fakeDir + "/shadowme"
+    FileManager.default.createFile(atPath: fakeBin, contents: Data())
+    try! FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: fakeBin)
+    let shadow = state.composerAliasValidation(name: "shadowme", command: "echo x", originalName: "",
+                                               searchPaths: [fakeDir])
+    check("a name shadowing a PATH binary is advisory, never blocking",
+          shadow.blocking == nil && shadow.advisory == "shadowme shadows a command on your PATH.",
+          shadow.advisory ?? "nil")
+}
+
+// --- Live validation: prompt half -----------------------------------------------
+
+do {
+    let (state, promptsDir, _, _, _, _, _) = freshManageFixture()
+    writeRawPromptFile(promptFixture(["---", "schema: 1", "---", "Existing body"]), name: "existing", in: promptsDir)
+    state.prepareForShow()
+
+    let empty = state.composerPromptValidation(name: "", originalName: "")
+    check("an empty name produces no live prompt validation message", empty.blocking == nil)
+
+    let invalidChars = state.composerPromptValidation(name: "not valid!", originalName: "")
+    check("an invalid prompt name is blocking", invalidChars.blocking != nil)
+
+    let collision = state.composerPromptValidation(name: "EXISTING", originalName: "")
+    check("a case-insensitive collision against a different, already-existing prompt is blocking for a new name",
+          collision.blocking == "A prompt named \"existing\" already exists.")
+
+    let selfEdit = state.composerPromptValidation(name: "existing", originalName: "existing")
+    check("editing yourself under your own name is never reported as a collision", selfEdit.blocking == nil)
+
+    let selfCaseRename = state.composerPromptValidation(name: "Existing", originalName: "existing")
+    check("a case-only rename of yourself is not blocked live — that path is handled specially at save time",
+          selfCaseRename.blocking == nil)
+
+    let builtin = state.composerPromptValidation(name: "review", originalName: "")
+    check("a builtin slash-command name collision is advisory only, never blocking",
+          builtin.blocking == nil && builtin.advisory != nil)
+}
+
+// --- Destination strings: real resolved paths, abbreviated ---------------------
+
+do {
+    let (state, _, _, _, _, _, _) = freshManageFixture()
+    state.prepareForShow()
+
+    let aliasLines = state.composerDestination(for: .create(name: "gs", command: "git status"))
+    check("the alias destination names the real managed block + rc path",
+          aliasLines.first == "→ managed block in \(ZshrcParser.displayPath)")
+
+    let promptLines = state.composerDestination(for: .createPrompt(name: "review", body: "Review {{diff}}"))
+    let expectedPromptsDir = (AppPaths.promptsDirectory as NSString).abbreviatingWithTildeInPath
+    check("the prompt destination (delivery unchecked) names only the prompts file",
+          promptLines.first == "→ \(expectedPromptsDir)/review.md" && promptLines.count == 2)
+
+    let deliveredLines = state.composerDestination(
+        for: .createPrompt(name: "review", body: "Review {{diff}}", deliverToClaudeCode: true))
+    let expectedCommandsDir = (AppPaths.claudeCommandsDirectory as NSString).abbreviatingWithTildeInPath
+    check("checking delivery adds the Claude Code commands destination as a second line",
+          deliveredLines.contains("+ \(expectedCommandsDir)/review.md") && deliveredLines.count == 3)
+}
+
+// --- Save flow: prompt create ---------------------------------------------------
+
+do {
+    let (state, promptsDir, _, _, _, _, _) = freshManageFixture()
+    state.prepareForShow()
+
+    state.openComposer(prefill: ComposerPrefill(kind: .prompt, name: "greet", description: "Say hi",
+                                                body: "Hello {{name}}"))
+    state.commitEditor()
+    check("saving a new prompt writes the file",
+          FileManager.default.fileExists(atPath: promptsDir.appendingPathComponent("greet.md").path))
+    check("saving closes the Composer", state.editor == nil)
+
+    guard case .success(let created) = PromptStore.read(url: promptsDir.appendingPathComponent("greet.md")) else {
+        check("the newly created prompt is readable", false)
+        fatalError("unreachable — check() above already failed")
+    }
+    check("create stamps schema: 1", created.frontmatter?.schema == 1)
+    check("create preserves the description", created.description == "Say hi")
+    check("create preserves the body", created.body == "Hello {{name}}")
+    check("create stamps `edited` on the very first save (there is no prior content to compare against)",
+          created.editedAt != nil)
+}
+
+// --- Save flow: prompt edit — `edited` stamped only on real content change -----
+
+do {
+    let (state, promptsDir, commandsDir, registryPath, _, _, _) = freshManageFixture()
+    state.prepareForShow()
+    // Fixed, well-separated instants rather than the real clock: two saves that
+    // happen to land inside the same wall-clock second would otherwise stamp an
+    // identical `edited` string and make "restamps on content change" untestable.
+    let t0 = Date(timeIntervalSince1970: 1_800_000_000)
+    let t1 = t0.addingTimeInterval(60)
+    let t2 = t1.addingTimeInterval(60)
+    let t3 = t2.addingTimeInterval(60)
+
+    state.openComposer(prefill: ComposerPrefill(kind: .prompt, name: "greet2", description: "Say hi",
+                                                body: "Hello {{name}}"))
+    state.commitEditor(now: t0)
+    guard case .success(let created) = PromptStore.read(url: promptsDir.appendingPathComponent("greet2.md")) else {
+        check("fixture greet2 readable after create", false)
+        fatalError("unreachable — check() above already failed")
+    }
+    let firstEdited = created.editedAt
+    check("the fixture's first save recorded an `edited` timestamp", firstEdited != nil)
+
+    // Toggle only the delivery checkbox — no description/body change.
+    state.beginEditPrompt(Shortcut(prompt: created))
+    var deliveryOnly = state.editor!
+    deliveryOnly.deliverToClaudeCode = true
+    state.editor = deliveryOnly
+    state.commitEditor(now: t1)
+
+    guard case .success(let afterDeliveryToggle) = PromptStore.read(url: promptsDir.appendingPathComponent("greet2.md")) else {
+        check("greet2 still readable after the delivery-only save", false)
+        fatalError("unreachable — check() above already failed")
+    }
+    check("toggling only the delivery checkbox does not restamp `edited`, even though the clock moved",
+          afterDeliveryToggle.editedAt == firstEdited)
+    check("the delivery frontmatter now records claude-code",
+          afterDeliveryToggle.deliveryTargets.contains(.claudeCode))
+    check("checking delivery actually compiled a real Claude Code command",
+          FileManager.default.fileExists(atPath: commandsDir + "/greet2.md"))
+
+    // Now actually change the body — `edited` must move.
+    state.beginEditPrompt(Shortcut(prompt: afterDeliveryToggle))
+    var bodyChange = state.editor!
+    bodyChange.body = "Hello there, {{name}}!"
+    state.editor = bodyChange
+    state.commitEditor(now: t2)
+
+    guard case .success(let afterBodyChange) = PromptStore.read(url: promptsDir.appendingPathComponent("greet2.md")) else {
+        check("greet2 still readable after the body change", false)
+        fatalError("unreachable — check() above already failed")
+    }
+    check("changing the body restamps `edited` to the new save's instant",
+          afterBodyChange.editedAt != nil && afterBodyChange.editedAt != firstEdited)
+    check("the new body was actually saved", afterBodyChange.body == "Hello there, {{name}}!")
+
+    // Uncheck delivery — the compiled command must come down.
+    state.beginEditPrompt(Shortcut(prompt: afterBodyChange))
+    var deliveryOff = state.editor!
+    deliveryOff.deliverToClaudeCode = false
+    state.editor = deliveryOff
+    state.commitEditor(now: t3)
+    check("unchecking delivery uninstalls the previously compiled command",
+          !FileManager.default.fileExists(atPath: commandsDir + "/greet2.md"))
+    if case .ok(let installed) = PromptCompiler.installedCommands(registryPath: registryPath) {
+        check("the registry no longer lists greet2 as installed",
+              !installed.contains { $0.name == "greet2" })
+    } else {
+        check("the registry is still readable after uninstall-on-uncheck", false)
+    }
+}
+
+// --- Save flow: unknown frontmatter keys survive an edit ------------------------
+
+do {
+    let (state, promptsDir, _, _, _, _, _) = freshManageFixture()
+    writeRawPromptFile(promptFixture(["---", "schema: 1", "custom-key: keep me exactly",
+                                      "description: Old desc", "---", "Old body"]),
+                        name: "custom", in: promptsDir)
+    state.prepareForShow()
+    guard case .success(let original) = PromptStore.read(url: promptsDir.appendingPathComponent("custom.md")) else {
+        check("fixture custom readable", false)
+        fatalError("unreachable — check() above already failed")
+    }
+    state.beginEditPrompt(Shortcut(prompt: original))
+    var target = state.editor!
+    target.body = "New body"
+    state.editor = target
+    state.commitEditor()
+
+    let rewritten = try! String(contentsOfFile: promptsDir.appendingPathComponent("custom.md").path)
+    check("an unrecognized frontmatter key survives an edit through the Composer verbatim",
+          rewritten.contains("custom-key: keep me exactly"))
+    check("the body actually changed", rewritten.contains("New body") && !rewritten.contains("Old body"))
+}
+
+// --- Save flow: a compile failure never blocks the prompt save itself ----------
+
+do {
+    let (state, promptsDir, commandsDir, _, _, _, _) = freshManageFixture()
+    let handwrittenPath = commandsDir + "/newprompt.md"
+    try! "# hand-written, not AliasBar's\n".write(toFile: handwrittenPath, atomically: true, encoding: .utf8)
+    state.prepareForShow()
+
+    state.openComposer(prefill: ComposerPrefill(kind: .prompt, name: "newprompt", body: "Body text",
+                                                deliverToClaudeCode: true))
+    state.commitEditor()
+
+    check("the prompt file was written even though compiling it failed",
+          FileManager.default.fileExists(atPath: promptsDir.appendingPathComponent("newprompt.md").path))
+    check("the Composer still closed — the prompt's own save succeeded",
+          state.editor == nil)
+    let expectedError = PromptCompiler.CompileError.collision(name: "newprompt", path: handwrittenPath).errorDescription
+    check("the compile failure surfaces via CompileError's message, verbatim",
+          state.errorMessage == expectedError)
+    check("the hand-written command file was left completely untouched",
+          (try? String(contentsOfFile: handwrittenPath)) == "# hand-written, not AliasBar's\n")
+}
+
+// --- Save flow: prompt rename, plain and compiled -------------------------------
+
+do {
+    let (state, promptsDir, _, _, _, _, _) = freshManageFixture()
+    writeRawPromptFile(promptFixture(["---", "schema: 1", "---", "Original body"]), name: "oldname", in: promptsDir)
+    state.prepareForShow()
+    guard case .success(let original) = PromptStore.read(url: promptsDir.appendingPathComponent("oldname.md")) else {
+        check("fixture oldname readable", false)
+        fatalError("unreachable — check() above already failed")
+    }
+    state.beginEditPrompt(Shortcut(prompt: original))
+    var target = state.editor!
+    target.name = "newname"
+    state.editor = target
+    state.commitEditor()
+
+    check("renaming writes the new name", FileManager.default.fileExists(atPath: promptsDir.appendingPathComponent("newname.md").path))
+    check("renaming removes the old name", !FileManager.default.fileExists(atPath: promptsDir.appendingPathComponent("oldname.md").path))
+    let backupNames = (try? FileManager.default.contentsOfDirectory(atPath: promptsDir.appendingPathComponent(".backups").path)) ?? []
+    check("the old content was backed up before being removed",
+          backupNames.contains { $0.hasPrefix("oldname-") })
+}
+
+do {
+    let (state, promptsDir, commandsDir, registryPath, _, _, _) = freshManageFixture()
+    writeRawPromptFile(promptFixture(["---", "schema: 1", "---", "Body one"]), name: "aaa", in: promptsDir)
+    state.prepareForShow()
+    guard case .success(let aaa) = PromptStore.read(url: promptsDir.appendingPathComponent("aaa.md")) else {
+        check("fixture aaa readable", false)
+        fatalError("unreachable — check() above already failed")
+    }
+    state.installPrompt(Shortcut(prompt: aaa))
+    check("aaa is compiled before the rename", FileManager.default.fileExists(atPath: commandsDir + "/aaa.md"))
+
+    state.beginEditPrompt(Shortcut(prompt: aaa))
+    check("beginEditPrompt reads the real installed-status for the delivery checkbox",
+          state.editor?.deliverToClaudeCode == true)
+    var target = state.editor!
+    target.name = "bbb"
+    state.editor = target
+    state.commitEditor()
+
+    check("renaming a compiled prompt uninstalls the old compiled command",
+          !FileManager.default.fileExists(atPath: commandsDir + "/aaa.md"))
+    check("renaming a compiled prompt (delivery stays checked) compiles the new name",
+          FileManager.default.fileExists(atPath: commandsDir + "/bbb.md"))
+    if case .ok(let installed) = PromptCompiler.installedCommands(registryPath: registryPath) {
+        check("the registry reflects the rename — old name gone, new name present",
+              !installed.contains { $0.name == "aaa" } && installed.contains { $0.name == "bbb" })
+    } else {
+        check("the registry is still readable after a compiled rename", false)
+    }
+}
+
+do {
+    let (state, promptsDir, _, _, _, _, _) = freshManageFixture()
+    writeRawPromptFile(promptFixture(["---", "schema: 1", "---", "Body"]), name: "foo", in: promptsDir)
+    state.prepareForShow()
+    guard case .success(let foo) = PromptStore.read(url: promptsDir.appendingPathComponent("foo.md")) else {
+        check("fixture foo readable", false)
+        fatalError("unreachable — check() above already failed")
+    }
+    state.beginEditPrompt(Shortcut(prompt: foo))
+    var target = state.editor!
+    target.name = "Foo"
+    state.editor = target
+    state.commitEditor()
+
+    check("a case-only rename saves without error", state.errorMessage == nil)
+    // `fileExists` alone can't prove this on a case-insensitive filesystem (the two
+    // names resolve to the same lookup); the actual stored case is only visible via
+    // a directory listing.
+    let filenames = (try? FileManager.default.contentsOfDirectory(atPath: promptsDir.path)) ?? []
+    check("the case-only rename actually changed the stored filename's case to Foo.md",
+          filenames.contains("Foo.md") && !filenames.contains("foo.md"), "\(filenames)")
+}
+
+do {
+    let (state, promptsDir, _, _, _, _, _) = freshManageFixture()
+    writeRawPromptFile(promptFixture(["---", "schema: 1", "---", "A"]), name: "alpha", in: promptsDir)
+    writeRawPromptFile(promptFixture(["---", "schema: 1", "---", "B"]), name: "beta", in: promptsDir)
+    state.prepareForShow()
+    guard case .success(let alpha) = PromptStore.read(url: promptsDir.appendingPathComponent("alpha.md")) else {
+        check("fixture alpha readable", false)
+        fatalError("unreachable — check() above already failed")
+    }
+    state.beginEditPrompt(Shortcut(prompt: alpha))
+    var target = state.editor!
+    target.name = "beta"
+    state.editor = target
+    state.commitEditor()
+
+    check("renaming onto an existing prompt's name is refused", state.errorMessage != nil)
+    check("the Composer stays open on a refused rename", state.editor != nil)
+    check("the original file is untouched by the refused rename",
+          (try? String(contentsOfFile: promptsDir.appendingPathComponent("alpha.md").path))?.contains("A") == true)
+    check("the colliding file is untouched by the refused rename",
+          (try? String(contentsOfFile: promptsDir.appendingPathComponent("beta.md").path))?.contains("B") == true)
+}
+
+// ---------------------------------------------------------------------------
 print("\n" + String(repeating: "-", count: 60))
 print("\(passes) passed, \(failures) failed")
 exit(failures == 0 ? 0 : 1)
