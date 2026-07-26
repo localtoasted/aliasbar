@@ -226,9 +226,13 @@ enum SensitiveContentClassifier {
     private static func assignmentReason(in content: String) -> QuarantineReason? {
         for rawLine in content.split(whereSeparator: \.isNewline) {
             var line = rawLine.trimmingCharacters(in: .whitespaces)
-            if line.hasPrefix("export ") {
-                line = String(line.dropFirst("export ".count))
-                    .trimmingCharacters(in: .whitespaces)
+            if line.hasPrefix("export") {
+                let remainder = line.dropFirst("export".count)
+                if let first = remainder.first, first == " " || first == "\t" {
+                    line = String(remainder.drop {
+                        $0 == " " || $0 == "\t"
+                    })
+                }
             }
 
             guard let separator = line.firstIndex(of: "=") else { continue }
@@ -288,7 +292,7 @@ enum SensitiveContentClassifier {
     private static func isPlaceholder(_ value: String) -> Bool {
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.hasPrefix("${") && trimmed.hasSuffix("}") {
-            return true
+            return isEnvironmentName(String(trimmed.dropFirst(2).dropLast()))
         }
         if trimmed.hasPrefix("$"),
            isEnvironmentName(String(trimmed.dropFirst())) {

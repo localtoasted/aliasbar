@@ -2757,9 +2757,21 @@ check("private-looking plural label stays safe",
 
 check("generic token assignment is quarantined",
       classifierReason("API_TOKEN=abcdefgh") == .environmentSecret)
+check("single-space export assignment is quarantined",
+      classifierReason("export API_TOKEN=abcdefgh") == .environmentSecret)
+check("tab export AWS secret assignment is quarantined",
+      classifierReason("export\tAWS_SECRET_ACCESS_KEY=\(syntheticAWSSecret)")
+          == .awsSecretAccessKey)
+check("mixed ASCII shell blanks after export are accepted",
+      classifierReason("export \t  DATABASE_PASSWORD=correct-horse")
+          == .environmentSecret)
 check("exported quoted password is quarantined",
       classifierReason(#"export DATABASE_PASSWORD="correct horse battery staple""#)
           == .environmentSecret)
+check("export identifier lookalike stays safe",
+      classifierReason("exported API_TOKEN=abcdefgh") == nil)
+check("non-ASCII export separator stays safe",
+      classifierReason("export\u{00A0}API_TOKEN=abcdefgh") == nil)
 check("Unicode secret assignment is quarantined",
       classifierReason("CLIENT_SECRET=秘密の合言葉") == .environmentSecret)
 check("environment value floor is inclusive",
@@ -2771,6 +2783,12 @@ check("placeholder expansion stays safe",
       classifierReason(#"API_TOKEN=${TOKEN}"#) == nil)
 check("unbraced placeholder expansion stays safe",
       classifierReason(#"API_TOKEN=$LONG_TOKEN_NAME"#) == nil)
+check("operator-bearing AWS fallback is quarantined",
+      classifierReason(
+          "AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-\(syntheticAWSSecret)}"
+      ) == .environmentSecret)
+check("operator-bearing fallback on a non-secret name stays safe",
+      classifierReason("PUBLIC_VALUE=${PUBLIC_VALUE:-abcdefgh}") == nil)
 check("placeholder words stay safe",
       classifierReason("API_TOKEN=change-me") == nil)
 check("non-secret token-count variable stays safe",
