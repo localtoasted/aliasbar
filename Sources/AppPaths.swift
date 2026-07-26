@@ -58,6 +58,30 @@ enum AppPaths {
         )
     }
 
+    /// Where `ClipboardMonitor`'s history persists when `clipboardPersistence` is
+    /// on. `ALIASBAR_CLIPS_PATH` exists purely for testability, matching
+    /// `ALIASBAR_PROMPTS_DIR`'s reasoning.
+    ///
+    /// Resolved here rather than added to `CorePaths` in `Model.swift`: unlike the
+    /// other paths above, clipboard persistence has no CLI-side consumer, so there
+    /// is nothing this needs to stay in lockstep with across an app/CLI boundary —
+    /// keeping it a small pure resolver on `AppPaths` itself is the same shape
+    /// without touching the shared core file at all.
+    static var clipsPath: String {
+        resolveClipsPath(
+            environmentOverride: ProcessInfo.processInfo.environment["ALIASBAR_CLIPS_PATH"],
+            homeDirectory: NSHomeDirectory()
+        )
+    }
+
+    static func resolveClipsPath(environmentOverride: String?,
+                                 homeDirectory: String) -> String {
+        if let environmentOverride, !environmentOverride.isEmpty {
+            return (environmentOverride as NSString).expandingTildeInPath
+        }
+        return homeDirectory + "/.aliasbar/clips.json"
+    }
+
     // Existing call sites (including WriterTests.swift) reach the resolvers through
     // AppPaths. Kept as thin forwarders so nothing outside this file has to change,
     // while CorePaths remains the one place the actual precedence logic lives.

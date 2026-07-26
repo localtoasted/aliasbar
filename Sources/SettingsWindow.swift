@@ -125,13 +125,14 @@ struct SettingsView: View {
     }
 
     enum SettingsSection: String, CaseIterable, Identifiable {
-        case behaviour, appearance, content, sync, about
+        case behaviour, appearance, content, clipboard, sync, about
         var id: String { rawValue }
         var label: String {
             switch self {
             case .behaviour: return "Behaviour"
             case .appearance: return "Appearance"
             case .content: return "Content"
+            case .clipboard: return "Clipboard"
             case .sync: return "Sync"
             case .about: return "About"
             }
@@ -141,6 +142,7 @@ struct SettingsView: View {
             case .behaviour: return "keyboard"
             case .appearance: return "paintpalette"
             case .content: return "doc.text"
+            case .clipboard: return "doc.on.clipboard"
             case .sync: return "arrow.triangle.2.circlepath"
             case .about: return "info.circle"
             }
@@ -157,6 +159,7 @@ struct SettingsView: View {
                     case .behaviour: behaviourSection
                     case .appearance: appearanceSection
                     case .content: contentSection
+                    case .clipboard: clipboardSection
                     case .sync: syncSection
                     case .about: aboutSection
                     }
@@ -535,6 +538,42 @@ struct SettingsView: View {
 
             SettingsGroup("Usage data") {
                 NoticeText("Counts come from ~/.zsh_history, read locally and never written to or sent anywhere. They power ranking and the Never run bucket.",
+                           tone: .info)
+            }
+        }
+    }
+
+    // MARK: Clipboard
+
+    private var clipboardSection: some View {
+        VStack(alignment: .leading, spacing: 22) {
+            SettingsGroup("Watching") {
+                SettingsRow("Monitor the clipboard",
+                            hint: "Watching starts only when you turn this on. Secret-shaped clips — tokens, keys, passwords — are recognized and quarantined in memory only; they never touch disk, synced or not.") {
+                    ThemedToggle(isOn: $settings.clipboardMonitoring,
+                                 label: settings.clipboardMonitoring ? "On" : "Off")
+                }
+            }
+
+            SettingsGroup("Saving to disk") {
+                SettingsRow("Remember clips between launches",
+                            hint: "Off by default. When on, up to 200 recent clips are written to ~/.aliasbar/clips.json so they survive quitting AliasBar. Quarantined clips are never included — this only ever holds what already passed the same secret-shape check the clipboard source itself uses.") {
+                    ThemedToggle(isOn: $settings.clipboardPersistence,
+                                 label: settings.clipboardPersistence ? "On" : "Off")
+                }
+                SettingsRow("Include in the sync file",
+                            hint: settings.clipboardPersistence
+                                ? "Mirrors those same clips into the Sync file (Settings > Sync), if one is configured. That file may live in iCloud Drive, Dropbox, or a dotfiles repo — only turn this on if you're comfortable with clipboard history living wherever that file does."
+                                : "Needs \"Remember clips between launches\" on first — there is nothing to mirror otherwise.") {
+                    ThemedToggle(isOn: $settings.clipboardInSyncFile,
+                                 label: settings.clipboardInSyncFile ? "On" : "Off")
+                        .disabled(!settings.clipboardPersistence)
+                        .opacity(settings.clipboardPersistence ? 1 : 0.45)
+                }
+            }
+
+            SettingsGroup("Quarantine") {
+                NoticeText("Quarantine isn't configurable. Concealed pasteboard content (from password managers) and anything that looks like a secret is held in memory for about 90 seconds — long enough to notice a mistaken copy — and shown only as a reason (\"GitHub token\", \"high-entropy string\"), never as content. It is never written to disk, synced or not, regardless of the settings above.",
                            tone: .info)
             }
         }
