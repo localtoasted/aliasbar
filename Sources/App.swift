@@ -126,11 +126,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             if openOnLaunch == "1" || openOnLaunch == "history" || openOnLaunch == "settings" {
                 if openOnLaunch == "settings" {
                     self.openSettings()
-                } else if statusItemReady {
+                } else if statusItemReady || settings.presentationStyle == .palette {
+                    // The centered palette has no status-item geometry dependency;
+                    // only the menu-bar popover must wait for a measurable button.
                     self.summon()
                     if openOnLaunch == "history" { self.state.enterHistory() }
                 } else {
-                    Diag.log("open-on-launch palette skipped because status item is not ready")
+                    Diag.log("open-on-launch popover skipped because status item is not ready")
                 }
             }
 
