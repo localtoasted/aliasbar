@@ -277,6 +277,10 @@ struct OnboardingView: View {
                     ThemedToggle(isOn: clipboardWatchingBinding, label: "Monitor the clipboard")
                 }
             }
+
+            SettingsGroup("Build your library") {
+                LibraryBuilderPanel()
+            }
         }
     }
 

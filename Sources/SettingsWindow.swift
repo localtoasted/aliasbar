@@ -322,6 +322,11 @@ struct SettingsView: View {
                                    options: ViewMode.allCases,
                                    label: { $0.label })
                 }
+                SettingsRow("Starts with", hint: "You can switch libraries with ⇥.") {
+                    ThemedSegments(selection: $settings.defaultLibrary,
+                                   options: DefaultLibrary.allCases,
+                                   label: { $0.label })
+                }
                 SettingsRow("Launch at login", hint: nil) {
                     ThemedToggle(isOn: $launchAtLogin, label: launchAtLogin ? "On" : "Off")
                         .onChange(of: launchAtLogin) { enabled in
@@ -535,6 +540,10 @@ struct SettingsView: View {
                                  options: SortOrder.allCases,
                                  label: { $0.label })
                 }
+            }
+
+            SettingsGroup("Build your library") {
+                LibraryBuilderPanel()
             }
 
             SettingsGroup("Usage data") {

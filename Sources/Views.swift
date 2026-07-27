@@ -758,7 +758,7 @@ struct FindView: View {
                                                ? settings.hotkey.displayString
                                                : nil,
                                            create: {
-                                               state.openComposer(prefill: ComposerPrefill(kind: .alias))
+                                               state.openNewComposer(prefill: ComposerPrefill(kind: .alias))
                                            })
                     }
                 } else {
@@ -767,7 +767,7 @@ struct FindView: View {
                     // instead, prefilled with the query as the name.
                     NoMatchView(query: state.query, isPrompt: state.dialect == .prompt,
                                 create: {
-                                    state.openComposer(prefill: ComposerPrefill(
+                                    state.openNewComposer(prefill: ComposerPrefill(
                                         kind: state.dialect == .prompt ? .prompt : .alias,
                                         name: state.query, source: "find-no-match"))
                                 })
@@ -1311,12 +1311,18 @@ struct ManageView: View {
     private var sidebar: some View {
         VStack(alignment: .leading, spacing: 1) {
             if state.dialect == .prompt {
-                ForEach(PromptBucket.allCases) { bucket in
-                    promptBucketRow(bucket)
+                if settings.promptFeaturesEnabled {
+                    ForEach(PromptBucket.allCases) { bucket in
+                        promptBucketRow(bucket)
+                    }
+                } else {
+                    promptBucketRow(.inbox)
                 }
                 Spacer()
-                newButton("New prompt") {
-                    state.openComposer(prefill: ComposerPrefill(kind: .prompt))
+                if settings.promptFeaturesEnabled {
+                    newButton("New prompt") {
+                        state.openNewComposer(prefill: ComposerPrefill(kind: .prompt))
+                    }
                 }
                 dialectFlipHint
             } else {
@@ -1325,9 +1331,11 @@ struct ManageView: View {
                 }
                 Spacer()
                 newButton("New alias") {
-                    state.openComposer(prefill: ComposerPrefill(kind: .alias))
+                    state.openNewComposer(prefill: ComposerPrefill(kind: .alias))
                 }
-                dialectFlipHint
+                if state.canOpenPromptManage {
+                    dialectFlipHint
+                }
             }
         }
         .padding(8)
@@ -1360,7 +1368,9 @@ struct ManageView: View {
     private var dialectFlipHint: some View {
         HStack(spacing: 4) {
             Text("⇥").font(.system(size: 9.5, weight: .bold, design: .monospaced))
-            Text(state.dialect == .prompt ? "aliases" : "prompts")
+            Text(state.dialect == .prompt
+                 ? "aliases"
+                 : (settings.promptFeaturesEnabled ? "prompts" : "inbox"))
                 .font(.system(size: 9.5))
         }
         .foregroundStyle(theme.faint)

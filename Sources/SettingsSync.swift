@@ -40,6 +40,7 @@ enum SettingsSync {
         /// a thing sync carries (see `AppSettings.syncFileURL`).
         case syncFileURL
         case rcPathOverride
+        case defaultLibrary
         case hotkeyKeyCode
         case hotkeyModifiers
         case hotkeyEnabled

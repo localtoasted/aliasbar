@@ -15,6 +15,17 @@ enum PromptInbox {
 
     // MARK: - Item
 
+    enum ItemKind: String, Equatable {
+        case prompt, alias
+
+        var label: String {
+            switch self {
+            case .prompt: return "prompt"
+            case .alias: return "alias"
+            }
+        }
+    }
+
     enum ItemType: String, Equatable {
         case new, update, merge
     }
@@ -47,6 +58,9 @@ enum PromptInbox {
         /// never locates or mutates an item inside its file; a file only ever leaves
         /// the live inbox as a whole, via `markDone`/`discardFile`.
         let sourceFile: URL
+        /// Missing from older inbox files means `.prompt`, which keeps the original
+        /// prompt-only schema compatible with the mixed library Inbox.
+        let kind: ItemKind
         let type: ItemType
         let name: String
         let description: String?
@@ -119,7 +133,7 @@ enum PromptInbox {
     /// Every field name a top-level inbox object is allowed to have. Anything else is
     /// tolerated and reported, the same as an unrecognized item field.
     private static let knownItemKeys: Set<String> = [
-        "type", "name", "description", "body", "replaces", "merges",
+        "kind", "type", "name", "description", "body", "command", "replaces", "merges",
     ]
 
     static func parseFile(at url: URL) -> FileOutcome {
@@ -170,14 +184,46 @@ enum PromptInbox {
     }
 
     private static func parseItem(_ dict: [String: Any], sourceFile: URL) -> Result<Item, ItemShapeError> {
+        let kind: ItemKind
+        if let rawKind = dict["kind"] {
+            guard let string = rawKind as? String, let parsed = ItemKind(rawValue: string) else {
+                return .failure(ItemShapeError(reason: "\"kind\" must be \"prompt\" or \"alias\""))
+            }
+            kind = parsed
+        } else {
+            kind = .prompt
+        }
+
         guard let typeRaw = dict["type"] as? String, let type = ItemType(rawValue: typeRaw) else {
             return .failure(ItemShapeError(reason: "\"type\" must be one of \"new\", \"update\", \"merge\""))
         }
-        guard let name = dict["name"] as? String, PromptStore.isValidName(name) else {
-            return .failure(ItemShapeError(reason: "\"name\" must be a valid prompt name (letters, digits, - and _)"))
+        guard let name = dict["name"] as? String else {
+            return .failure(ItemShapeError(reason: "\"name\" must be a string"))
         }
-        guard let body = dict["body"] as? String else {
-            return .failure(ItemShapeError(reason: "\"body\" must be a string"))
+
+        let body: String
+        switch kind {
+        case .prompt:
+            guard PromptStore.isValidName(name) else {
+                return .failure(ItemShapeError(reason: "\"name\" must use letters, digits, hyphens, and underscores only"))
+            }
+            guard let value = dict["body"] as? String else {
+                return .failure(ItemShapeError(reason: "\"body\" must be a string"))
+            }
+            body = value
+        case .alias:
+            guard type == .new else {
+                return .failure(ItemShapeError(reason: "alias suggestions support type \"new\" only"))
+            }
+            guard let command = dict["command"] as? String else {
+                return .failure(ItemShapeError(reason: "\"command\" must be a string"))
+            }
+            do {
+                try AliasWriter.validate(name: name, command: command)
+            } catch {
+                return .failure(ItemShapeError(reason: error.localizedDescription))
+            }
+            body = command
         }
 
         var description: String?
@@ -213,9 +259,9 @@ enum PromptInbox {
         }
 
         let unknown = dict.keys.filter { !knownItemKeys.contains($0) }.sorted()
-        let flags = InboxFlagging.flags(name: name, description: description, body: body)
-        return .success(Item(sourceFile: sourceFile, type: type, name: name, description: description,
-                             body: body, replaces: replaces, merges: merges,
+        let flags = InboxFlagging.flags(kind: kind, name: name, description: description, body: body)
+        return .success(Item(sourceFile: sourceFile, kind: kind, type: type, name: name,
+                             description: description, body: body, replaces: replaces, merges: merges,
                              unknownFields: unknown, flags: flags))
     }
 
@@ -224,8 +270,10 @@ enum PromptInbox {
     enum ApproveError: LocalizedError {
         case flaggedRequiresAcknowledgement(name: String)
         case nameCollision(name: String)
+        case aliasNameCollision(name: String)
         case updateTargetMissing(name: String)
         case mergeSourceMissing(name: String)
+        case wrongLibrary(expected: ItemKind)
         case underlying(String)
 
         var errorDescription: String? {
@@ -234,10 +282,14 @@ enum PromptInbox {
                 return "\"\(name)\" was flagged for review and needs acknowledgedFlags: true before it can be approved."
             case .nameCollision(let name):
                 return "A prompt named \"\(name)\" already exists. This looked like a new prompt, not an update — propose it as an update instead."
+            case .aliasNameCollision(let name):
+                return "An alias or function named \"\(name)\" already exists. Edit the suggestion and choose another name."
             case .updateTargetMissing(let name):
                 return "\"\(name)\" doesn't match any existing prompt, so there's nothing to update."
             case .mergeSourceMissing(let name):
                 return "\"\(name)\" doesn't match any existing prompt, so it can't be merged away."
+            case .wrongLibrary(let expected):
+                return "This approval path accepts a \(expected.label) item."
             case .underlying(let message):
                 return message
             }
@@ -287,6 +339,9 @@ enum PromptInbox {
                         promptsDirectory: URL,
                         acknowledgedFlags: Bool = false,
                         now: Date = Date()) throws -> ApproveResult {
+        guard item.kind == .prompt else {
+            throw ApproveError.wrongLibrary(expected: .prompt)
+        }
         guard acknowledgedFlags || !item.isFlagged else {
             throw ApproveError.flaggedRequiresAcknowledgement(name: item.name)
         }
@@ -335,6 +390,43 @@ enum PromptInbox {
         }
     }
 
+    /// Writes one reviewed alias suggestion through the same guarded writer the
+    /// Composer uses. The builder accepts new aliases only, so approval never replaces
+    /// a definition or removes shell content. A collision sends the item back to the
+    /// reviewer, who can use Edit and approve to choose another name.
+    @discardableResult
+    static func approveAlias(_ item: Item,
+                             existingEntries: [ShellEntry],
+                             rcPath: String,
+                             acknowledgedFlags: Bool = false) throws -> ApproveResult {
+        guard item.kind == .alias else {
+            throw ApproveError.wrongLibrary(expected: .alias)
+        }
+        guard acknowledgedFlags || !item.isFlagged else {
+            throw ApproveError.flaggedRequiresAcknowledgement(name: item.name)
+        }
+        guard item.type == .new else {
+            throw ApproveError.underlying("Alias suggestions support new items only.")
+        }
+        guard !existingEntries.contains(where: {
+            $0.name.lowercased() == item.name.lowercased()
+        }) else {
+            throw ApproveError.aliasNameCollision(name: item.name)
+        }
+
+        do {
+            let backup = try AliasWriter.apply(
+                .upsert(name: item.name, command: item.body, comment: item.description),
+                path: rcPath,
+                allEntries: existingEntries)
+            return ApproveResult(name: item.name,
+                                 replacedBackup: backup.isEmpty ? nil : backup,
+                                 removedMerges: [])
+        } catch {
+            throw ApproveError.underlying(error.localizedDescription)
+        }
+    }
+
     private static func writeApprovedPrompt(_ item: Item, to directory: URL, now: Date) throws -> ApproveResult {
         var frontmatter = PromptFrontmatter.empty()
         if let description = item.description, !description.isEmpty {
@@ -360,6 +452,87 @@ enum PromptInbox {
     /// discarded — is `markDone`/`discardFile`, a separate, explicit step a caller
     /// takes once it's actually done with the file.
     static func discard(_ item: Item) {}
+
+    // MARK: - Explicit import
+
+    struct ImportResult: Equatable {
+        let url: URL
+        let itemCount: Int
+    }
+
+    enum ImportError: LocalizedError {
+        case emptyClipboard
+        case tooLarge
+        case extraText
+        case invalid(String)
+        case noItems
+        case writeFailed(String)
+
+        var errorDescription: String? {
+            switch self {
+            case .emptyClipboard:
+                return "Copy the JSON response first."
+            case .tooLarge:
+                return "The copied response is too large to review."
+            case .extraText:
+                return "Copy one JSON object or one JSON code block."
+            case .invalid(let reason):
+                return "The copied response is not an AliasBar suggestion file: \(reason)."
+            case .noItems:
+                return "The response contains no suggestions."
+            case .writeFailed(let reason):
+                return "AliasBar could not add the response to Inbox: \(reason)."
+            }
+        }
+    }
+
+    /// Validates copied assistant output before writing it into the untrusted Inbox.
+    /// This function never writes to either library. The resulting file still needs an
+    /// item-by-item decision through the same review flow as a local agent's output.
+    @discardableResult
+    static func importText(_ text: String, to inboxDirectory: URL) throws -> ImportResult {
+        let json = try normalizedJSON(from: text)
+        guard json.utf8.count <= SensitiveContentClassifier.Thresholds.maximumInputBytes else {
+            throw ImportError.tooLarge
+        }
+
+        let filename = "library-build-\(subsecondTimestamp(Date()))-\(UUID().uuidString.lowercased()).json"
+        let destination = inboxDirectory.appendingPathComponent(filename)
+        let data = Data(json.utf8)
+
+        switch parse(data: data, url: destination) {
+        case .invalid(_, let reason):
+            throw ImportError.invalid(reason)
+        case .ok(_, let items, _):
+            guard !items.isEmpty else { throw ImportError.noItems }
+            do {
+                try FileManager.default.createDirectory(at: inboxDirectory,
+                                                        withIntermediateDirectories: true)
+                try data.write(to: destination, options: .atomic)
+                return ImportResult(url: destination, itemCount: items.count)
+            } catch {
+                throw ImportError.writeFailed(error.localizedDescription)
+            }
+        }
+    }
+
+    /// ChatGPT commonly wraps JSON in one fenced block. Accept that one wrapper, but
+    /// reject prose before or after it so validation never has to guess which object the
+    /// user intended to import.
+    private static func normalizedJSON(from text: String) throws -> String {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { throw ImportError.emptyClipboard }
+        guard trimmed.hasPrefix("```") else { return trimmed }
+
+        let lines = trimmed.components(separatedBy: .newlines)
+        guard lines.count >= 3,
+              lines.first == "```" || lines.first?.lowercased() == "```json",
+              lines.last == "```"
+        else {
+            throw ImportError.extraText
+        }
+        return lines.dropFirst().dropLast().joined(separator: "\n")
+    }
 
     // MARK: - Inbox file lifecycle
 
@@ -432,11 +605,20 @@ enum PromptInbox {
 /// than folded into `parseItem` so the detection rules read as one place, separate from
 /// schema validation.
 private enum InboxFlagging {
-    static func flags(name: String, description: String?, body: String) -> [PromptInbox.Flag] {
+    static func flags(kind: PromptInbox.ItemKind,
+                      name: String,
+                      description: String?,
+                      body: String) -> [PromptInbox.Flag] {
         let haystack = [name, description ?? "", body].joined(separator: "\n")
         var flags: [PromptInbox.Flag] = []
 
-        if containsShellCommandShape(haystack) {
+        // Every alias suggestion is executable shell text. Requiring the reviewer to
+        // acknowledge that fact keeps a generated command from becoming a one-click
+        // write, even when it contains none of the narrower risky shapes below.
+        if kind == .alias {
+            flags.append(PromptInbox.Flag(reason: .shellCommandShape,
+                                          detail: "Review this shell command before saving"))
+        } else if containsShellCommandShape(haystack) {
             flags.append(PromptInbox.Flag(reason: .shellCommandShape,
                                           detail: "Looks like it contains a shell command"))
         }

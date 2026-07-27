@@ -80,6 +80,26 @@ enum ViewMode: String, CaseIterable, Identifiable {
     }
 }
 
+enum DefaultLibrary: String, CaseIterable, Identifiable {
+    case aliases, prompts
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .aliases: return "Aliases"
+        case .prompts: return "Prompts"
+        }
+    }
+
+    var dialect: Dialect {
+        switch self {
+        case .aliases: return .shell
+        case .prompts: return .prompt
+        }
+    }
+}
+
 enum SortOrder: String, CaseIterable, Identifiable {
     case usage, alphabetical, fileOrder
     var id: String { rawValue }
@@ -248,6 +268,7 @@ final class AppSettings: ObservableObject {
         static let enterAction = "enterAction"
         static let afterAction = "afterAction"
         static let defaultView = "defaultView"
+        static let defaultLibrary = "defaultLibrary"
         static let searchScope = "searchScope"
         static let sortOrder = "sortOrder"
         static let appearance = "appearance"
@@ -294,6 +315,9 @@ final class AppSettings: ObservableObject {
             defaults.set(defaultView.rawValue, forKey: Key.defaultView)
             syncCoordinator?.push(.defaultView)
         }
+    }
+    @Published var defaultLibrary: DefaultLibrary {
+        didSet { defaults.set(defaultLibrary.rawValue, forKey: Key.defaultLibrary) }
     }
     @Published var searchScope: SearchScope {
         didSet {
@@ -577,6 +601,7 @@ final class AppSettings: ObservableObject {
         enterAction = decode(Key.enterAction, EnterAction.pasteName)
         afterAction = decode(Key.afterAction, AfterAction.close)
         defaultView = decode(Key.defaultView, ViewMode.find)
+        defaultLibrary = decode(Key.defaultLibrary, DefaultLibrary.aliases)
         searchScope = decode(Key.searchScope, SearchScope.everything)
         sortOrder = decode(Key.sortOrder, SortOrder.usage)
         // A look stored by an older build, or by a build with a different set of fields,
