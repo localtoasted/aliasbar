@@ -6,10 +6,9 @@ set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILD_DIR="${PROJECT_DIR}/.build/tests"
-SWIFT_CONCURRENCY_FLAGS=(
-    -warn-concurrency
-    -strict-concurrency=targeted
-)
+# SWIFT_CONCURRENCY_FLAGS + SWIFT_CLI_LANGUAGE_FLAGS. One declaration, shared with
+# build.sh and tools/release-cli.sh so the checks cannot drift between them.
+source "${PROJECT_DIR}/tools/swift-flags.sh"
 mkdir -p "${BUILD_DIR}"
 
 # The tests call real delivery paths. Never let a trusted developer machine turn a
@@ -94,7 +93,11 @@ echo "Building ab CLI"
 
 CLI_BUILD_DIR="${PROJECT_DIR}/.build/cli-tests"
 mkdir -p "${CLI_BUILD_DIR}"
-swiftc "${SWIFT_CONCURRENCY_FLAGS[@]}" -target "$(uname -m)-apple-macos13.0" \
+# SWIFT_CLI_LANGUAGE_FLAGS on top of the shared set, matching build.sh's `ab` target:
+# this source list is Foundation-only and compiles clean under the Swift 6 language
+# mode, so the run that proves the CLI's behavior also proves it under that mode.
+swiftc "${SWIFT_CONCURRENCY_FLAGS[@]}" "${SWIFT_CLI_LANGUAGE_FLAGS[@]}" \
+    -target "$(uname -m)-apple-macos13.0" \
     "${PROJECT_DIR}/Sources/Model.swift" \
     "${PROJECT_DIR}/Sources/AliasWriter.swift" \
     "${PROJECT_DIR}"/Sources/CLI/*.swift \

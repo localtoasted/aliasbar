@@ -613,7 +613,16 @@ enum ConflictDetector {
     /// different PATH than the cached one holds, which is what keeps `searchPaths:`
     /// injectable: a test's fake directory and the real machine's PATH can never
     /// answer for each other.
-    private static var indexCache: PathExecutableIndex?
+    ///
+    /// `nonisolated(unsafe)` because the `ab` CLI compiles this file under
+    /// `-swift-version 6`, where a mutable static is an error unless the safety claim
+    /// is stated. The claim: every reader is main-actor confined — `EntryStore.reload`
+    /// (Store.swift:62), `ComposerState`'s shadow advisory (ComposerState.swift:164),
+    /// `SuggestionEngine.uniqueName` (SuggestionEngine.swift:186), and the tests' own
+    /// top-level code — while the CLI never references `ConflictDetector` at all. It is
+    /// an annotation, not a lock; anything that later reads this off the main thread has
+    /// to isolate it properly rather than inherit the exemption.
+    nonisolated(unsafe) private static var indexCache: PathExecutableIndex?
 
     static func executableIndex(searchPaths: [String]? = nil) -> PathExecutableIndex {
         let dirs = searchPaths ?? pathDirectories()

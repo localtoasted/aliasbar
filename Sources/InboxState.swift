@@ -6,7 +6,7 @@ import SwiftUI
 ///
 /// Split out of `AppState` so the inbox's own bookkeeping — which items are decided,
 /// which have actually been read in full — lives in one object rather than as a
-/// stripe through a 3,000-line class. The surrounding state it acts on (the prompt
+/// stripe through a 2,781-line class. The surrounding state it acts on (the prompt
 /// library cache, the shell store, the toast channel, the Composer) still belongs to
 /// `AppState` and is reached through `app`.
 @preconcurrency @MainActor

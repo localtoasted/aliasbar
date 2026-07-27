@@ -66,10 +66,11 @@ CLI_CORE_SOURCES=(
     "${PROJECT_DIR}/Sources/AliasWriter.swift"
 )
 CLI_SOURCES=("${PROJECT_DIR}"/Sources/CLI/*.swift)
-SWIFT_CONCURRENCY_FLAGS=(
-    -warn-concurrency
-    -strict-concurrency=targeted
-)
+# SWIFT_CONCURRENCY_FLAGS. One declaration, shared with build.sh and test.sh so the
+# shipped binary can never end up built under a weaker check than the one test.sh
+# proved. (SWIFT_CLI_LANGUAGE_FLAGS is deliberately not applied here — see the note in
+# tools/swift-flags.sh.)
+source "${PROJECT_DIR}/tools/swift-flags.sh"
 
 build_arch() {
     local arch="$1" out="$2"

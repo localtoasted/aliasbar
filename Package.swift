@@ -20,6 +20,10 @@ import PackageDescription
 //     `swift build --scratch-path .build/spm` avoids that if it becomes annoying.
 //   - The test target needs XCTest, which ships with Xcode. Command Line Tools alone
 //     are enough for build.sh and test.sh but not for `swift test`.
+
+// The shell builds keep these same flags in tools/swift-flags.sh, sourced by build.sh,
+// test.sh and tools/release-cli.sh. A manifest is Swift, not shell, so it cannot source
+// that file — this is the one copy that has to be changed by hand alongside it.
 let concurrencySwiftSettings: [SwiftSetting] = [
     .unsafeFlags(["-warn-concurrency", "-strict-concurrency=targeted"]),
 ]

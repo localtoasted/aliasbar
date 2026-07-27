@@ -124,7 +124,13 @@ struct ManageActionButton: View {
 }
 
 /// The uppercase metadata treatment shared exactly by Prompt and Snippet details.
-/// Shell metadata deliberately keeps its distinct title-case, smaller treatment.
+///
+/// Shell metadata (`metaRow`, Views.swift:1711) keeps a distinct title-case, 9.5pt
+/// treatment, and that is retained pending a visual decision rather than a decision
+/// already taken: repo history shows it as two-of-three drift — two of the three detail
+/// panes uppercase at 9pt and the third does not — so it was left alone here because
+/// changing it moves visible pixels, not because it is the intended design. Fold it in
+/// (or rule it out) when someone actually looks at the three panes side by side.
 struct ManageMetaRow: View {
     @Environment(\.theme) private var theme
     let label: String

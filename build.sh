@@ -11,10 +11,9 @@ APP_BUNDLE="${BUILD_DIR}/${APP_NAME}.app"
 INSTALL_DIR="${HOME}/Applications"
 INSTALL_PATH="${INSTALL_DIR}/${APP_NAME}.app"
 INSTALL=false
-SWIFT_CONCURRENCY_FLAGS=(
-    -warn-concurrency
-    -strict-concurrency=targeted
-)
+# SWIFT_CONCURRENCY_FLAGS + SWIFT_CLI_LANGUAGE_FLAGS. One declaration, shared with
+# test.sh and tools/release-cli.sh so the checks cannot drift between them.
+source "${PROJECT_DIR}/tools/swift-flags.sh"
 
 usage() {
     cat <<EOF
@@ -86,12 +85,17 @@ echo "==> Compiling ab CLI"
 # Foundation-only: the core (Model.swift, AliasWriter.swift) plus Sources/CLI, and
 # nothing else. No AppKit, no SwiftUI, no Settings/Store/AppState — those pull in
 # UserDefaults and app-only state the CLI must never touch.
+#
+# That narrowness is also why this one target gets SWIFT_CLI_LANGUAGE_FLAGS on top: with
+# no SwiftUI/AppKit behind it, the set compiles clean under the full Swift 6 language
+# mode, so the strictest check available is free on the code that rewrites ~/.zshrc.
 CLI_SOURCES=("${PROJECT_DIR}"/Sources/CLI/*.swift)
 if [ ${#CLI_SOURCES[@]} -eq 0 ]; then
     echo "No sources found in ${PROJECT_DIR}/Sources/CLI" >&2
     exit 1
 fi
-swiftc -O "${SWIFT_CONCURRENCY_FLAGS[@]}" -target "${ARCH}-apple-macos13.0" \
+swiftc -O "${SWIFT_CONCURRENCY_FLAGS[@]}" "${SWIFT_CLI_LANGUAGE_FLAGS[@]}" \
+    -target "${ARCH}-apple-macos13.0" \
     "${PROJECT_DIR}/Sources/Model.swift" \
     "${PROJECT_DIR}/Sources/AliasWriter.swift" \
     "${CLI_SOURCES[@]}" \
