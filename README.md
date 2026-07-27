@@ -1,4 +1,8 @@
-![AliasBar](docs/brand/title.png)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/brand/title-dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="docs/brand/title.png">
+  <img alt="AliasBar" src="docs/brand/title.png">
+</picture>
 
 **Prompts and zsh shortcuts from the files you already use.**
 
