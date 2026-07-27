@@ -276,6 +276,7 @@ enum BoardNavigator {
 /// Filtering lives here rather than inside the views because the keyboard handler needs
 /// to know exactly what is on screen in order to move a selection through it. Splitting
 /// that across a view and a controller is how off-by-one selection bugs happen.
+@preconcurrency @MainActor
 final class AppState: ObservableObject {
     typealias PromptDeliveryRegistryLoader = (String) -> PromptCompiler.RegistryOutcome
 
@@ -1764,56 +1765,82 @@ final class AppState: ObservableObject {
 
     // MARK: - Keyboard
 
-    /// Handles a key event. Returns true when consumed, so the caller knows to swallow it.
-    ///
-    /// This runs from a *local* event monitor, which sees only events destined for this
-    /// app and therefore needs no permission. A global monitor would need Accessibility.
-    func handleKey(_ event: NSEvent) -> Bool {
+    /// A key route has three outcomes: it did not apply, it consumed the event, or it
+    /// deliberately returned the event to SwiftUI. The last case is distinct from
+    /// "not applicable": a visible sheet owns ordinary keys, so `false` must terminate
+    /// dispatch instead of falling through into palette navigation.
+    private enum KeyRouteResult {
+        case notApplicable
+        case terminal(Bool)
+
+        var terminalValue: Bool? {
+            if case .terminal(let value) = self { return value }
+            return nil
+        }
+    }
+
+    private func handleModalKey(_ event: NSEvent) -> KeyRouteResult {
         // The editor sheet owns the keyboard while it is up, apart from escape.
         if editor != nil {
             if event.keyCode == UInt16(kVK_Escape) {
                 editor = nil
                 pendingInboxEdit = nil
-                return true
+                return .terminal(true)
             }
             if event.keyCode == UInt16(kVK_Return) && event.modifierFlags.contains(.command) {
                 commitEditor()
-                return true
+                return .terminal(true)
             }
-            return false
+            return .terminal(false)
         }
 
-        // Same shape as the editor guard above: FillInSheet owns the keyboard while
-        // it is up. Esc is handled here, at the one place Esc is already handled for
-        // every other sheet; Tab/Shift-Tab between fields and Enter-to-confirm are
-        // native SwiftUI focus/submit behavior inside the sheet itself, so everything
-        // else falls through unconsumed.
+        // FillInSheet leaves Tab/Shift-Tab and Enter to native SwiftUI behavior.
         if fillIn != nil {
             if event.keyCode == UInt16(kVK_Escape) {
                 cancelFillIn()
-                return true
+                return .terminal(true)
             }
-            return false
+            return .terminal(false)
         }
 
-        // Same shape again: the Snippets sheet owns the keyboard while it is up.
+        // The Snippets sheet follows the same ownership rule as the editor.
         if snippetEditor != nil {
             if event.keyCode == UInt16(kVK_Escape) {
                 snippetEditor = nil
-                return true
+                return .terminal(true)
             }
             if event.keyCode == UInt16(kVK_Return) && event.modifierFlags.contains(.command) {
                 commitSnippetEditor()
-                return true
+                return .terminal(true)
             }
-            return false
+            return .terminal(false)
         }
+
+        return .notApplicable
+    }
+
+    /// Handles a key event. Returns true when consumed, so the caller knows to swallow it.
+    ///
+    /// This runs from a *local* event monitor, which sees only events destined for this
+    /// app and therefore needs no permission. A global monitor would need Accessibility.
+    func handleKey(_ event: NSEvent) -> Bool {
+        if let terminal = handleModalKey(event).terminalValue { return terminal }
 
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         let command = flags.contains(.command)
         let control = flags.contains(.control)
         let option = flags.contains(.option)
 
+        return handlePrimaryKey(event, command: command)
+            ?? handleContextualTabKey(event, flags: flags)
+            ?? handleNavigationAndEnterKey(event, command: command, option: option)
+            ?? handleShortcutKey(event, flags: flags, command: command,
+                                 control: control, option: option)
+            ?? handlePrefixKey(event, command: command, control: control)
+            ?? false
+    }
+
+    private func handlePrimaryKey(_ event: NSEvent, command: Bool) -> Bool? {
         switch Int(event.keyCode) {
         case kVK_Escape:
             // One step back before one step out. Escaping straight to the desktop from
@@ -1894,6 +1921,14 @@ final class AppState: ObservableObject {
         case kVK_Return where mode == .manage && dialect == .prompt:
             return true
 
+        default:
+            return nil
+        }
+    }
+
+    private func handleContextualTabKey(_ event: NSEvent,
+                                        flags: NSEvent.ModifierFlags) -> Bool? {
+        switch Int(event.keyCode) {
         // ⇥ flips the dialect boost in FIND's aliases source and the deck in BOARD,
         // instead of cycling the view — MANAGE keeps ⇥ as a view switch below, since
         // it has no dialect to flip.
@@ -1923,6 +1958,15 @@ final class AppState: ObservableObject {
             }
             return true
 
+        default:
+            return nil
+        }
+    }
+
+    private func handleNavigationAndEnterKey(_ event: NSEvent,
+                                             command: Bool,
+                                             option: Bool) -> Bool? {
+        switch Int(event.keyCode) {
         // Buckets are the folders, and ⌘↑ ⌘↓ walk them the way ⌘↑ walks Finder's — in
         // place, whichever view you are in. The view is how you look; the bucket is
         // what you are looking at.
@@ -1984,6 +2028,17 @@ final class AppState: ObservableObject {
             perform(command ? settings.enterAction.secondary : settings.enterAction, on: entry)
             return true
 
+        default:
+            return nil
+        }
+    }
+
+    private func handleShortcutKey(_ event: NSEvent,
+                                   flags: NSEvent.ModifierFlags,
+                                   command: Bool,
+                                   control: Bool,
+                                   option: Bool) -> Bool? {
+        switch Int(event.keyCode) {
         case kVK_ANSI_N where control:
             if mode == .board { moveBoard(.right) } else { move(by: 1) }
             return true
@@ -2063,9 +2118,13 @@ final class AppState: ObservableObject {
             return true
 
         default:
-            break
+            return nil
         }
+    }
 
+    private func handlePrefixKey(_ event: NSEvent,
+                                 command: Bool,
+                                 control: Bool) -> Bool? {
         // Prefix keys jump straight into a MANAGE bucket, but only as the first
         // character, and only while searching aliases — `?` typed into history or
         // the clipboard should search for a literal question mark, not jump away.
@@ -2083,7 +2142,7 @@ final class AppState: ObservableObject {
                 return true
             }
         }
-        return false
+        return nil
     }
 
     static func prefixBucket(for characters: String) -> Bucket? {
@@ -2247,8 +2306,8 @@ final class AppState: ObservableObject {
                 return
             }
             // The target app has to be frontmost before the keystroke is sent, so the
-            // popover closes and focus is handed back first, and the paste goes out a
-            // beat later once that has actually taken effect.
+            // popover closes and the activation-aware task below hands focus back and
+            // waits for AppKit to confirm that it actually took effect.
             //
             // Deliberately not `finish()`: "Keep it open" cannot apply here. A paste
             // exists only by surrendering focus, and summoning the window back after
@@ -2256,13 +2315,21 @@ final class AppState: ObservableObject {
             // exactly where they are about to keep typing. So paste modes always
             // close, and the Afterwards setting says so instead of pretending.
             onDismiss?()
-            PreviousApp.restore()
             // Recorded here, at the moment a paste is actually possible — it is what
             // lets a later `AXIsProcessTrusted() == false` be read as a *lost* grant
             // rather than one never given.
             settings.hasEverPasted = true
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-                _ = Typist.paste(payload)
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                if await PreviousApp.restoreAndWaitForActivation() {
+                    _ = Typist.paste(payload)
+                } else {
+                    // Keep the user's action recoverable if macOS refuses to return
+                    // focus. Do not synthesize ⌘V into whichever app happens to be
+                    // active instead.
+                    PasteboardBroker.write(transient: payload, to: self.pasteboard)
+                    Diag.log("deliver: target app did not reactivate; copied without pasting")
+                }
             }
         }
     }
