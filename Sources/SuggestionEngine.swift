@@ -45,9 +45,7 @@ extension ConflictDetector {
     /// lookup so other core code (`SuggestionEngine`'s name dedup) can reuse it
     /// without re-scanning every entry the way a full conflict pass does.
     static func isShadowed(_ name: String, searchPaths: [String]? = nil) -> Bool {
-        let dirs = searchPaths ?? pathDirectories()
-        let fm = FileManager.default
-        return dirs.contains { fm.isExecutableFile(atPath: $0 + "/" + name) }
+        executableIndex(searchPaths: searchPaths).contains(name)
     }
 }
 
@@ -174,14 +172,20 @@ enum SuggestionEngine {
         return candidate + String(suffix)
     }
 
-    /// Convenience for real callers: PATH lookups go through
-    /// `ConflictDetector.isShadowed`, the same mechanism `detect(in:)` uses, so
-    /// nothing outside tests needs to construct its own `pathLookup` closure.
+    /// Convenience for real callers: PATH lookups go through the same
+    /// `PathExecutableIndex` `detect(in:)` uses, so nothing outside tests needs to
+    /// construct its own `pathLookup` closure.
+    ///
+    /// The snapshot is taken once and closed over for the whole mine rather than
+    /// re-stamped per name: `uniqueName` alone can probe upwards of a thousand
+    /// candidates for a single suggestion, and every one of them would otherwise
+    /// re-stat every directory on PATH.
     static func suggest(history: String,
                         existingEntries: [ShellEntry],
                         ignores: Set<String>) -> [AliasSuggestion] {
-        suggest(history: history, existingEntries: existingEntries, ignores: ignores,
-                pathLookup: { ConflictDetector.isShadowed($0) })
+        let executables = ConflictDetector.executableIndex()
+        return suggest(history: history, existingEntries: existingEntries, ignores: ignores,
+                       pathLookup: { executables.contains($0) })
     }
 }
 

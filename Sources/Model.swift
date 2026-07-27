@@ -490,6 +490,107 @@ struct Conflict: Identifiable, Hashable {
     var id: String { "\(name)-\(reason.headline)" }
 }
 
+/// A snapshot of which command names each PATH directory offers.
+///
+/// `ConflictDetector.detect(in:)` used to ask the filesystem "is `<dir>/<name>`
+/// executable?" once per (entry, directory) pair. A 200-entry rc file over a
+/// 20-directory developer PATH is 4,000 stat calls, made from `EntryStore.reload()`
+/// on the main thread on the way to showing the popover. `SuggestionEngine` is worse
+/// still: `uniqueName` probes up to a thousand candidate names for a single
+/// suggestion, each one its own walk of the whole PATH. One `contentsOfDirectory`
+/// per directory answers all of them at once.
+///
+/// Two things keep this honest rather than merely fast:
+///
+///   - Every directory carries its modification date and size, and every request for
+///     the shared index (`ConflictDetector.executableIndex`) re-reads them. Creating
+///     or removing an entry moves a directory's mtime, so a `brew install` between two
+///     summons costs one re-listing of one directory and is visible immediately. The
+///     filesystem is the invalidation signal — there is no in-app dirty flag to forget
+///     to set, the same reasoning `loadHistoryIfNeeded` and the prompt-delivery
+///     snapshot already use. Date *and* size because a same-second change can leave
+///     the date looking untouched at whatever resolution the volume records.
+///   - A listing says a name *exists*, not that it is *executable*, and a `chmod`
+///     moves no directory's mtime at all. So a name the listing knows about is still
+///     confirmed with `isExecutableFile` before it is reported — the exact check the
+///     old loop made, now made once per hit instead of once per (name, directory).
+///     A directory that refuses to be listed (no read permission, or it is not a
+///     directory) keeps the old per-name stat, so nothing it holds becomes invisible.
+///
+/// The result is answer-for-answer identical to the loop it replaces, including which
+/// directory wins when several hold the same name: PATH order, first match.
+struct PathExecutableIndex {
+    /// PATH order, which is the order a lookup reports its winner in. Also the cache
+    /// key — an index built for injected test paths can never answer for the real PATH.
+    let searchPaths: [String]
+
+    private struct Listing {
+        var modified: Date?
+        var size: Int?
+        var names: Set<String>
+        /// False when the directory refused to be listed; lookups fall back to a
+        /// direct `isExecutableFile` there, exactly as before this index existed.
+        var listable: Bool
+    }
+    private var listings: [Listing]
+
+    init(searchPaths: [String]) {
+        self.searchPaths = searchPaths
+        self.listings = Array(repeating: Listing(modified: nil, size: nil,
+                                                 names: [], listable: false),
+                              count: searchPaths.count)
+        for index in searchPaths.indices { load(index) }
+    }
+
+    /// Re-lists only the directories whose stamp has moved. One stat per PATH
+    /// directory; on an unchanged PATH that is the whole cost of a lookup, against
+    /// one stat per (name, directory) before.
+    mutating func revalidate() {
+        for index in searchPaths.indices {
+            let attributes = try? FileManager.default.attributesOfItem(atPath: searchPaths[index])
+            let modified = attributes?[.modificationDate] as? Date
+            let size = attributes?[.size] as? Int
+            if modified != listings[index].modified || size != listings[index].size {
+                load(index)
+            }
+        }
+    }
+
+    private mutating func load(_ index: Int) {
+        let path = searchPaths[index]
+        // Stamp first, list second. A change that lands between the two leaves the
+        // stamp looking older than the listing, so the next request re-lists and is
+        // merely redundant. The other order would bake in a stamp that already
+        // describes content this listing missed, and the miss would be permanent.
+        let attributes = try? FileManager.default.attributesOfItem(atPath: path)
+        let contents = try? FileManager.default.contentsOfDirectory(atPath: path)
+        listings[index] = Listing(modified: attributes?[.modificationDate] as? Date,
+                                  size: attributes?[.size] as? Int,
+                                  names: Set(contents ?? []),
+                                  listable: contents != nil)
+    }
+
+    /// The first executable on PATH with this name, or nil. The full path, because
+    /// that is what `Conflict.shadowsBinary` shows the user.
+    func executablePath(for name: String) -> String? {
+        // Only a bare filename can be answered from a directory listing. Anything
+        // holding a separator (or nothing at all) is left to the filesystem, which is
+        // what the old loop did for every name.
+        let listable = !name.isEmpty && !name.contains("/")
+        let fm = FileManager.default
+        for (index, directory) in searchPaths.enumerated() {
+            if listable, listings[index].listable, !listings[index].names.contains(name) {
+                continue
+            }
+            let candidate = directory + "/" + name
+            if fm.isExecutableFile(atPath: candidate) { return candidate }
+        }
+        return nil
+    }
+
+    func contains(_ name: String) -> Bool { executablePath(for: name) != nil }
+}
+
 enum ConflictDetector {
     /// Directories on PATH, resolved once per scan. Not file-private: `isShadowed`
     /// (below, reused by `SuggestionEngine`'s name dedup) shares this resolution
@@ -502,12 +603,37 @@ enum ConflictDetector {
         return raw.split(separator: ":").map(String.init).filter { !$0.isEmpty }
     }
 
+    /// The one PATH snapshot every shadow lookup in the process shares, re-stamped on
+    /// every call (see `PathExecutableIndex`). Held rather than rebuilt because the
+    /// per-keystroke callers — `ComposerState`'s live shadow advisory,
+    /// `SuggestionEngine.uniqueName`'s probe loop — each want one name, and building
+    /// an index for one name would trade a stat storm for a listing storm.
+    ///
+    /// Rebuilt from scratch rather than revalidated whenever the caller asks about a
+    /// different PATH than the cached one holds, which is what keeps `searchPaths:`
+    /// injectable: a test's fake directory and the real machine's PATH can never
+    /// answer for each other.
+    private static var indexCache: PathExecutableIndex?
+
+    static func executableIndex(searchPaths: [String]? = nil) -> PathExecutableIndex {
+        let dirs = searchPaths ?? pathDirectories()
+        guard var cached = indexCache, cached.searchPaths == dirs else {
+            let fresh = PathExecutableIndex(searchPaths: dirs)
+            indexCache = fresh
+            return fresh
+        }
+        cached.revalidate()
+        indexCache = cached
+        return cached
+    }
+
     static func detect(in entries: [ShellEntry],
                        searchPaths: [String]? = nil) -> [Conflict] {
         var conflicts: [Conflict] = []
         let byName = Dictionary(grouping: entries, by: \.name)
-        let dirs = searchPaths ?? pathDirectories()
-        let fm = FileManager.default
+        // One PATH snapshot for the whole scan, not one filesystem probe per
+        // (entry, directory) pair.
+        let executables = executableIndex(searchPaths: searchPaths)
 
         for (name, group) in byName {
             // Redefinition: same name, same kind, more than once.
@@ -527,14 +653,11 @@ enum ConflictDetector {
                 conflicts.append(Conflict(name: name, reason: .aliasFunctionClash))
             }
 
-            // Shadowing something real on PATH. Resolved against the actual filesystem
-            // rather than a hardcoded list of command names.
-            for dir in dirs {
-                let candidate = dir + "/" + name
-                if fm.isExecutableFile(atPath: candidate) {
-                    conflicts.append(Conflict(name: name, reason: .shadowsBinary(path: candidate)))
-                    break
-                }
+            // Shadowing something real on PATH. Still resolved against the actual
+            // filesystem rather than a hardcoded list of command names — the index
+            // narrows which directories are worth asking, it does not answer for them.
+            if let candidate = executables.executablePath(for: name) {
+                conflicts.append(Conflict(name: name, reason: .shadowsBinary(path: candidate)))
             }
         }
         return conflicts.sorted { $0.name < $1.name }

@@ -455,6 +455,47 @@ final class AppState: ObservableObject {
     /// (`commitEditor`), since either can remove a candidate from the list.
     private var suggestionCache: [AliasSuggestion] = []
 
+    /// What the inputs to the last mine looked like, so that a summon which changes
+    /// none of them does not re-read and re-parse the whole of ~/.zsh_history — 5-30 MB
+    /// on a long-lived shell — on the main thread, between the hotkey press and the
+    /// first frame. `loadHistoryIfNeeded` already refuses to do that twice for the same
+    /// file; this is the same guard for the same file, for the other reader.
+    ///
+    /// Modification date *and* size for the same reason `PromptDeliveryRegistryStamp`
+    /// carries both: a same-second append can leave the date looking untouched at
+    /// whatever resolution the volume records, and history grows by appending.
+    ///
+    /// `entriesGeneration` is the second input. Mining subtracts the aliases that
+    /// already exist, so a `store.reload()` that lands on a different set of entries —
+    /// from `commitEditor`, from `InboxState`, from an edit made in another editor —
+    /// has to re-mine even when the history file has not moved. It counts *changes* to
+    /// the entry set rather than reloads, because `prepareForShow` reloads on every
+    /// summon and the point here is to make an unchanged summon free.
+    ///
+    /// The third input, the dismissal list, has exactly one writer inside the app, and
+    /// `ignoreSuggestion` clears this stamp by hand immediately after writing it.
+    ///
+    /// `nil` means "not mined yet, or deliberately invalidated", which is distinct from
+    /// a stamp whose file fields are nil — that is the real observation "there is no
+    /// history file to read". An empty `suggestionCache` cannot serve as the
+    /// never-mined signal the way `loadHistoryIfNeeded` uses an empty `historyCache`,
+    /// because "nothing worth suggesting" is a perfectly ordinary steady state and
+    /// would re-mine on every summon for exactly the people with nothing to gain.
+    private struct SuggestionStamp: Equatable {
+        let modified: Date?
+        let size: Int?
+        let entriesGeneration: Int
+
+        static func current(path: String, entriesGeneration: Int) -> SuggestionStamp {
+            let attributes = try? FileManager.default.attributesOfItem(atPath: path)
+            return SuggestionStamp(modified: attributes?[.modificationDate] as? Date,
+                                   size: attributes?[.size] as? Int,
+                                   entriesGeneration: entriesGeneration)
+        }
+    }
+    private var suggestionStamp: SuggestionStamp?
+    private(set) var suggestionMiningCount = 0
+
     /// Set by the app delegate. Lets actions close the popover without the state layer
     /// knowing anything about AppKit.
     var onDismiss: (() -> Void)?
@@ -1178,21 +1219,35 @@ final class AppState: ObservableObject {
     // MARK: - Manage: Suggested (history-mined alias suggestions)
 
     /// Recomputes `suggestionCache` from history, existing aliases, and the ignore
-    /// store. Called at `prepareForShow` and again after anything that could change
-    /// membership: dismissing a suggestion or saving a new alias.
+    /// store — but only when one of those has actually changed since the last mine.
+    /// Called at `prepareForShow` and again after anything that could change
+    /// membership: dismissing a suggestion or saving a new alias. See
+    /// `SuggestionStamp` for what each input's change looks like.
     func refreshSuggestions() {
         // Suggested is mined from raw shell history same as `EntryStore`'s usage
         // counts are — a different signal (whole commands, not per-name counts) but
         // the same "history usage ranking" toggle governs both, so disabling it empties
         // this bucket exactly the way it empties the graveyard.
+        //
+        // Ahead of the stamp check on purpose: the toggle is not one of the inputs the
+        // stamp watches, and an empty bucket is the answer here regardless of how
+        // fresh a mine would have been.
         guard settings.historyUsageRankingEnabled else {
             suggestionCache = []
+            // Emptying is not a mine. Clearing the stamp is what makes re-enabling the
+            // toggle re-mine rather than serve the empty list this just installed.
+            suggestionStamp = nil
             return
         }
+        let stamp = SuggestionStamp.current(path: AppPaths.historyPath,
+                                            entriesGeneration: store.entriesGeneration)
+        guard stamp != suggestionStamp else { return }
         suggestionCache = SuggestionEngine.suggest(
             history: AppPaths.historyPath,
             existingEntries: store.ranked.map(\.entry),
             ignores: SuggestionIgnoreStore.all(path: AppPaths.suggestionIgnoresPath))
+        suggestionStamp = stamp
+        suggestionMiningCount += 1
     }
 
     /// MANAGE's Suggested bucket: `suggestionCache`, narrowed by `query` against the
@@ -1241,6 +1296,9 @@ final class AppState: ObservableObject {
     /// summon to reflect it.
     func ignoreSuggestion(_ suggestion: AliasSuggestion) {
         _ = SuggestionIgnoreStore.ignore(suggestion.command, path: AppPaths.suggestionIgnoresPath)
+        // The dismissal list is the one input `SuggestionStamp` does not watch — this
+        // is the hand invalidation it names.
+        suggestionStamp = nil
         refreshSuggestions()
         clampSelection()
     }

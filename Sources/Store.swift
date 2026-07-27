@@ -17,6 +17,23 @@ final class EntryStore: ObservableObject {
     /// is scanned once per launch rather than on every popover open.
     private var usageLoaded = false
 
+    /// A change counter for the parsed entry set, moved by `reload()` only when the
+    /// entries it produced actually differ from the ones before them.
+    ///
+    /// Read by `AppState.refreshSuggestions`, which mines history *minus* the aliases
+    /// that already exist and so has to re-mine whenever that second input moves.
+    /// Deliberately not a plain reload counter: `prepareForShow` reloads on every
+    /// single summon, so "a reload happened" would force a re-mine on every summon,
+    /// which is the exact cost that guard exists to avoid. And deliberately not the rc
+    /// file's mtime either — what the miner consumes is the parsed entries, so that is
+    /// what is compared, and a rewrite that changes no definition costs nothing.
+    ///
+    /// A counter here rather than an invalidation call at each `reload()` site, because
+    /// there are four of those across three files (`AppState` × 3, `InboxState`) and
+    /// the fifth one added later would be the bug.
+    private(set) var entriesGeneration = 0
+    private var lastEntries: [ShellEntry] = []
+
     convenience init() {
         self.init(settings: .shared)
     }
@@ -43,6 +60,10 @@ final class EntryStore: ObservableObject {
         let effectiveUsage = settings.historyUsageRankingEnabled ? usage : [:]
         ranked = entries.map { RankedEntry(entry: $0, uses: effectiveUsage[$0.name] ?? 0) }
         conflicts = ConflictDetector.detect(in: entries)
+        if entries != lastEntries {
+            lastEntries = entries
+            entriesGeneration += 1
+        }
     }
 
     /// Forces a fresh history scan. Wired to the explicit Refresh action only.

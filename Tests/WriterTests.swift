@@ -11021,6 +11021,256 @@ do {
 }
 
 // ---------------------------------------------------------------------------
+print("\n49. PATH shadow lookups read a directory index, and the index cannot go stale")
+
+// `ConflictDetector.detect` and `isShadowed` used to stat `<dir>/<name>` once per
+// (name, directory) pair. They now consult one `PathExecutableIndex` built from a
+// `contentsOfDirectory` per PATH directory, shared process-wide and cached across
+// calls. Caching a filesystem answer is only safe if every way the answer can change
+// moves something the index re-reads, so this section is written entirely against
+// observable behavior: make a change on disk, ask again, demand the new answer. There
+// are two independent freshness mechanisms and the tests separate them deliberately —
+// the directory stamp catches entries appearing and disappearing, and the
+// confirm-with-`isExecutableFile` step catches permission changes, which move no
+// directory's modification date at all.
+
+/// A fresh, empty directory to stand in for a PATH entry.
+func pathIndexDirectory(_ label: String) -> String {
+    caseIndex += 1
+    let path = "\(sandbox)/path-index-\(label)-\(caseIndex)"
+    try! FileManager.default.createDirectory(atPath: path, withIntermediateDirectories: true)
+    return path
+}
+
+@discardableResult
+func writeFile(_ path: String, executable: Bool) -> String {
+    FileManager.default.createFile(atPath: path, contents: Data("#!/bin/sh\n".utf8))
+    try! FileManager.default.setAttributes([.posixPermissions: executable ? 0o755 : 0o644],
+                                           ofItemAtPath: path)
+    return path
+}
+
+func setExecutable(_ path: String, _ executable: Bool) {
+    try! FileManager.default.setAttributes([.posixPermissions: executable ? 0o755 : 0o644],
+                                           ofItemAtPath: path)
+}
+
+do {
+    let dir = pathIndexDirectory("basics")
+    let tool = writeFile(dir + "/pre287tool", executable: true)
+
+    check("an executable on the search path is reported, with the path itself",
+          ConflictDetector.executableIndex(searchPaths: [dir]).executablePath(for: "pre287tool")
+              == tool)
+    check("and isShadowed agrees",
+          ConflictDetector.isShadowed("pre287tool", searchPaths: [dir]))
+    check("a name that is in no directory is not shadowed",
+          !ConflictDetector.isShadowed("pre287absent", searchPaths: [dir]))
+
+    // The listing knows this name. Only the confirmation step knows it is not
+    // executable, which is the whole reason the confirmation step exists.
+    let plain = writeFile(dir + "/pre287plain", executable: false)
+    check("a non-executable file of the right name is not a shadow",
+          !ConflictDetector.isShadowed("pre287plain", searchPaths: [dir]))
+
+    // chmod moves no directory modification date, so the stamp cannot notice this.
+    // The per-hit confirmation is what has to.
+    setExecutable(plain, true)
+    check("chmod +x on an already-listed file is observed on the very next lookup",
+          ConflictDetector.isShadowed("pre287plain", searchPaths: [dir]))
+    setExecutable(plain, false)
+    check("and chmod -x is observed just as directly",
+          !ConflictDetector.isShadowed("pre287plain", searchPaths: [dir]))
+}
+
+do {
+    // THE staleness test: the cache is warm and keyed on this exact directory list,
+    // and the directory's contents change underneath it.
+    let dir = pathIndexDirectory("freshness")
+    writeFile(dir + "/pre287first", executable: true)
+    check("the first lookup warms the cache on this search path",
+          ConflictDetector.isShadowed("pre287first", searchPaths: [dir]))
+
+    let second = writeFile(dir + "/pre287second", executable: true)
+    check("a binary installed after the cache was warmed is still found",
+          ConflictDetector.isShadowed("pre287second", searchPaths: [dir]))
+    check("and the first one has not been lost in the re-listing",
+          ConflictDetector.isShadowed("pre287first", searchPaths: [dir]))
+
+    try! FileManager.default.removeItem(atPath: second)
+    check("a binary uninstalled after the cache was warmed stops being reported",
+          !ConflictDetector.isShadowed("pre287second", searchPaths: [dir]))
+
+    // The same freshness, through the other entry point, on the surface a user sees.
+    let third = writeFile(dir + "/pre287third", executable: true)
+    let entry = ShellEntry(kind: .alias, name: "pre287third", command: "echo hi",
+                           comment: nil, sourceFile: "/dev/null", line: 1, managed: true)
+    check("detect() sees the new binary too, and names the path it shadows",
+          ConflictDetector.detect(in: [entry], searchPaths: [dir]).contains {
+              if case .shadowsBinary(let path) = $0.reason { return path == third }
+              return false
+          })
+}
+
+do {
+    // PATH order decides the winner, and it has to keep deciding it after the index
+    // starts answering instead of the stat loop.
+    let first = pathIndexDirectory("order-a")
+    let second = pathIndexDirectory("order-b")
+    let firstTool = writeFile(first + "/pre287dup", executable: true)
+    writeFile(second + "/pre287dup", executable: true)
+    check("the earliest directory on the search path wins",
+          ConflictDetector.executableIndex(searchPaths: [first, second])
+              .executablePath(for: "pre287dup") == firstTool)
+    check("and a later directory answers when the earlier one has nothing",
+          ConflictDetector.executableIndex(searchPaths: [second, first])
+              .executablePath(for: "pre287dup") == second + "/pre287dup")
+}
+
+do {
+    // A directory that cannot be listed must not swallow its contents: the index falls
+    // back to the per-name stat there, which is what the code did everywhere before.
+    let dir = pathIndexDirectory("unlistable")
+    writeFile(dir + "/pre287hidden", executable: true)
+    try! FileManager.default.setAttributes([.posixPermissions: 0o111], ofItemAtPath: dir)
+    check("a search-only directory still reports what it holds",
+          ConflictDetector.isShadowed("pre287hidden", searchPaths: [dir]))
+    try! FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: dir)
+
+    // A directory that is not there at all is simply empty, not an error and not a
+    // reason to stop looking at the rest of PATH.
+    let missing = "\(sandbox)/path-index-never-created"
+    let real = pathIndexDirectory("after-missing")
+    let tool = writeFile(real + "/pre287after", executable: true)
+    check("a nonexistent PATH directory contributes nothing and blocks nothing",
+          ConflictDetector.executableIndex(searchPaths: [missing, real])
+              .executablePath(for: "pre287after") == tool)
+    check("and a name nothing holds is still not shadowed",
+          !ConflictDetector.isShadowed("pre287nothing", searchPaths: [missing, real]))
+}
+
+do {
+    // Injected paths and the real PATH must never answer for one another. Warm the
+    // cache on a fake directory holding a name the real machine certainly lacks, then
+    // ask about it with no injection at all.
+    let dir = pathIndexDirectory("isolation")
+    writeFile(dir + "/pre287onlyhere", executable: true)
+    check("the fake directory reports its own binary",
+          ConflictDetector.isShadowed("pre287onlyhere", searchPaths: [dir]))
+    check("and the real PATH is not answered from the fake directory's cache",
+          !ConflictDetector.isShadowed("pre287onlyhere"))
+}
+
+// ---------------------------------------------------------------------------
+print("\n50. Suggested re-mines history only when history, the alias set, or a dismissal moves")
+
+// `refreshSuggestions` runs from `prepareForShow`, i.e. between the hotkey press and
+// the first frame, and mining means reading and parsing the whole of ~/.zsh_history —
+// 5-30 MB on a long-lived shell — on the main thread. `loadHistoryIfNeeded` has
+// refused to re-read that same file without cause for as long as it has existed; this
+// section pins the same guard for the other reader, and pins each of the three inputs
+// that must still force a re-mine.
+
+do {
+    let (state, _, store) = freshHistoryGateFixture(historyUsageRankingEnabled: true)
+
+    state.prepareForShow()
+    check("the first summon mines", state.suggestionMiningCount == 1)
+    check("and mines something", state.suggestedEntries.contains { $0.command == "docker compose up -d" })
+
+    state.prepareForShow()
+    state.prepareForShow()
+    check("summoning again over an unchanged history and alias set does not re-read it",
+          state.suggestionMiningCount == 1)
+    check("and the bucket is still populated from the cache",
+          state.suggestedEntries.contains { $0.command == "docker compose up -d" })
+
+    // Input 1: the history file. Appending is what a shell actually does to it.
+    let historyPath = AppPaths.historyPath
+    let grown = (try! String(contentsOfFile: historyPath, encoding: .utf8))
+        + String(repeating: "kubectl get pods -A\n", count: 6)
+    try! grown.write(toFile: historyPath, atomically: true, encoding: .utf8)
+    state.prepareForShow()
+    check("a history file that has moved re-mines", state.suggestionMiningCount == 2)
+    check("and the newly repeated command shows up",
+          state.suggestedEntries.contains { $0.command == "kubectl get pods -A" })
+
+    // Input 2: the alias set. Mining subtracts what already exists, so a reload that
+    // lands on different entries has to re-mine even though history has not moved —
+    // and a reload that lands on the same entries must not, or the guard would be
+    // dead on arrival, since `prepareForShow` reloads on every single summon.
+    store.reload()
+    state.prepareForShow()
+    check("a reload that changes no definition does not re-mine",
+          state.suggestionMiningCount == 2)
+
+    let rcPath = AppPaths.rcPath
+    let editedRc = (try! String(contentsOfFile: rcPath, encoding: .utf8))
+        .replacingOccurrences(of: "alias zz='echo zz'",
+                              with: "alias zz='echo zz'\nalias kgp='kubectl get pods -A'")
+    try! editedRc.write(toFile: rcPath, atomically: true, encoding: .utf8)
+    state.prepareForShow()
+    check("a reload that adds an alias re-mines", state.suggestionMiningCount == 3)
+    check("and the command that alias now covers drops out of Suggested",
+          !state.suggestedEntries.contains { $0.command == "kubectl get pods -A" })
+
+    // Put it back, so the dismissal leg below has something to dismiss.
+    let restoredRc = editedRc.replacingOccurrences(
+        of: "\nalias kgp='kubectl get pods -A'", with: "")
+    try! restoredRc.write(toFile: rcPath, atomically: true, encoding: .utf8)
+    state.prepareForShow()
+    check("removing it again re-mines and brings the suggestion back",
+          state.suggestionMiningCount == 4
+              && state.suggestedEntries.contains { $0.command == "kubectl get pods -A" })
+
+    // Input 3: the dismissal list, which lives outside both stamps.
+    let victim = state.suggestedEntries.first { $0.command == "kubectl get pods -A" }!
+    state.ignoreSuggestion(victim)
+    check("dismissing a suggestion re-mines", state.suggestionMiningCount == 5)
+    check("and the dismissed command is gone immediately, not at the next summon",
+          !state.suggestedEntries.contains { $0.command == "kubectl get pods -A" })
+
+    state.prepareForShow()
+    check("and the summon right after a dismissal does not mine again",
+          state.suggestionMiningCount == 5)
+}
+
+do {
+    // The settings short-circuit sits ahead of the stamp check, and emptying the
+    // bucket is not a mine — so turning the toggle back on has to mine again rather
+    // than serve the empty list the off state installed.
+    let (state, settings, _) = freshHistoryGateFixture(historyUsageRankingEnabled: true)
+    state.prepareForShow()
+    let mined = state.suggestionMiningCount
+    check("the on state mined once", mined == 1)
+
+    settings.historyUsageRankingEnabled = false
+    state.refreshSuggestions()
+    check("turning history ranking off empties the bucket", state.suggestedEntries.isEmpty)
+    check("and emptying it costs no history read", state.suggestionMiningCount == mined)
+
+    settings.historyUsageRankingEnabled = true
+    state.refreshSuggestions()
+    check("turning it back on mines again rather than serving the empty list",
+          state.suggestionMiningCount == mined + 1)
+    check("and the bucket comes back",
+          state.suggestedEntries.contains { $0.command == "docker compose up -d" })
+}
+
+do {
+    // No history file at all is a real observation, not a never-mined state: it must
+    // not put the guard into a loop of re-reading a file that is not there.
+    let (state, _, _) = freshHistoryGateFixture(historyUsageRankingEnabled: true)
+    try! FileManager.default.removeItem(atPath: AppPaths.historyPath)
+    state.prepareForShow()
+    check("a missing history file mines once and finds nothing",
+          state.suggestionMiningCount == 1 && state.suggestedEntries.isEmpty)
+    state.prepareForShow()
+    check("and does not re-mine on the next summon",
+          state.suggestionMiningCount == 1)
+}
+
+// ---------------------------------------------------------------------------
 print("\n" + String(repeating: "-", count: 60))
 print("\(passes) passed, \(failures) failed")
 exit(failures == 0 ? 0 : 1)
