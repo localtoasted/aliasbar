@@ -1121,7 +1121,14 @@ enum AliasWriter {
 // MARK: - Shell statement span lexer
 
 /// Tracks the shell statement state that AliasWriter carries across physical lines.
-private enum ShellStatementLexer {
+///
+/// Deliberately `internal` rather than `private`, and deliberately still inside this
+/// file. Internal is what lets `Tests/AliasBarCoreTests` name `ShellStatementLexer`
+/// and `LexState` through `@testable import AliasBarCore` and assert on the lexer's
+/// carried state directly, instead of only observing it through a whole-file diff.
+/// Moving it to its own `Sources/` file would break the `ab` CLI, which is compiled
+/// from Model.swift + AliasWriter.swift + Sources/CLI/* alone.
+internal enum ShellStatementLexer {
     /// Where the lexer is when a line ends. Every nested shell construct owns its
     /// quote and word-boundary state: quotes inside `$(...)` do not close quotes in
     /// the surrounding value, and comments inside a substitution end at its newline

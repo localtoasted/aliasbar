@@ -105,9 +105,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         // which needs Accessibility permission and cannot run over SSH. "history" lands in
         // the history palette; "settings" opens the settings window instead, which is
         // otherwise only reachable by clicking.
-        // First run, or a harness asking to pose the flow. Presentation waits for the
-        // status item's actual window/frame readiness below so the window does not
-        // fight an incompletely-laid-out launch.
+        // First run, or a harness asking to pose the flow. Only the menu-bar popover
+        // waits for the status item's actual window/frame readiness below, so that it
+        // does not anchor to an incompletely-laid-out button; the centered palette and
+        // the settings window have no such dependency and open straight away.
         let shouldShowOnboarding = !settings.onboardingComplete
             || ProcessInfo.processInfo.environment["ALIASBAR_ONBOARDING"] == "1"
         if shouldShowOnboarding {
@@ -115,25 +116,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         }
 
         let openOnLaunch = ProcessInfo.processInfo.environment["ALIASBAR_OPEN_ON_LAUNCH"]
+        let wantsOpenOnLaunch = openOnLaunch == "1"
+            || openOnLaunch == "history"
+            || openOnLaunch == "settings"
         Task { @MainActor [weak self] in
             guard let self else { return }
+
+            // Explicitly annotated: a local function does not inherit the enclosing
+            // closure's actor isolation, and every call in its body is main-actor only.
+            @MainActor func openRequestedSurface() {
+                if openOnLaunch == "settings" {
+                    self.openSettings()
+                } else {
+                    self.summon()
+                    if openOnLaunch == "history" { self.state.enterHistory() }
+                }
+            }
+
+            // The centered palette — the default style — has no status-item geometry
+            // dependency, so waiting on the readiness poll only delays it by up to that
+            // poll's full 1.2s timeout for nothing. Only the menu-bar popover anchors to
+            // the button, so only it waits.
+            let needsStatusItem = settings.presentationStyle == .menuBar
+            if wantsOpenOnLaunch && !needsStatusItem { openRequestedSurface() }
+
             let statusItemReady = await self.waitForStatusItemReadiness()
 
             // Preserve the old 0.4s/0.5s ordering when a screenshot harness asks for
             // a surface on the first run: the requested surface opens first, then
-            // onboarding becomes the frontmost window. Readiness, rather than wall
-            // clock timing, now decides when either action is safe.
-            if openOnLaunch == "1" || openOnLaunch == "history" || openOnLaunch == "settings" {
-                if openOnLaunch == "settings" {
-                    self.openSettings()
-                } else if statusItemReady || settings.presentationStyle == .palette {
-                    // The centered palette has no status-item geometry dependency;
-                    // only the menu-bar popover must wait for a measurable button.
-                    self.summon()
-                    if openOnLaunch == "history" { self.state.enterHistory() }
-                } else {
-                    Diag.log("open-on-launch popover skipped because status item is not ready")
+            // onboarding becomes the frontmost window.
+            if wantsOpenOnLaunch && needsStatusItem {
+                // Summoned even when the item never became measurable. A full menu bar
+                // or a menu-bar manager hiding the item is a placement problem, and
+                // opening nothing at all turns it into what looks like a broken build —
+                // which is precisely the reading a screenshot harness would take.
+                // showUI() has its own `guard let button = statusItem.button` and that
+                // is the right place, and the only place, for this bail-out.
+                if !statusItemReady {
+                    Diag.log("open-on-launch popover summoning anyway: "
+                             + "status item never became measurable")
                 }
+                openRequestedSurface()
             }
 
             if shouldShowOnboarding {
