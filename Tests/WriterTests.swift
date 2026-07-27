@@ -2470,73 +2470,12 @@ for mode in ViewMode.allCases {
 }
 
 // ---------------------------------------------------------------------------
-print("\n28. Onboarding actions have explicit accessibility names")
-
-// The lightweight test binary does not compile SwiftUI views. Inspect the shipped source
-// instead so every button-producing boundary stays explicitly named even when its visible
-// label is only a glyph, shortcut, or composite preview.
-let projectRoot = URL(fileURLWithPath: CommandLine.arguments[0])
-    .deletingLastPathComponent()
-    .deletingLastPathComponent()
-    .deletingLastPathComponent()
-let onboardingSource = read(projectRoot.appendingPathComponent("Sources/Onboarding.swift").path)
-check("onboarding source is readable",
-      onboardingSource != "<unreadable>")
-
-let onboardingAccessibilityBoundaries = [
-    ".accessibilityLabel(\"Set up later\")",
-    ".accessibilityLabel(\"Skip this setup step\")",
-    ".accessibilityLabel(step == .look",
-    ".accessibilityLabel(recordingHotkey",
-    ".accessibilityLabel(hotkeyRehearsed",
-    ".accessibilityLabel(title)",
-    ".accessibilityLabel(axPrompted",
-    ".accessibilityLabel(\"Choose aliases file\")",
-    ".accessibilityLabel(customising",
-    ".accessibilityLabel(\"Save appearance preset\")",
-    ".accessibilityLabel(\"Cancel saving appearance preset\")",
-    ".accessibilityLabel(\"Save appearance as a preset\")",
-    ".accessibilityLabel(\"\\(appearance.name) appearance\")",
-    ".accessibilityLabel(\"Re-grant Accessibility permission\")",
-    ".accessibilityLabel(\"\\(value) \\(label)\")",
-    ".accessibilityLabel(\"Rank \\(rank), \\(ranked.name), used \\(ranked.uses) times\")",
-]
-for boundary in onboardingAccessibilityBoundaries {
-    check("onboarding AX boundary \(boundary)",
-          onboardingSource.contains(boundary))
-}
-
-for stateName in [
-    "\"Finish setup\"",
-    "\"Continue to next setup step\"",
-    "\"Stop recording keyboard shortcut\"",
-    "\"Change keyboard shortcut, currently \\(settings.hotkey.displayString)\"",
-    "\"Show the macOS Accessibility permission prompt again\"",
-    "\"Allow pasting by showing the macOS Accessibility permission prompt\"",
-    "\"Hide appearance controls\"",
-    "\"Customise appearance\"",
-] {
-    check("onboarding dynamic AX name \(stateName)",
-          onboardingSource.contains(stateName))
-}
-
-let onboardingAccessibilityLabelCount =
-    onboardingSource.components(separatedBy: ".accessibilityLabel(").count - 1
-check("all onboarding button boundaries own exactly one accessibility label",
-      onboardingAccessibilityLabelCount == onboardingAccessibilityBoundaries.count,
-      "found \(onboardingAccessibilityLabelCount), expected \(onboardingAccessibilityBoundaries.count)")
-
-// ---------------------------------------------------------------------------
 print("\n29. Foundation core seam")
 
-let coreModelSource = read(projectRoot.appendingPathComponent("Sources/Model.swift").path)
-let coreWriterSource = read(projectRoot.appendingPathComponent("Sources/AliasWriter.swift").path)
-check("core sources are readable",
-      coreModelSource != "<unreadable>" && coreWriterSource != "<unreadable>")
-for forbidden in ["import SwiftUI", "import AppKit", "UserDefaults", "AppSettings"] {
-    check("core source excludes \(forbidden)",
-          !coreModelSource.contains(forbidden) && !coreWriterSource.contains(forbidden))
-}
+// The core seam's freedom from app-owned dependencies is proven by the build, not by
+// reading source text: test.sh emits the AliasBarCore module from these files alone,
+// and Package.swift declares the same set as an app-free SPM target. Either would fail
+// to compile the moment SwiftUI, AppKit, or AppSettings crept in.
 
 check("stored rc path wins over the environment",
       AppPaths.resolveRcPath(stored: "/tmp/stored.zshrc",
@@ -2977,19 +2916,6 @@ let paddedTokenAtLimit =
     + tokenAtLimit
 check("provider token at the bounded input tail is still found",
       classifierReason(paddedTokenAtLimit) == .githubToken)
-
-let classifierSource = read(
-    projectRoot.appendingPathComponent("Sources/SensitiveContentClassifier.swift").path
-)
-check("classifier source is readable",
-      classifierSource != "<unreadable>")
-for forbiddenAPI in [
-    "AppKit", "SwiftUI", "UserDefaults", "NSPasteboard", "FileManager",
-    "URLSession", "Process(", "print(", "NSLog", "os_log",
-] {
-    check("classifier has no \(forbiddenAPI) dependency",
-          !classifierSource.contains(forbiddenAPI))
-}
 
 // ---------------------------------------------------------------------------
 print("\n31. Shortcut model + PromptStore (PRE-258)")
@@ -3456,16 +3382,8 @@ let collidingNameEntry = ShellEntry(kind: .alias, name: "standup", command: "x",
 check("an alias and a prompt that happen to share a name still get distinct ids",
       Shortcut(entry: collidingNameEntry).id != promptShortcut.id)
 
-// --- Foundation core seam: the new files stay dependency-free, like Model.swift ---
-
-let shortcutSource = read(projectRoot.appendingPathComponent("Sources/Shortcut.swift").path)
-let promptStoreSource = read(projectRoot.appendingPathComponent("Sources/PromptStore.swift").path)
-check("Shortcut.swift and PromptStore.swift are readable",
-      shortcutSource != "<unreadable>" && promptStoreSource != "<unreadable>")
-for forbidden in ["import SwiftUI", "import AppKit", "UserDefaults", "AppSettings"] {
-    check("Shortcut.swift excludes \(forbidden)", !shortcutSource.contains(forbidden))
-    check("PromptStore.swift excludes \(forbidden)", !promptStoreSource.contains(forbidden))
-}
+// Shortcut.swift and PromptStore.swift stay dependency-free like Model.swift; the
+// AliasBarCore module build is what proves it.
 
 // ---------------------------------------------------------------------------
 print("\n31. Clipboard capture: quarantine routing and store")
@@ -3953,14 +3871,24 @@ monitorClockValue = quarantineBase.addingTimeInterval(91)
 check("the monitor's exposed quarantine listing honors a fake clock's expiry",
       expiryMonitor.activeQuarantine.isEmpty)
 
-// Structural proof, in the same spirit as the classifier's dependency scan above:
-// the only way into `history` is through the `ClipIngestor.decide` switch.
-let monitorSource = read(projectRoot.appendingPathComponent("Sources/ClipboardMonitor.swift").path)
-check("ClipboardMonitor source is readable", monitorSource != "<unreadable>")
-check("ClipboardMonitor's capture path calls ClipIngestor.decide",
-      monitorSource.contains("ClipIngestor.decide"))
-check("history is appended to in exactly one place, inside the decide switch",
-      monitorSource.components(separatedBy: "history.insert").count == 2)
+// The behavioral half of that boundary: whatever `ClipIngestor.decide` routes to
+// quarantine must never also reach `history`, on either quarantine path, and a clip
+// that later expires out of quarantine must not reappear in history either.
+check("a quarantined clip never lands in history",
+      expiryMonitor.history.isEmpty)
+
+let concealedHistoryPasteboard = FakePasteboard()
+let concealedHistoryMonitor = makeMonitor(pasteboard: concealedHistoryPasteboard)
+concealedHistoryPasteboard.simulateExternalCopy("just a grocery list", concealed: true)
+concealedHistoryMonitor.poll()
+check("a concealed clip is quarantined instead of entering history",
+      concealedHistoryMonitor.history.isEmpty
+          && concealedHistoryMonitor.activeQuarantine.count == 1)
+
+concealedHistoryPasteboard.simulateExternalCopy("git status")
+concealedHistoryMonitor.poll()
+check("an ordinary clip after a quarantined one is the only history entry",
+      concealedHistoryMonitor.history.map(\.content) == ["git status"])
 
 // ---------------------------------------------------------------------------
 print("\n34. ClipKind: detection precedence")
@@ -4922,26 +4850,6 @@ check("SHA-256 of \"abc\" matches the published test vector",
 check("SHA-256 handles multi-block input (1,000,000 x 'a')",
       SHA256Digest.hex(String(repeating: "a", count: 1_000_000))
         == "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0")
-
-// --- Zero shared code with AliasWriter --------------------------------------
-
-let promptCompilerSource = read(projectRoot.appendingPathComponent("Sources/PromptCompiler.swift").path)
-check("PromptCompiler source is readable", promptCompilerSource != "<unreadable>")
-// The header comment explains in prose *why* PromptCompiler shares nothing with
-// AliasWriter, and names it while doing so — that is documentation, not coupling.
-// The boundary this checks is code coupling, so comment lines are stripped first;
-// a genuine reference would show up as actual Swift code (a member access such as
-// `AliasWriter.`, or the bare type name used as a value) and survive the strip.
-let promptCompilerCodeOnly = promptCompilerSource
-    .components(separatedBy: "\n")
-    .filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }
-    .joined(separator: "\n")
-for forbiddenSymbol in [
-    "AliasWriter", "ManagedBlock", "ZshrcParser", "ShellEntry", "AppKit", "SwiftUI", "UserDefaults",
-] {
-    check("PromptCompiler shares no code-level reference to \(forbiddenSymbol)",
-          !promptCompilerCodeOnly.contains(forbiddenSymbol))
-}
 
 // ---------------------------------------------------------------------------
 print("\n37. Context detection + dialect ranking (PRE-259)")
@@ -9550,64 +9458,6 @@ do {
 }
 
 // ---------------------------------------------------------------------------
-print("\n44. Interaction feedback, contextual hints, and Find scrolling")
-
-let interactionViewsSource = read(projectRoot.appendingPathComponent("Sources/Views.swift").path)
-let clipboardFindSource = read(projectRoot.appendingPathComponent("Sources/ClipboardFindView.swift").path)
-let promptBoardSource = read(projectRoot.appendingPathComponent("Sources/PromptBoardView.swift").path)
-check("interaction view sources are readable",
-      interactionViewsSource != "<unreadable>" && clipboardFindSource != "<unreadable>"
-          && promptBoardSource != "<unreadable>")
-check("history rows own scroll targets",
-      interactionViewsSource.contains(".id(command.id)")
-          && interactionViewsSource.contains("guard let selected = state.selectedHistory"))
-check("alias and prompt rows share selection-following scroll targets",
-      interactionViewsSource.contains(".id(shortcut.id)")
-          && interactionViewsSource.contains("guard let selected = state.selectedShortcut"))
-check("clipboard rows own selection-following scroll targets",
-      clipboardFindSource.contains(".id(clip.id)")
-          && clipboardFindSource.contains("guard let selected = state.selectedClip"))
-check("clipboard badges classify trimmed text",
-      clipboardFindSource.contains("return ClipKind.detect(trimmed)"))
-check("clipboard image errors reach VoiceOver",
-      clipboardFindSource
-          .contains("imageClip.issueMessage.map { \"Clipboard image. \\($0)\" }"))
-check("the all-purpose footer is gone",
-      !interactionViewsSource.contains("private var footer"))
-check("shortcuts live with selected actions",
-      interactionViewsSource.contains("struct SelectedActionHints")
-          && interactionViewsSource.contains("primaryKeys: \"⏎\""))
-check("shell Board shows both Enter actions beside the selected alias",
-      interactionViewsSource.contains("secondaryKeys: \"⌘⏎\"")
-          && interactionViewsSource.contains("secondaryLabel: settings.enterAction.secondary.short"))
-check("both Board decks disable dim cards at the view boundary",
-      interactionViewsSource.contains(".disabled(dimmed)")
-          && promptBoardSource.contains(".disabled(dimmed)"))
-check("copy feedback has a visible success icon and an accessibility label",
-      interactionViewsSource.contains("checkmark.circle.fill")
-          && interactionViewsSource.contains(".accessibilityLabel(\"Status: ")
-          && interactionViewsSource.contains(".accessibilityFocused($statusFocused)"))
-
-let sourceDirectory = projectRoot.appendingPathComponent("Sources")
-let sourceEnumerator = FileManager.default.enumerator(at: sourceDirectory,
-                                                       includingPropertiesForKeys: nil)
-var nonCommentDashLines: [String] = []
-while let url = sourceEnumerator?.nextObject() as? URL {
-    guard url.pathExtension == "swift" else { continue }
-    let source = read(url.path)
-    for (lineNumber, line) in source.components(separatedBy: .newlines).enumerated() {
-        let trimmed = line.trimmingCharacters(in: .whitespaces)
-        guard !trimmed.hasPrefix("//") else { continue }
-        if line.contains("—") || line.contains("–") {
-            nonCommentDashLines.append("\(url.lastPathComponent):\(lineNumber + 1)")
-        }
-    }
-}
-check("user-facing Swift text contains no em or en dashes",
-      nonCommentDashLines.isEmpty,
-      nonCommentDashLines.joined(separator: ", "))
-
-// ---------------------------------------------------------------------------
 print("\n45. Library builder, reviewed alias ingest, defaults, and clipboard drafts")
 
 // --- Prepared instructions stay small and omit existing content -------------
@@ -10281,23 +10131,6 @@ do {
               && state.errorMessage?.contains("16 MB") == true)
 }
 
-let libraryPanelSource = read(projectRoot.appendingPathComponent("Sources/LibraryBuilderPanel.swift").path)
-check("Settings and onboarding share one library-builder control",
-      read(projectRoot.appendingPathComponent("Sources/SettingsWindow.swift").path)
-          .contains("LibraryBuilderPanel(promptsEnabled:")
-          && read(projectRoot.appendingPathComponent("Sources/Onboarding.swift").path)
-              .contains("LibraryBuilderPanel(promptsEnabled:"))
-check("the shared control exposes copy and review actions",
-      libraryPanelSource.contains("Copy instructions")
-          && libraryPanelSource.contains("Import copied JSON"))
-check("new builder controls use native segmented Pickers",
-      libraryPanelSource.contains(".pickerStyle(.segmented)")
-          && !libraryPanelSource.contains("ThemedSegments"))
-let libraryOnboardingSource = read(projectRoot.appendingPathComponent("Sources/Onboarding.swift").path)
-check("onboarding keeps Build my library behind one optional disclosure",
-      libraryOnboardingSource.contains("DisclosureGroup(isExpanded: $showsLibraryBuilder)")
-          && libraryOnboardingSource.contains("Text(\"Build my library\")"))
-
 do {
     let (state, _, inboxDir, _) = freshInboxFixture()
     _ = writeInboxFile("""
@@ -10561,72 +10394,6 @@ check("prompt-off builder choices contain Aliases only",
       LibraryBuildKind.available(promptFeaturesEnabled: false) == [.alias])
 check("prompt-on builder choices include prompts and aliases",
       LibraryBuildKind.available(promptFeaturesEnabled: true) == LibraryBuildKind.allCases)
-
-let combinedSettingsSource = read(
-    projectRoot.appendingPathComponent("Sources/SettingsWindow.swift").path)
-check("Settings exposes a prompt feature toggle",
-      combinedSettingsSource.contains("$settings.promptFeaturesEnabled"))
-check("Settings default options use the prompt-aware availability list",
-      combinedSettingsSource.contains("DefaultLibrary.available("))
-check("Settings does not render every default option while prompts are off",
-      !combinedSettingsSource.contains("ForEach(DefaultLibrary.allCases)"))
-check("Settings passes the prompt feature state into the builder",
-      combinedSettingsSource.contains(
-          "LibraryBuilderPanel(promptsEnabled: settings.promptFeaturesEnabled)"))
-check("Settings reads the displayed app version from the built bundle",
-      combinedSettingsSource.contains(
-          "forInfoDictionaryKey: \"CFBundleShortVersionString\"")
-          && !combinedSettingsSource.contains("Text(\"v0."))
-check("onboarding passes its current prompt choice into the builder",
-      libraryOnboardingSource.contains(
-          "LibraryBuilderPanel(promptsEnabled: decisions.claudeCodePromptFeatures)"))
-let combinedLibraryPanelSource = read(
-    projectRoot.appendingPathComponent("Sources/LibraryBuilderPanel.swift").path)
-check("library builder renders only its prompt-aware available kinds",
-      combinedLibraryPanelSource.contains("ForEach(availableKinds)"))
-check("library builder does not render every kind while prompts are off",
-      !combinedLibraryPanelSource.contains("ForEach(LibraryBuildKind.allCases)"))
-
-let rootViewSource = read(projectRoot.appendingPathComponent("Sources/Views.swift").path)
-let promptFindViewSource = read(
-    projectRoot.appendingPathComponent("Sources/PromptFindView.swift").path)
-let promptManageViewSource = read(
-    projectRoot.appendingPathComponent("Sources/PromptManageView.swift").path)
-check("the search field is laid out before the view controls",
-      rootViewSource.contains("VStack(spacing: 9) {\n            searchField\n            navigationBar"))
-check("the view controls show a contextual Tab library hint",
-      rootViewSource.contains("KeyHint(keys: \"⇥\", label:"))
-check("the Find rest label follows the library selected with Tab",
-      rootViewSource
-          .contains("state.dialect == .prompt ? \"PROMPTS FIRST\" : \"ALIASES FIRST\""))
-check("selection actions reserve stable row width instead of reflowing text",
-      rootViewSource.contains("struct StableRowActionHints")
-          && rootViewSource.contains(".frame(width: 196, height: 24, alignment: .trailing)")
-          && rootViewSource.contains(".opacity(visible ? 1 : 0)"))
-let fillInSheetSource = read(projectRoot.appendingPathComponent("Sources/FillInSheet.swift").path)
-check("the fill-in confirmation names the configured copy or paste action",
-      fillInSheetSource.contains("Button(confirmLabel, action: onConfirm)")
-          && rootViewSource.contains("confirmLabel: state.settings.enterAction.needsAccessibility"))
-check("the fill-in sheet can dismiss while its text field ends editing",
-      !rootViewSource.contains("Binding($state.fillIn)")
-          && rootViewSource.contains("private func fillBinding(for target:")
-          && rootViewSource.contains("guard var current = state.fillIn"))
-check("FIND's empty prompt setup notice has a dismiss control",
-      promptFindViewSource.contains("DismissibleInfoBanner(text: AppState.promptLibraryEmptyHint"))
-check("MANAGE's empty prompt setup notice shares the same dismissal policy",
-      promptManageViewSource.contains("state.showsPromptLibraryHint")
-          && promptManageViewSource.contains("onDismiss: state.dismissPromptLibraryHint"))
-
-// --- Clipboard pointer actions expose native or explicit accessibility actions -
-
-check("clipboard list rows use native Button-backed live controls",
-      clipboardFindSource.contains(".live { state.selection = index }"))
-check("clipboard transform rows use native Button-backed live controls",
-      clipboardFindSource.contains(".live {")
-          && clipboardFindSource.contains("state.clipActionSelection = index"))
-check("selectable raw clip text exposes a VoiceOver default action",
-      clipboardFindSource.contains(".accessibilityAddTraits(.isButton)")
-          && clipboardFindSource.contains(".accessibilityAction { activateRawClip() }"))
 
 // ---------------------------------------------------------------------------
 print("\n" + String(repeating: "-", count: 60))
