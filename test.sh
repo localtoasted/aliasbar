@@ -66,6 +66,9 @@ swiftc -target "$(uname -m)-apple-macos13.0" \
     "${PROJECT_DIR}/Sources/DialectContext.swift" \
     "${PROJECT_DIR}/Sources/FillInSheet.swift" \
     "${PROJECT_DIR}/Sources/AppState.swift" \
+    "${PROJECT_DIR}/Sources/ClipboardState.swift" \
+    "${PROJECT_DIR}/Sources/InboxState.swift" \
+    "${PROJECT_DIR}/Sources/ComposerState.swift" \
     "${BUILD_DIR}/main.swift" \
     -o "${BUILD_DIR}/writer-tests"
 
