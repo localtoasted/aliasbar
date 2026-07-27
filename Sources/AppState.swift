@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 import Carbon.HIToolbox
 
 /// Sidebar buckets in MANAGE's shell dialect.
@@ -321,7 +322,6 @@ final class AppState: ObservableObject {
     /// saying (an unrecognized app). Frozen at the guess made when the popover opened —
     /// it describes where you came from, not where ⇥ has since taken you.
     @Published private(set) var contextChip: String?
-    @Published var editor: EditTarget?
     @Published var toast: String?
     @Published var errorMessage: String?
     /// Set when a write would remove more than the definition asked for. Holds the exact
@@ -369,20 +369,26 @@ final class AppState: ObservableObject {
     /// Swapping it changes nothing about the delivery pipeline itself.
     var pasteboard: PasteboardWriting = NSPasteboard.general
 
-    /// Local image OCR. Tests replace this with a deterministic fake, so they never
-    /// invoke Vision or read the system clipboard.
-    var clipboardImageTextRecognizer: ClipboardImageTextRecognizing =
-        VisionClipboardImageTextRecognizer()
-    @Published private(set) var clipboardImageOCRClipID: UUID?
-    private var clipboardImageOCRRequestID: UUID?
-    private var clipboardImageOCRTask: ClipboardImageTextRecognitionTask?
-
     /// Every prompt on disk, read once per summon in `prepareForShow` — a directory
     /// scan on every keystroke would be felt, the same reasoning `EntryStore` already
     /// applies to shell history.
-    private var promptCache: [Prompt] = []
+    var promptCache: [Prompt] = []
     /// Usage counts for those prompts, loaded alongside them for the same reason.
     private var promptUsageCache: [String: PromptUsageCounter.Entry] = [:]
+
+    /// The three surfaces that own enough state to be worth their own object rather
+    /// than another stripe through this class: FIND's clipboard source, MANAGE's
+    /// Review bucket, and the Composer sheet. Each holds an `unowned` reference back
+    /// here for the shared state it still acts on (the selection, the query, the
+    /// prompt cache, the toast channel), and each forwards its `objectWillChange`
+    /// into this one — see `observeChildren`.
+    ///
+    /// `lazy` only because `self` isn't available until every stored property has a
+    /// value; `observeChildren` touches all three during `init`, so none of them is
+    /// ever actually built late.
+    private(set) lazy var clipboard = ClipboardState(app: self)
+    private(set) lazy var inbox = InboxState(app: self)
+    private(set) lazy var composer = ComposerState(app: self)
 
     /// The local snippet file, source of truth for MANAGE's Snippets bucket and for
     /// `ExpansionMonitor`'s live matcher alike — both read the same path, so there is
@@ -426,11 +432,117 @@ final class AppState: ObservableObject {
     /// it can only ever be shown once no matter how it was queued.
     private var pendingPromptHint: String?
 
+    /// Keeps the child-object subscriptions below alive for the life of the state.
+    private var childObservers: [AnyCancellable] = []
+
     init(store: EntryStore, settings: AppSettings) {
         self.store = store
         self.settings = settings
         self.mode = settings.defaultView
+        observeChildren()
     }
+
+    /// Views read `store.ranked`, `store.conflicts` and `settings.enterAction` straight
+    /// off these children, but SwiftUI only observes the `AppState` they were handed —
+    /// a child's own `objectWillChange` stops at the child. Without this forwarding a
+    /// reload only redraws because the same code path happens to write `toast` or
+    /// `errorMessage` on the way past, which is a coincidence, not a mechanism: the one
+    /// path that reloads silently leaves the list showing entries that no longer exist.
+    private func observeChildren() {
+        let forward: () -> Void = { [weak self] in self?.objectWillChange.send() }
+        childObservers = [
+            store.objectWillChange.sink { _ in forward() },
+            settings.objectWillChange.sink { _ in forward() },
+            clipboard.objectWillChange.sink { _ in forward() },
+            inbox.objectWillChange.sink { _ in forward() },
+            composer.objectWillChange.sink { _ in forward() },
+        ]
+    }
+
+    // MARK: - Child forwarding
+    //
+    // Thin pass-throughs onto `clipboard`, `inbox` and `composer`. They exist so
+    // extracting those three surfaces stayed a move rather than a rewrite: every
+    // view, every test, and the rest of this file keep saying `state.editor` or
+    // `state.inboxRows` and reach the same state they always did. Settable ones stay
+    // settable, so `$state.editor` still forms a binding — SwiftUI's dynamic member
+    // lookup wants a writable key path, not specifically a `@Published`.
+
+    typealias InboxFileReview = InboxState.InboxFileReview
+    typealias InboxItemDecision = InboxState.InboxItemDecision
+    typealias InboxRow = InboxState.InboxRow
+    typealias ComposerValidation = ComposerState.ComposerValidation
+
+    var editor: EditTarget? {
+        get { composer.editor }
+        set { composer.editor = newValue }
+    }
+    func openComposer(prefill: ComposerPrefill) { composer.openComposer(prefill: prefill) }
+    func switchComposerKind(to kind: EditTarget.Kind) { composer.switchComposerKind(to: kind) }
+    func beginEditPrompt(_ shortcut: Shortcut) { composer.beginEditPrompt(shortcut) }
+    func composerDestination(for target: EditTarget) -> [String] {
+        composer.composerDestination(for: target)
+    }
+    func composerAliasValidation(name: String, command: String, originalName: String,
+                                 searchPaths: [String]? = nil) -> ComposerValidation {
+        composer.composerAliasValidation(name: name, command: command,
+                                         originalName: originalName, searchPaths: searchPaths)
+    }
+    func composerPromptValidation(name: String, originalName: String) -> ComposerValidation {
+        composer.composerPromptValidation(name: name, originalName: originalName)
+    }
+
+    var clipboardMonitor: ClipboardMonitor? {
+        get { clipboard.clipboardMonitor }
+        set { clipboard.clipboardMonitor = newValue }
+    }
+    var clipActionSelection: Int? {
+        get { clipboard.clipActionSelection }
+        set { clipboard.clipActionSelection = newValue }
+    }
+    var clipboardImageTextRecognizer: ClipboardImageTextRecognizing {
+        get { clipboard.clipboardImageTextRecognizer }
+        set { clipboard.clipboardImageTextRecognizer = newValue }
+    }
+    var clipboardImageOCRClipID: UUID? { clipboard.clipboardImageOCRClipID }
+    var clipboardRows: [ClipboardHistoryItem] { clipboard.clipboardRows }
+    var activeQuarantine: [MemoryClip] { clipboard.activeQuarantine }
+    var selectedClip: ClipboardHistoryItem? { clipboard.selectedClip }
+    var clipboardActions: [ClipAction] { clipboard.clipboardActions }
+    func enterClipboard() { clipboard.enterClipboard() }
+    func cycleClipboardAction(forward: Bool) { clipboard.cycleClipboardAction(forward: forward) }
+    func performClipboardEnter() { clipboard.performClipboardEnter() }
+    func enableClipboardMonitoring() { clipboard.enableClipboardMonitoring() }
+    func createFromSelectedClip(kind: EditTarget.Kind, expectedID: UUID? = nil) {
+        clipboard.createFromSelectedClip(kind: kind, expectedID: expectedID)
+    }
+    private func cancelClipboardImageOCR() { clipboard.cancelClipboardImageOCR() }
+    static func clipboardDraft(_ text: String, for kind: EditTarget.Kind) -> String? {
+        ClipboardState.clipboardDraft(text, for: kind)
+    }
+
+    private var pendingInboxEdit: (file: URL, index: Int)? {
+        get { inbox.pendingInboxEdit }
+        set { inbox.pendingInboxEdit = newValue }
+    }
+    private func refreshInbox() { inbox.refreshInbox() }
+    private func markInboxItemHandled(file: URL, index: Int) {
+        inbox.markInboxItemHandled(file: file, index: index)
+    }
+    var inboxRows: [InboxRow] { inbox.inboxRows }
+    var inboxPendingCount: Int { inbox.inboxPendingCount }
+    var selectedInboxRow: InboxRow? { inbox.selectedInboxRow }
+    var selectedInboxItem: (file: URL, index: Int, item: PromptInbox.Item, review: InboxFileReview)? {
+        inbox.selectedInboxItem
+    }
+    var selectedInboxItemCanApprove: Bool { inbox.selectedInboxItemCanApprove }
+    func itemFor(file: URL, index: Int) -> PromptInbox.Item? { inbox.itemFor(file: file, index: index) }
+    func inboxUpdateOldBody(for item: PromptInbox.Item) -> String? { inbox.inboxUpdateOldBody(for: item) }
+    func markInboxItemViewed(file: URL, index: Int) { inbox.markInboxItemViewed(file: file, index: index) }
+    func approveInboxItem(file: URL, index: Int) { inbox.approveInboxItem(file: file, index: index) }
+    func discardInboxItem(file: URL, index: Int) { inbox.discardInboxItem(file: file, index: index) }
+    func discardInboxFile(_ url: URL) { inbox.discardInboxFile(url) }
+    func editInboxItem(file: URL, index: Int) { inbox.editInboxItem(file: file, index: index) }
 
     // MARK: - Derived content
 
@@ -921,7 +1033,7 @@ final class AppState: ObservableObject {
     /// Recomputes `suggestionCache` from history, existing aliases, and the ignore
     /// store. Called at `prepareForShow` and again after anything that could change
     /// membership: dismissing a suggestion or saving a new alias.
-    private func refreshSuggestions() {
+    func refreshSuggestions() {
         // Suggested is mined from raw shell history same as `EntryStore`'s usage
         // counts are — a different signal (whole commands, not per-name counts) but
         // the same "history usage ranking" toggle governs both, so disabling it empties
@@ -1072,291 +1184,6 @@ final class AppState: ObservableObject {
         clampSelection()
     }
 
-    // MARK: - Inbox (PRE-265 UI)
-
-    /// One inbox file's live review state. `PromptInbox`'s own API is deliberately
-    /// file-level (a file only ever leaves the live inbox as a whole, via
-    /// `markDone`/`discardFile`), so tracking "which items in this file have I
-    /// already decided, and which have I actually looked at" is squarely this UI
-    /// layer's job, kept entirely in memory for the life of this session — nothing
-    /// here is ever written to disk on its own.
-    struct InboxFileReview {
-        let url: URL
-        var items: [PromptInbox.Item]
-        /// Per-item decision, index-aligned with `items`. Absent (nil) means still
-        /// pending.
-        var decisions: [Int: InboxItemDecision] = [:]
-        /// Which items have actually had their full body displayed at least once.
-        /// This is the fact behind `acknowledgedFlags: true` — `approveInboxItem`
-        /// derives that argument from this set on every call, so passing `true`
-        /// down into `PromptInbox.approve` is never a formality it could fake by
-        /// just clicking fast. Populated only by `markInboxItemViewed`, which the
-        /// detail view calls from its own `onAppear` once the item's complete,
-        /// untruncated body has actually been laid out on screen.
-        var viewedInFull: Set<Int> = []
-
-        var isFullyDecided: Bool { items.indices.allSatisfy { decisions[$0] != nil } }
-    }
-
-    enum InboxItemDecision: Equatable {
-        case approved
-        case discarded
-    }
-
-    /// One row the Inbox bucket's list shows: either a decidable item out of a
-    /// file that parsed cleanly, or a whole file that didn't parse at all — the two
-    /// things `PromptInbox.scan` can produce (`.ok`'s items, `.invalid`'s file-level
-    /// refusal). An `.invalid` file has nothing to review item-by-item, so it only
-    /// ever offers a whole-file Discard.
-    enum InboxRow: Identifiable, Equatable {
-        case item(file: URL, index: Int)
-        case invalidFile(url: URL, reason: String)
-
-        var id: String {
-            switch self {
-            case .item(let file, let index): return "inbox-item-\(file.path)#\(index)"
-            case .invalidFile(let url, _): return "inbox-invalid-\(url.path)"
-            }
-        }
-    }
-
-    /// Every well-formed inbox file's review state, keyed by file URL — rebuilt at
-    /// `prepareForShow` (the packet's "summon-time scan is the honest cadence": no
-    /// filesystem watcher). `@Published` because `markInboxItemViewed` mutates it
-    /// without otherwise touching any other published field, and the Approve
-    /// button's enabled state has to react to exactly that change.
-    @Published private var inboxReviews: [URL: InboxFileReview] = [:]
-    /// The `.invalid` files from the same scan, separately — there's no item list
-    /// inside one of these to track decisions for.
-    @Published private var invalidInboxFiles: [(url: URL, reason: String)] = []
-    /// Set by `editInboxItem` just before opening the Composer, so a successful
-    /// save can mark the originating inbox item handled without `commitPromptEditor`
-    /// otherwise knowing anything about the inbox. Cleared whenever a *different*
-    /// composer session opens, and on Esc, so it can never attach to the wrong save.
-    private var pendingInboxEdit: (file: URL, index: Int)?
-
-    /// Re-scans `~/.aliasbar/inbox` from disk. Existing review state for a file
-    /// that's still there (same URL, same item count) is preserved rather than
-    /// reset — a file only disappears from `inboxReviews` once `markDone` has
-    /// actually moved it out of the live inbox, so a file still present between two
-    /// summons is still mid-review, not a fresh one.
-    private func refreshInbox() {
-        let directory = URL(fileURLWithPath: AppPaths.inboxDirectory)
-        var reviews: [URL: InboxFileReview] = [:]
-        var invalid: [(url: URL, reason: String)] = []
-        for file in PromptInbox.scan(inboxDirectory: directory).files {
-            switch file {
-            case .ok(let url, let items, _):
-                guard !items.isEmpty else { continue }
-                if let existing = inboxReviews[url], existing.items.count == items.count {
-                    reviews[url] = existing
-                } else {
-                    reviews[url] = InboxFileReview(url: url, items: items)
-                }
-            case .invalid(let url, let reason):
-                invalid.append((url, reason))
-            }
-        }
-        inboxReviews = reviews
-        invalidInboxFiles = invalid
-    }
-
-    /// Every pending row Inbox's list shows, deterministically ordered by filename
-    /// so the list doesn't reshuffle between renders. A decided item drops out
-    /// immediately rather than lingering with a "done" badge — once every item in a
-    /// file is decided the whole file leaves the inbox via `markDone`, so there's
-    /// nothing left in `inboxReviews` for it to linger in.
-    var inboxRows: [InboxRow] {
-        var rows: [InboxRow] = []
-        for (url, review) in inboxReviews.sorted(by: { $0.key.lastPathComponent < $1.key.lastPathComponent }) {
-            for index in review.items.indices where review.decisions[index] == nil {
-                if !settings.promptFeaturesEnabled && review.items[index].kind != .alias {
-                    continue
-                }
-                rows.append(.item(file: url, index: index))
-            }
-        }
-        if settings.promptFeaturesEnabled {
-            for invalid in invalidInboxFiles.sorted(by: { $0.url.lastPathComponent < $1.url.lastPathComponent }) {
-                rows.append(.invalidFile(url: invalid.url, reason: invalid.reason))
-            }
-        }
-        return rows
-    }
-
-    /// The sidebar's Inbox badge — every pending item plus every file that needs a
-    /// human to at least look at why it didn't parse.
-    var inboxPendingCount: Int { inboxRows.count }
-
-    var selectedInboxRow: InboxRow? {
-        guard promptBucket == .inbox else { return nil }
-        let rows = inboxRows
-        guard rows.indices.contains(selection) else { return nil }
-        return rows[selection]
-    }
-
-    /// The concrete item behind `selectedInboxRow`, bundled with its file's review
-    /// state — nil whenever nothing is selected, or the selection names an
-    /// `.invalidFile` row (which has no single item to bundle).
-    var selectedInboxItem: (file: URL, index: Int, item: PromptInbox.Item, review: InboxFileReview)? {
-        guard case .item(let file, let index) = selectedInboxRow,
-              let review = inboxReviews[file], review.items.indices.contains(index)
-        else { return nil }
-        return (file, index, review.items[index], review)
-    }
-
-    /// The item at `file`/`index`, for rendering any `.item` row in the list — not
-    /// just the selected one, which is what `selectedInboxItem` is for.
-    func itemFor(file: URL, index: Int) -> PromptInbox.Item? {
-        guard let review = inboxReviews[file], review.items.indices.contains(index) else { return nil }
-        return review.items[index]
-    }
-
-    /// Whether the currently selected item's Approve control may actually be
-    /// pressed — the one place this gate is decided, so the view never has to
-    /// reconstruct the "flagged and never viewed in full" rule itself.
-    var selectedInboxItemCanApprove: Bool {
-        guard let selected = selectedInboxItem else { return false }
-        return !selected.item.isFlagged || selected.review.viewedInFull.contains(selected.index)
-    }
-
-    /// For an `.update` item, the existing prompt's current body — the "old" half
-    /// of the side-by-side diff the detail pane shows. Reads the live library
-    /// (`promptCache`, refreshed at `prepareForShow` and after any write), so a
-    /// prompt edited since the audit ran shows its *current* body, not a stale one.
-    func inboxUpdateOldBody(for item: PromptInbox.Item) -> String? {
-        guard item.kind == .prompt, item.type == .update, let replaces = item.replaces else { return nil }
-        return promptCache.first { $0.name.lowercased() == replaces.lowercased() }?.body
-    }
-
-    /// Marks item `index` of `file` as viewed. For unflagged items the detail
-    /// pane's `onAppear` calls this on selection; for FLAGGED items nothing calls it
-    /// except the explicit "I've read the full item" control that sits below the
-    /// complete body in the scroll flow — selection alone never satisfies the flag
-    /// gate. This is the only place `viewedInFull` is ever set, which is what makes
-    /// `acknowledgedFlags: true` a fact `approveInboxItem` reads back rather than a
-    /// formality any caller could assert.
-    func markInboxItemViewed(file: URL, index: Int) {
-        guard var review = inboxReviews[file], review.items.indices.contains(index),
-              !review.viewedInFull.contains(index)
-        else { return }
-        review.viewedInFull.insert(index)
-        inboxReviews[file] = review
-    }
-
-    /// Approves `item` at `file`/`index` into the real prompt library via
-    /// `PromptInbox.approve`. Refuses as that function documents when the item is
-    /// flagged and `viewedInFull` doesn't cover it — this call site is the only one
-    /// that ever passes `acknowledgedFlags:`, and it always derives that value from
-    /// `viewedInFull` rather than hardcoding `true`.
-    func approveInboxItem(file: URL, index: Int) {
-        guard var review = inboxReviews[file], review.items.indices.contains(index),
-              review.decisions[index] == nil
-        else { return }
-        let item = review.items[index]
-        guard settings.promptFeaturesEnabled || item.kind == .alias else {
-            errorMessage = "Turn on prompts to approve this item."
-            return
-        }
-        let acknowledged = review.viewedInFull.contains(index)
-        do {
-            let result: PromptInbox.ApproveResult
-            switch item.kind {
-            case .prompt:
-                result = try PromptInbox.approve(
-                    item, existingLibrary: promptCache,
-                    promptsDirectory: URL(fileURLWithPath: AppPaths.promptsDirectory),
-                    acknowledgedFlags: acknowledged)
-                loadPromptCache()
-            case .alias:
-                result = try PromptInbox.approveAlias(
-                    item,
-                    existingEntries: store.ranked.map(\.entry),
-                    rcPath: ZshrcParser.path,
-                    acknowledgedFlags: acknowledged)
-                store.reload()
-                refreshSuggestions()
-            }
-            review.decisions[index] = .approved
-            inboxReviews[file] = review
-            errorMessage = nil
-            show(toast: "Approved \(result.name)")
-            finishInboxFileIfDone(file)
-        } catch let error as PromptInbox.ApproveError {
-            errorMessage = error.errorDescription
-        } catch {
-            errorMessage = error.localizedDescription
-        }
-    }
-
-    /// Discards item `index` of `file` — `PromptInbox.discard` itself is a
-    /// documented no-op (there's nothing on disk to undo for an item never
-    /// written), so the only real work here is recording the decision and, once
-    /// that completes the file, moving it out of the live inbox.
-    func discardInboxItem(file: URL, index: Int) {
-        guard var review = inboxReviews[file], review.items.indices.contains(index),
-              review.decisions[index] == nil
-        else { return }
-        PromptInbox.discard(review.items[index])
-        review.decisions[index] = .discarded
-        inboxReviews[file] = review
-        show(toast: "Discarded \(review.items[index].name)")
-        finishInboxFileIfDone(file)
-    }
-
-    /// Discards an entire file without deciding it item by item — the action an
-    /// `.invalidFile` row offers (there's nothing else to do with one), and also
-    /// available for a well-formed file a human decides isn't worth reviewing at
-    /// all.
-    func discardInboxFile(_ url: URL) {
-        _ = try? PromptInbox.discardFile(at: url)
-        inboxReviews.removeValue(forKey: url)
-        invalidInboxFiles.removeAll { $0.url == url }
-        clampSelection()
-    }
-
-    /// Edit-before-approve: opens the Composer prefilled from the item, tagged
-    /// `source: "inbox"` so a successful Composer save marks the originating item
-    /// handled once the save actually succeeds — the item is never touched here,
-    /// before the human has decided anything.
-    func editInboxItem(file: URL, index: Int) {
-        guard let review = inboxReviews[file], review.items.indices.contains(index) else { return }
-        let item = review.items[index]
-        guard settings.promptFeaturesEnabled || item.kind == .alias else {
-            errorMessage = "Turn on prompts to edit this item."
-            return
-        }
-        let kind: EditTarget.Kind = item.kind == .prompt ? .prompt : .alias
-        openComposer(prefill: ComposerPrefill(kind: kind, name: item.name,
-                                              description: item.description ?? "",
-                                              body: item.body, source: "inbox",
-                                              flagReasons: item.flags.map(\.detail),
-                                              reviewAcknowledged: review.viewedInFull.contains(index)))
-        pendingInboxEdit = (file, index)
-    }
-
-    /// Called once an inbox-sourced Composer edit has written its item. This counts as
-    /// an approval for lifecycle purposes because a human reviewed it, changed it,
-    /// and it now lives in the real library, so it
-    /// counts toward the file's completion exactly like `approveInboxItem` does.
-    private func markInboxItemHandled(file: URL, index: Int) {
-        guard var review = inboxReviews[file], review.items.indices.contains(index),
-              review.decisions[index] == nil
-        else { return }
-        review.decisions[index] = .approved
-        inboxReviews[file] = review
-        finishInboxFileIfDone(file)
-    }
-
-    /// Once every item in `file` has a decision, the file itself leaves the live
-    /// inbox via `markDone` — there is no separate "you're done, close it out"
-    /// action a human has to remember to take.
-    private func finishInboxFileIfDone(_ file: URL) {
-        guard let review = inboxReviews[file], review.isFullyDecided else { return }
-        _ = try? PromptInbox.markDone(file)
-        inboxReviews.removeValue(forKey: file)
-    }
-
     /// The one place `promptCache`/`promptUsageCache` are ever loaded — at summon
     /// (`prepareForShow`), after an inbox approval, and after a Composer prompt save.
     /// `promptFeaturesEnabled` off means an empty pool rather than a skipped scan: the
@@ -1364,7 +1191,7 @@ final class AppState: ObservableObject {
     /// `promptShortcuts`, `promptLibraryEmpty`, the Inbox badge), and emptying the
     /// cache here is what makes every one of those true without a conditional at each
     /// of their call sites.
-    private func loadPromptCache() {
+    func loadPromptCache() {
         defer {
             if mode == .board { normalizeSelectionAfterSurfaceChange() }
         }
@@ -1474,112 +1301,6 @@ final class AppState: ObservableObject {
             for: command,
             takenNames: Set(store.ranked.map(\.name))
         )
-    }
-
-    // MARK: - Clipboard source
-
-    /// Set by the app delegate once a `ClipboardMonitor` exists — nil until
-    /// clipboard monitoring has been started at least once this run (`App.swift`
-    /// never constructs one while the setting is off, matching `historyMode`'s
-    /// "not a fourth view" framing: there is nothing to browse until there is
-    /// something watching). `@Published` so FIND's clipboard source redraws the
-    /// moment monitoring gets turned on live, rather than only at the next summon.
-    @Published var clipboardMonitor: ClipboardMonitor?
-
-    /// Which transform action is highlighted in the clipboard source's detail pane,
-    /// or nil for "the clip itself". Tab/Shift-Tab cycles through
-    /// `[nil, action0, action1, ...]` — the same field-cycling shape
-    /// `FillInSheet.SlotFillState.advance` already uses for slots, applied here to
-    /// transform actions instead. Reset whenever the clip selection or the find
-    /// source changes (see `selection` and `findSource`'s own `didSet`s), never left
-    /// to a caller to remember.
-    @Published var clipActionSelection: Int?
-
-    /// FIND's clipboard rows: text plus session-only images, newest first, exactly
-    /// as the monitor orders them, optionally narrowed by the live
-    /// query (plain substring match — a recency list, not a ranked search, so there
-    /// is nothing here for `Ranker` to do).
-    var clipboardRows: [ClipboardHistoryItem] {
-        let all = clipboardMonitor?.items ?? []
-        guard !query.isEmpty else { return all }
-        let needle = query.lowercased()
-        return all.filter { $0.content.lowercased().contains(needle) }
-    }
-
-    /// Quarantined clips still alive right now, reason-only — the clipboard
-    /// source's summary row reads this directly rather than reaching into
-    /// `clipboardMonitor` itself, so the row and the monitor's own clock can never
-    /// silently disagree about what's still active.
-    var activeQuarantine: [MemoryClip] {
-        clipboardMonitor?.activeQuarantine ?? []
-    }
-
-    /// FIND's clipboard counterpart to `selectedHistory`/`selectedShortcut` — same
-    /// "no fallback to first" rule, and nil outside the clipboard source so a
-    /// selection index left over from another source's list can never be misread
-    /// as a clip.
-    var selectedClip: ClipboardHistoryItem? {
-        guard findSource == .clipboard else { return nil }
-        let rows = clipboardRows
-        guard rows.indices.contains(selection) else { return nil }
-        return rows[selection]
-    }
-
-    /// The transform actions offered for whatever clip is selected right now. The
-    /// detail pane and the keyboard handler both read this rather than each calling
-    /// `ClipTransformer.actions` themselves, so Tab's cycling and what the pane
-    /// draws can never disagree about how many actions there are.
-    var clipboardActions: [ClipAction] {
-        guard let clip = selectedClip?.textClip else { return [] }
-        return ClipTransformer.actions(for: clip.content)
-    }
-
-    /// Switches into the clipboard source and makes sure there is something to
-    /// show. The mirror of `enterHistory()` — same shape, same reason: FIND's third
-    /// source, not a fourth view.
-    func enterClipboard() {
-        mode = .find
-        findSource = .clipboard
-    }
-
-    /// Tab/Shift-Tab inside the clipboard source: cycles the detail pane's
-    /// highlight through "the clip itself" (nil) and each of its transform actions,
-    /// wrapping at both ends.
-    func cycleClipboardAction(forward: Bool) {
-        let actions = clipboardActions
-        guard !actions.isEmpty else { clipActionSelection = nil; return }
-        let count = actions.count + 1 // +1 slot for "the clip itself"
-        let current = (clipActionSelection ?? -1) + 1 // shift nil to slot 0
-        let next = ((current + (forward ? 1 : -1)) % count + count) % count
-        clipActionSelection = next == 0 ? nil : next - 1
-    }
-
-    /// Enter/⌘⏎ while the clipboard source is showing: delivers whatever is
-    /// highlighted — the clip's own content, or the selected transform's output —
-    /// through the exact same broker/paste pipeline every other Enter in this file
-    /// uses, so clipboard delivery honors `enterAction`'s copy/paste half and
-    /// `afterAction` identically to a shell or prompt result.
-    func performClipboardEnter() {
-        guard let item = selectedClip else { return }
-        guard let clip = item.textClip else {
-            errorMessage = "Use Save as prompt to read text from this image."
-            return
-        }
-        let pasting = settings.enterAction == .pasteName || settings.enterAction == .pasteCommand
-        if let index = clipActionSelection, clipboardActions.indices.contains(index) {
-            let action = clipboardActions[index]
-            deliver(action.output, pasting: pasting,
-                    toast: "Copied clipboard action: \(action.title)")
-        } else {
-            deliver(clip.content, pasting: pasting, toast: "Copied clipboard item")
-        }
-    }
-
-    /// The clipboard source's empty-state Enable action — flips the setting on;
-    /// `AppDelegate`'s observer (`App.swift`) is what actually starts the monitor
-    /// live and hands this state a `ClipboardMonitor` moments later.
-    func enableClipboardMonitoring() {
-        settings.clipboardMonitoring = true
     }
 
     /// BOARD shows the whole pool, always. Typing dims rather than removes, so the grid
@@ -2403,7 +2124,7 @@ final class AppState: ObservableObject {
 
     /// Puts a string where the user asked for it: the clipboard, or straight into
     /// whatever regains focus.
-    private func deliver(_ payload: String, pasting: Bool, toast: String) {
+    func deliver(_ payload: String, pasting: Bool, toast: String) {
         switch pasting {
         case false:
             PasteboardBroker.write(transient: payload, to: pasteboard)
@@ -2482,297 +2203,6 @@ final class AppState: ObservableObject {
         let text = AuditPrompt.generate(library: promptCache, ending: ending)
         PasteboardBroker.write(transient: text, to: pasteboard)
         show(toast: "Audit prompt copied. Paste it into ChatGPT or Claude.")
-    }
-
-    // MARK: - Composer (PRE-267)
-
-    /// Pure suitability policy for explicit selected-clip prefills. The shared secret
-    /// classifier blocks credentials. Alias commands must fit the writer's one-line
-    /// contract, while prompts may keep their original whitespace and line breaks.
-    static func clipboardDraft(_ text: String, for kind: EditTarget.Kind) -> String? {
-        guard SensitiveContentClassifier.quarantineReason(in: text) == nil else { return nil }
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return nil }
-
-        switch kind {
-        case .alias:
-            guard trimmed.utf8.count <= 4_096,
-                  !trimmed.contains("\n"), !trimmed.contains("\r") else { return nil }
-            guard (try? AliasWriter.validate(name: "clipboard-draft", command: trimmed)) != nil else {
-                return nil
-            }
-            return trimmed
-        case .prompt:
-            guard text.utf8.count <= 65_536 else { return nil }
-            return text
-        }
-    }
-
-    /// Starts a new item from the clip currently selected inside AliasBar. Plain New
-    /// never reads the system clipboard; this action is the only clipboard-to-Composer
-    /// path, and its source is visible in the clipboard view before the user chooses it.
-    func createFromSelectedClip(kind: EditTarget.Kind, expectedID: UUID? = nil) {
-        guard let item = selectedClip else { return }
-        guard expectedID == nil || item.id == expectedID else {
-            errorMessage = "The clipboard selection changed. Select the item again."
-            return
-        }
-        guard kind != .prompt || settings.promptFeaturesEnabled else {
-            errorMessage = "Turn on prompts to save this clip as a prompt."
-            return
-        }
-
-        if let image = item.imageClip {
-            guard kind == .prompt else {
-                errorMessage = "Save image text as a prompt."
-                return
-            }
-            createPromptFromSelectedImage(image)
-            return
-        }
-
-        guard let clip = item.textClip else { return }
-        guard let safe = Self.clipboardDraft(clip.content, for: kind) else {
-            errorMessage = kind == .alias
-                ? "This clip is not a safe one-line alias command."
-                : "This clip cannot be used as a prompt."
-            return
-        }
-        errorMessage = nil
-        openComposer(prefill: ComposerPrefill(kind: kind, body: safe,
-                                              source: "selected-clipboard-clip"))
-    }
-
-    private func createPromptFromSelectedImage(_ image: ClipboardImageClip) {
-        guard let data = image.data else {
-            errorMessage = image.issueMessage ?? "AliasBar could not read this image."
-            return
-        }
-
-        cancelClipboardImageOCR()
-        let requestID = UUID()
-        clipboardImageOCRRequestID = requestID
-        clipboardImageOCRClipID = image.id
-        errorMessage = nil
-
-        let task = clipboardImageTextRecognizer.recognizeText(in: data) { [weak self] result in
-            let finish = {
-                guard let self, self.clipboardImageOCRRequestID == requestID else { return }
-                self.clipboardImageOCRRequestID = nil
-                self.clipboardImageOCRClipID = nil
-                self.clipboardImageOCRTask = nil
-
-                switch result {
-                case .failure:
-                    self.errorMessage = "AliasBar could not read text from this image."
-
-                case .success(let recognized):
-                    let text = ClipboardOCRText.normalize(recognized)
-                    guard !text.isEmpty else {
-                        self.errorMessage = "AliasBar found no readable text in this image."
-                        return
-                    }
-
-                    guard text.utf8.count <= 65_536 else {
-                        self.errorMessage = "The text in this image is too long for a prompt."
-                        return
-                    }
-
-                    if let reason = SensitiveContentClassifier.quarantineReason(in: text) {
-                        _ = self.clipboardMonitor?.quarantineImage(
-                            id: image.id, recognizedText: text, reason: reason)
-                        self.objectWillChange.send()
-                        self.errorMessage = "AliasBar removed this image from clipboard history because its text may contain a secret."
-                        return
-                    }
-
-                    self.errorMessage = nil
-                    self.openComposer(prefill: ComposerPrefill(
-                        kind: .prompt,
-                        body: text,
-                        source: "selected-clipboard-image"
-                    ))
-                }
-            }
-
-            if Thread.isMainThread {
-                finish()
-            } else {
-                DispatchQueue.main.async(execute: finish)
-            }
-        }
-        if clipboardImageOCRRequestID == requestID {
-            clipboardImageOCRTask = task
-        } else {
-            // A synchronous recognizer (used by tests) may already have completed.
-            task.cancel()
-        }
-    }
-
-    private func cancelClipboardImageOCR() {
-        clipboardImageOCRTask?.cancel()
-        clipboardImageOCRTask = nil
-        clipboardImageOCRRequestID = nil
-        clipboardImageOCRClipID = nil
-    }
-
-    /// The Composer's one entry point. Every route that opens the sheet — ⌘N,
-    /// Suggested's Create/Rename, `promoteToAlias`, a no-match Enter in either FIND
-    /// dialect, ⌘E on a prompt row, and later the inbox's edit-before-approve —
-    /// funnels a `ComposerPrefill` through here rather than constructing `EditTarget`
-    /// directly, so every one of them agrees about what "prefilled" means.
-    func openComposer(prefill: ComposerPrefill) {
-        guard prefill.kind != .prompt || settings.promptFeaturesEnabled else {
-            errorMessage = "Turn on prompts before creating one."
-            return
-        }
-        // Only `editInboxItem` ever wants this set, and it sets it itself right
-        // after calling this function — so any other route into the Composer
-        // clears whatever a previous, possibly-abandoned inbox edit left behind,
-        // and can never have a later save misattributed to it.
-        if prefill.source != "inbox" { pendingInboxEdit = nil }
-        switch prefill.kind {
-        case .alias:
-            editor = EditTarget(kind: .alias, mode: prefill.mode, name: prefill.name,
-                                command: prefill.body, flagReasons: prefill.flagReasons,
-                                reviewAcknowledged: prefill.reviewAcknowledged,
-                                originalName: prefill.originalName, source: prefill.source)
-        case .prompt:
-            editor = EditTarget(kind: .prompt, mode: prefill.mode, name: prefill.name,
-                                command: "", description: prefill.description, body: prefill.body,
-                                deliverToClaudeCode: prefill.deliverToClaudeCode,
-                                flagReasons: prefill.flagReasons,
-                                reviewAcknowledged: prefill.reviewAcknowledged,
-                                originalName: prefill.originalName, source: prefill.source)
-        }
-    }
-
-    /// The Kind segmented control: "always switchable", but switching mid-edit can't
-    /// continue as an edit of the thing you had open — a shell alias and a prompt
-    /// share no identity to hand off, so this converts the sheet to a fresh `.create`
-    /// for the new kind. Only the name carries across: a shell command and a prompt
-    /// body are different enough content that silently reinterpreting one as the
-    /// other would be more confusing than starting the new kind's field empty.
-    func switchComposerKind(to kind: EditTarget.Kind) {
-        guard let target = editor, target.kind != kind else { return }
-        // Changing kind creates a different item. If this sheet came from Inbox, the
-        // original suggestion must remain pending instead of following the new item
-        // into a save and being archived as approved.
-        let leavesInboxEdit = target.source == "inbox"
-        if leavesInboxEdit { pendingInboxEdit = nil }
-        let source = leavesInboxEdit ? nil : target.source
-        let flagReasons = leavesInboxEdit ? [] : target.flagReasons
-        let reviewAcknowledged = leavesInboxEdit ? false : target.reviewAcknowledged
-        errorMessage = nil
-        switch kind {
-        case .alias:
-            editor = EditTarget(kind: .alias, mode: .create, name: target.name,
-                                command: "", flagReasons: flagReasons,
-                                reviewAcknowledged: reviewAcknowledged,
-                                originalName: "", source: source)
-        case .prompt:
-            editor = EditTarget(kind: .prompt, mode: .create, name: target.name,
-                                command: "", flagReasons: flagReasons,
-                                reviewAcknowledged: reviewAcknowledged,
-                                originalName: "", source: source)
-        }
-    }
-
-    /// ⌘E on a prompt row (FIND, BOARD's prompt deck, MANAGE's prompt dialect) — the
-    /// prompt-kind counterpart to `beginEdit` below. A prompt file has no "outside
-    /// AliasBar's block" concept the way a hand-written alias does — the whole file
-    /// belongs to whoever wrote it, exactly as `PromptStore.write` already assumes —
-    /// so there is no refusal branch to mirror `beginEdit`'s.
-    func beginEditPrompt(_ shortcut: Shortcut) {
-        guard shortcut.kind == .prompt else { return }
-        let installed = Self.promptDeliveryStatus(for: shortcut, registryPath: AppPaths.compiledRegistryPath) != .notInstalled
-        editor = .editPrompt(shortcut, installed: installed)
-    }
-
-    /// The Composer footer's destination line(s) — "always shows the destination...
-    /// real resolved path, abbreviated". Pulled out as its own pure function, the
-    /// same way `PromptGist.line(for:)` is, so the exact text is testable without
-    /// instantiating `ComposerSheet`.
-    func composerDestination(for target: EditTarget) -> [String] {
-        switch target.kind {
-        case .alias:
-            return ["→ managed block in \(ZshrcParser.displayPath)",
-                    "Everything outside that block is left alone, and a timestamped backup is written first."]
-        case .prompt:
-            let name = target.name.isEmpty ? "name" : target.name
-            let promptsDir = (AppPaths.promptsDirectory as NSString).abbreviatingWithTildeInPath
-            var lines = ["→ \(promptsDir)/\(name).md"]
-            if target.deliverToClaudeCode {
-                let commandsDir = (AppPaths.claudeCommandsDirectory as NSString).abbreviatingWithTildeInPath
-                lines.append("+ \(commandsDir)/\(name).md")
-            }
-            lines.append("A timestamped backup is written first, and the original is recoverable if this replaces something.")
-            return lines
-        }
-    }
-
-    // MARK: Live validation
-
-    /// One line of as-you-type feedback for the alias half of the Composer.
-    /// `blocking` mirrors a refusal `AliasWriter.apply` would actually raise at Save
-    /// time (so the packet's "gs already defined at .zshrc:41" fact shows up before
-    /// the user gets that far); `advisory` is a conflict `AliasWriter` itself doesn't
-    /// care about (shadowing a PATH binary, an existing function of the same name),
-    /// shown only once nothing blocking already owns the line.
-    struct ComposerValidation { var blocking: String?; var advisory: String? }
-
-    /// - Parameter searchPaths: overrides the real PATH lookup for the shadow-binary
-    ///   advisory, the same seam `ConflictDetector.isShadowed` already exposes for
-    ///   `SuggestionEngine`'s name dedup — kept hermetic for tests, real PATH in the app.
-    func composerAliasValidation(name: String, command: String, originalName: String,
-                                 searchPaths: [String]? = nil) -> ComposerValidation {
-        let trimmedName = name.trimmingCharacters(in: .whitespaces)
-        guard !trimmedName.isEmpty else { return ComposerValidation() }
-
-        do {
-            try AliasWriter.validate(name: trimmedName, command: command)
-        } catch let error as AliasWriter.WriteError {
-            return ComposerValidation(blocking: error.errorDescription)
-        } catch {
-            return ComposerValidation(blocking: error.localizedDescription)
-        }
-
-        // The exact fact `AliasWriter.apply` would refuse on, phrased tersely for a
-        // line that updates on every keystroke rather than a hard Save-time refusal.
-        if let clash = store.ranked.first(where: { $0.name == trimmedName && !$0.entry.managed }) {
-            let file = (clash.entry.sourceFile as NSString).lastPathComponent
-            return ComposerValidation(
-                blocking: "\(trimmedName) is defined outside the managed block at \(file):\(clash.entry.line), so AliasBar can't edit it.")
-        }
-
-        if store.ranked.contains(where: { $0.name == trimmedName && $0.entry.kind == .function }) {
-            return ComposerValidation(advisory: "A function named \(trimmedName) already exists. The alias will take priority.")
-        }
-        if ConflictDetector.isShadowed(trimmedName, searchPaths: searchPaths) {
-            return ComposerValidation(advisory: "\(trimmedName) shadows a command on your PATH.")
-        }
-        return ComposerValidation()
-    }
-
-    /// The prompt half's counterpart. `blocking` is an existing-prompt collision
-    /// (case-insensitive) against a name that is not the one being edited; a builtin
-    /// slash-command shadow is always `advisory` — `PromptCompiler` itself never
-    /// blocks on it, and neither does this.
-    func composerPromptValidation(name: String, originalName: String) -> ComposerValidation {
-        let trimmed = name.trimmingCharacters(in: .whitespaces)
-        guard !trimmed.isEmpty else { return ComposerValidation() }
-        guard PromptStore.isValidName(trimmed) else {
-            return ComposerValidation(blocking: "\"\(trimmed)\" isn't a usable prompt name. Use letters, digits, - and _ with no spaces.")
-        }
-        if let existing = promptCache.first(where: { $0.name.lowercased() == trimmed.lowercased() }),
-           existing.name != originalName {
-            return ComposerValidation(blocking: "A prompt named \"\(existing.name)\" already exists.")
-        }
-        if BuiltinSlashCommands.collides(name: trimmed) != nil {
-            return ComposerValidation(
-                advisory: "\(BuiltinSlashCommands.version) already defines /\(trimmed). Installing this prompt shadows the built-in command.")
-        }
-        return ComposerValidation()
     }
 
     // MARK: - Editing
