@@ -396,6 +396,32 @@ struct SelectedActionHints: View {
     }
 }
 
+/// One compact selected-item action, shown only beside the item it affects. The
+/// filled star reports durable state; the tooltip carries the same ⌘P path available
+/// everywhere without adding another global shortcut strip.
+struct PinButton: View {
+    @Environment(\.theme) private var theme
+    let pinned: Bool
+    let name: String
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: pinned ? "star.fill" : "star")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(pinned ? theme.accent : theme.dim)
+                .frame(width: 22, height: 22)
+                .background(theme.surface,
+                            in: RoundedRectangle(cornerRadius: theme.cornerRadius))
+                .overlay(RoundedRectangle(cornerRadius: theme.cornerRadius)
+                    .strokeBorder(theme.rule.opacity(0.5), lineWidth: 1))
+        }
+        .liveButton()
+        .accessibilityLabel("\(pinned ? "Unpin" : "Pin") \(name)")
+        .help("\(pinned ? "Unpin" : "Pin") \(name). Press ⌘P.")
+    }
+}
+
 struct KindBadge: View {
     @Environment(\.theme) private var theme
     let kind: ShellEntry.Kind
@@ -761,6 +787,7 @@ struct FindView: View {
                                 PrimaryResult(entry: rankedEntry(for: shortcut),
                                               selected: state.selection == 0,
                                               conflicts: state.store.conflicts(for: shortcut.name),
+                                              pinned: shortcut.isPinned,
                                               showsActions: state.dialect != .prompt,
                                               primaryAction: settings.enterAction.short,
                                               secondaryAction: settings.enterAction.secondary.short,
@@ -769,6 +796,7 @@ struct FindView: View {
                             } else {
                                 AlternateRow(entry: rankedEntry(for: shortcut),
                                              selected: state.selection == index,
+                                             pinned: shortcut.isPinned,
                                              showsActions: state.dialect != .prompt,
                                              primaryAction: settings.enterAction.short,
                                              secondaryAction: settings.enterAction.secondary.short,
@@ -777,6 +805,13 @@ struct FindView: View {
                             }
                         }
                         .id(shortcut.id)
+                        .contextMenu {
+                            if shortcut.pinKey != nil {
+                                Button(shortcut.isPinned ? "Unpin \(shortcut.name)" : "Pin \(shortcut.name)") {
+                                    state.togglePin(shortcut)
+                                }
+                            }
+                        }
                         .arriving(index)
                     }
                 }
@@ -826,6 +861,7 @@ private struct PrimaryResult: View {
     let entry: RankedEntry
     let selected: Bool
     let conflicts: [Conflict]
+    let pinned: Bool
     let showsActions: Bool
     let primaryAction: String
     let secondaryAction: String
@@ -838,6 +874,12 @@ private struct PrimaryResult: View {
                 Text(entry.name)
                     .font(.system(size: 21, weight: .semibold, design: theme.nameDesign))
                     .foregroundStyle(theme.text)
+                if pinned {
+                    Image(systemName: "star.fill")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(theme.accent)
+                        .accessibilityLabel("Pinned")
+                }
                 if !conflicts.isEmpty {
                     Image(systemName: "exclamationmark.triangle.fill")
                         .font(.system(size: 10, weight: .semibold))
@@ -966,6 +1008,7 @@ private struct AlternateRow: View {
     @Environment(\.theme) private var theme
     let entry: RankedEntry
     let selected: Bool
+    let pinned: Bool
     let showsActions: Bool
     let primaryAction: String
     let secondaryAction: String
@@ -981,6 +1024,12 @@ private struct AlternateRow: View {
                 .kerning(-0.15)
                 .foregroundStyle(theme.text)
                 .layoutPriority(1)
+            if pinned {
+                Image(systemName: "star.fill")
+                    .font(.system(size: 8.5, weight: .semibold))
+                    .foregroundStyle(theme.accent)
+                    .accessibilityLabel("Pinned")
+            }
             Text(entry.entry.comment ?? entry.entry.command
                     .replacingOccurrences(of: "\n", with: " ⏎ "))
                 .font(.system(size: 12.5, design: theme.bodyDesign))
@@ -1053,6 +1102,12 @@ private struct PromptRow: View {
                 .kerning(-0.15)
                 .foregroundStyle(theme.text)
                 .layoutPriority(1)
+            if shortcut.isPinned {
+                Image(systemName: "star.fill")
+                    .font(.system(size: 8.5, weight: .semibold))
+                    .foregroundStyle(theme.accent)
+                    .accessibilityLabel("Pinned")
+            }
             Text(shortcut.description ?? shortcut.body.replacingOccurrences(of: "\n", with: " ⏎ "))
                 .font(.system(size: 12.5, design: theme.bodyDesign))
                 .foregroundStyle(theme.dim.opacity(0.72))
@@ -1141,6 +1196,8 @@ struct BoardView: View {
                             Keycap(entry: entry,
                                    selected: state.selection == index,
                                    dimmed: dimmed,
+                                   pinned: entry.entry.kind == .alias
+                                       && settings.isPinned(Shortcut(entry: entry.entry)),
                                    density: settings.boardDensity,
                                    action: { state.activateBoardEntry(at: index) })
                                 .disabled(dimmed)
@@ -1179,6 +1236,12 @@ struct BoardView: View {
                             .font(.system(size: 9.5, design: .monospaced))
                             .foregroundStyle(theme.faint)
                     }
+                    if entry.entry.kind == .alias {
+                        let shortcut = Shortcut(entry: entry.entry)
+                        PinButton(pinned: settings.isPinned(shortcut), name: entry.name) {
+                            state.togglePin(shortcut)
+                        }
+                    }
                     SelectedActionHints(primaryKeys: "⏎",
                                         primaryLabel: settings.enterAction.short,
                                         secondaryKeys: "⌘⏎",
@@ -1203,17 +1266,26 @@ private struct Keycap: View {
     let entry: RankedEntry
     let selected: Bool
     let dimmed: Bool
+    let pinned: Bool
     let density: BoardDensity
     let action: () -> Void
 
     var body: some View {
         VStack(spacing: 1) {
-            Text(entry.name)
-                .font(.system(size: density == .dense ? 12.5 : 14.5,
-                              weight: .semibold, design: theme.nameDesign))
-                .foregroundStyle(theme.text)
-                .lineLimit(1)
-                .minimumScaleFactor(0.7)
+            HStack(spacing: 3) {
+                Text(entry.name)
+                    .font(.system(size: density == .dense ? 12.5 : 14.5,
+                                  weight: .semibold, design: theme.nameDesign))
+                    .foregroundStyle(theme.text)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
+                if pinned {
+                    Image(systemName: "star.fill")
+                        .font(.system(size: 7.5, weight: .semibold))
+                        .foregroundStyle(theme.accent)
+                        .accessibilityLabel("Pinned")
+                }
+            }
             if density == .comfortable && entry.uses > 0 {
                 Text("\(entry.uses)")
                     .font(.system(size: 8.5, design: .monospaced))
@@ -1459,6 +1531,13 @@ struct ManageView: View {
                 .font(.system(size: 13, weight: .medium, design: theme.nameDesign))
                 .foregroundStyle(theme.text)
                 .lineLimit(1)
+            if entry.entry.kind == .alias,
+               settings.isPinned(Shortcut(entry: entry.entry)) {
+                Image(systemName: "star.fill")
+                    .font(.system(size: 8.5, weight: .semibold))
+                    .foregroundStyle(theme.accent)
+                    .accessibilityLabel("Pinned")
+            }
             Spacer(minLength: 2)
             if entry.entry.managed {
                 Image(systemName: "pencil.circle.fill")
@@ -1490,6 +1569,12 @@ struct ManageView: View {
                         Text(entry.name)
                             .font(.system(size: 17, weight: .semibold, design: theme.nameDesign))
                             .foregroundStyle(theme.text)
+                        if entry.entry.kind == .alias {
+                            let shortcut = Shortcut(entry: entry.entry)
+                            PinButton(pinned: settings.isPinned(shortcut), name: entry.name) {
+                                state.togglePin(shortcut)
+                            }
+                        }
                         Spacer()
                     }
 

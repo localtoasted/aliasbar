@@ -86,6 +86,9 @@ private struct PromptPreview: View {
                     .font(.system(size: 16, weight: .semibold, design: theme.nameDesign))
                     .foregroundStyle(theme.text)
                 Spacer(minLength: 0)
+                PinButton(pinned: state.isPinned(shortcut), name: shortcut.name) {
+                    state.togglePin(shortcut)
+                }
             }
 
             if let description = shortcut.description {
@@ -187,6 +190,11 @@ private struct ShellMinimalPreview: View {
                     .font(.system(size: 16, weight: .semibold, design: theme.nameDesign))
                     .foregroundStyle(theme.text)
                 Spacer(minLength: 0)
+                if shortcut.kind == .alias {
+                    PinButton(pinned: state.isPinned(shortcut), name: shortcut.name) {
+                        state.togglePin(shortcut)
+                    }
+                }
             }
 
             CommandText(command: shortcut.body, lineLimit: nil, size: 12)
