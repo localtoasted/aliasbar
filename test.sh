@@ -113,20 +113,25 @@ run_cli_integration_tests "${AB_BIN}" || cli_status=$?
 # ---------------------------------------------------------------------------
 # SwiftPM test target (Tests/AliasBarCoreTests)
 #
-# The two legs above compile a hand-listed set of sources; neither one can see an XCTest
+# The two legs above compile hand-listed source sets, and neither one can see an XCTest
 # case. Without this leg the lexer and WriteError-identity suites are 600-odd lines that
 # compile nowhere and run never, and `./test.sh` — the command README.md documents —
-# prints "All test suites passed" over a regression in either of them.
+# prints "All test suites passed." over a regression in either of them.
 #
-# --scratch-path keeps SwiftPM's build products out of .build/tests and .build/cli-tests,
-# and clear of build.sh, which does `rm -rf .build/AliasBar.app` and friends.
+# --package-path so this leg works from any working directory, like every other path in
+# this script. --scratch-path so SwiftPM's tree lands in .build/spm instead of .build
+# itself, alongside the .build/tests and .build/cli-tests this script writes by hand
+# rather than mixed in with them; it is the path Package.swift already recommends. Note
+# that it does NOT survive ./build.sh, which does `rm -rf .build` wholesale — nothing
+# here needs it to.
 # ---------------------------------------------------------------------------
 echo
 echo "3. SwiftPM test target"
 
 spm_status=0
 if xcrun --find xctest >/dev/null 2>&1; then
-    swift test --scratch-path "${PROJECT_DIR}/.build/spm" || spm_status=$?
+    swift test --package-path "${PROJECT_DIR}" \
+        --scratch-path "${PROJECT_DIR}/.build/spm" || spm_status=$?
 else
     # Loud, not silent. Command Line Tools alone cannot run XCTest (see Package.swift),
     # and a skip that looks identical to a pass is how the suite above went unnoticed in

@@ -244,7 +244,17 @@ final class ClipboardState: ObservableObject {
             if Thread.isMainThread {
                 finish()
             } else {
-                Task { @MainActor in finish() }
+                // The main-queue hop this file has always used, not a `Task { @MainActor }`
+                // one. Both defer to a later main-actor turn and nothing downstream depends
+                // on which — the request-ID guard at the top of `finish` is the only
+                // ordering contract — but every other off-main hop in the app is a
+                // `DispatchQueue.main.async`, and a lone `Task` hop invites the reader to
+                // look for a reason there isn't one. Written as a trailing closure rather
+                // than `(execute: finish)` because `finish` is main-actor-isolated and
+                // non-Sendable, which `-strict-concurrency=targeted` warns about at the
+                // `execute:` parameter; the closure literal is inferred as the isolated
+                // `@Sendable` block the API wants. Same enqueue, same order, no warning.
+                DispatchQueue.main.async { finish() }
             }
         }
         if clipboardImageOCRRequestID == requestID {

@@ -133,19 +133,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                 }
             }
 
-            // The centered palette — the default style — has no status-item geometry
-            // dependency, so waiting on the readiness poll only delays it by up to that
-            // poll's full 1.2s timeout for nothing. Only the menu-bar popover anchors to
-            // the button, so only it waits.
-            let needsStatusItem = settings.presentationStyle == .menuBar
-            if wantsOpenOnLaunch && !needsStatusItem { openRequestedSurface() }
+            // The question is what the requested SURFACE needs, not what the presentation
+            // style happens to create. Only the menu-bar popover anchors to the status
+            // item's button, so only it has to wait for that button's window and frame to
+            // become measurable. The centered palette is a free-standing panel, and
+            // `settings` is an ordinary centred NSWindow in *either* style — neither can
+            // be mis-anchored, so sitting through the readiness poll's up-to-1.2s timeout
+            // delays them for nothing. Gating on the style alone did exactly that to
+            // `ALIASBAR_OPEN_ON_LAUNCH=settings` whenever the style was .menuBar.
+            let surfaceNeedsStatusItem = settings.presentationStyle == .menuBar
+                && openOnLaunch != "settings"
+            if wantsOpenOnLaunch && !surfaceNeedsStatusItem { openRequestedSurface() }
 
             let statusItemReady = await self.waitForStatusItemReadiness()
 
             // Preserve the old 0.4s/0.5s ordering when a screenshot harness asks for
             // a surface on the first run: the requested surface opens first, then
             // onboarding becomes the frontmost window.
-            if wantsOpenOnLaunch && needsStatusItem {
+            if wantsOpenOnLaunch && surfaceNeedsStatusItem {
                 // Summoned even when the item never became measurable. A full menu bar
                 // or a menu-bar manager hiding the item is a placement problem, and
                 // opening nothing at all turns it into what looks like a broken build —
