@@ -117,7 +117,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         let openOnLaunch = ProcessInfo.processInfo.environment["ALIASBAR_OPEN_ON_LAUNCH"]
         Task { @MainActor [weak self] in
             guard let self else { return }
-            _ = await self.waitForStatusItemReadiness()
+            let statusItemReady = await self.waitForStatusItemReadiness()
 
             // Preserve the old 0.4s/0.5s ordering when a screenshot harness asks for
             // a surface on the first run: the requested surface opens first, then
@@ -126,9 +126,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             if openOnLaunch == "1" || openOnLaunch == "history" || openOnLaunch == "settings" {
                 if openOnLaunch == "settings" {
                     self.openSettings()
-                } else {
+                } else if statusItemReady {
                     self.summon()
                     if openOnLaunch == "history" { self.state.enterHistory() }
+                } else {
+                    Diag.log("open-on-launch palette skipped because status item is not ready")
                 }
             }
 
@@ -137,7 +139,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                 await self.openOnboarding()
             }
 
-            await self.reportPlacement()
+            if statusItemReady {
+                await self.reportPlacement()
+            } else {
+                // The rescue writes persistent preferred positions, so a false
+                // measurement is worse than a deferred diagnostic.
+                Diag.log("placement check skipped because status item is not ready")
+            }
         }
     }
 
@@ -308,13 +316,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     /// positioned its window. Wait for that fact, not for an amount of time that only
     /// happens to be long enough on the machine where it was chosen.
     @discardableResult
-    private func waitForStatusItemReadiness(maxYields: Int = 240) async -> Bool {
-        for _ in 0..<maxYields {
-            if let frame = statusItem.button?.window?.frame,
-               frame.width >= 1, frame.height >= 1 {
-                return true
+    private func waitForStatusItemReadiness(maxPolls: Int = 120) async -> Bool {
+        for _ in 0..<maxPolls {
+            if let window = statusItem.button?.window {
+                let frame = window.frame
+                // Fresh status items can briefly report {{0,-42},{w,42}}: nonzero,
+                // but still AppKit's unpositioned sentinel. A real screen association
+                // makes the same coordinates valid on an unusually-arranged display.
+                let unpositionedSentinel = frame.minX == 0 && frame.maxY == 0
+                if frame.width >= 1, frame.height >= 1,
+                   window.screen != nil || !unpositionedSentinel {
+                    return true
+                }
             }
-            await Task.yield()
+            // Polling cadence only: elapsed time never authorizes a measurement;
+            // the positioned-frame predicate above does.
+            try? await Task.sleep(nanoseconds: 10_000_000)
         }
         Diag.log("status item did not become measurable before the readiness bound")
         return false
@@ -331,7 +348,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         for position in [CGFloat(0), 200, 400, 800, 1600] {
             UserDefaults.standard.set(position, forKey: Self.positionKey)
             rebuildStatusItem()
-            _ = await waitForStatusItemReadiness()
+            guard await waitForStatusItemReadiness() else {
+                UserDefaults.standard.removeObject(forKey: Self.positionKey)
+                rebuildStatusItem()
+                Diag.log("placement rescue stopped before an AppKit-ready frame")
+                return
+            }
             if !placementIsBad().bad {
                 Diag.log("OK rescue succeeded at preferred position \(position)")
                 return
@@ -340,7 +362,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
         UserDefaults.standard.removeObject(forKey: Self.positionKey)
         rebuildStatusItem()
-        _ = await waitForStatusItemReadiness()
+        guard await waitForStatusItemReadiness() else {
+            Diag.log("final placement warning skipped before an AppKit-ready frame")
+            return
+        }
 
         let result = placementIsBad()
         Diag.log("FAIL placement unrecoverable offscreen=\(result.offscreen) "

@@ -147,13 +147,10 @@ private struct PromptPreview: View {
         }
     }
 
-    /// "true only if `PromptCompiler.installedCommands` for the real registry lists
-    /// it AND the hash still matches" — computed fresh from the live registry on
-    /// every render rather than cached, so an install or edit made anywhere else
-    /// (Manage, a future composer) shows up here the next time this pane draws,
-    /// with no extra plumbing to keep it in sync.
+    /// Uses AppState's refresh-scoped registry/hash snapshot, shared with MANAGE and
+    /// refreshed on summon and every AliasBar-owned prompt delivery mutation.
     private var status: AppState.PromptDeliveryStatus {
-        AppState.promptDeliveryStatus(for: shortcut, registryPath: AppPaths.compiledRegistryPath)
+        state.promptDeliveryStatus(for: shortcut)
     }
 
     private var usageText: String {

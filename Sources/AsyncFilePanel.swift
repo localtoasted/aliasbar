@@ -4,11 +4,24 @@ import AppKit
 /// entering a blocking modal event loop.
 @MainActor
 enum AsyncFilePanel {
+    private static var isPresenting = false
+
     static func begin(_ panel: NSSavePanel) async -> URL? {
-        await withCheckedContinuation { continuation in
-            panel.begin { response in
-                continuation.resume(returning: response == .OK ? panel.url : nil)
+        guard !isPresenting else { return nil }
+        isPresenting = true
+        defer { isPresenting = false }
+
+        let response: NSApplication.ModalResponse = await withCheckedContinuation { continuation in
+            if let parent = NSApp.keyWindow {
+                panel.beginSheetModal(for: parent) { response in
+                    continuation.resume(returning: response)
+                }
+            } else {
+                panel.begin { response in
+                    continuation.resume(returning: response)
+                }
             }
         }
+        return response == .OK ? panel.url : nil
     }
 }
