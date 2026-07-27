@@ -10630,6 +10630,148 @@ do {
 }
 
 // ---------------------------------------------------------------------------
+print("\n47. Prompt delivery snapshot is keyed on the registry file, not on trust")
+
+// --- An out-of-process registry change is observed on the next read -----------
+//
+// AliasBar is not the only writer of ~/.aliasbar/compiled.json: it can live in a
+// synced directory, and a second copy of the app can install or uninstall a command
+// without ever stealing focus from this one. Every write below goes straight to the
+// registry file — never through AppState — so nothing in the app knows to refresh.
+// The snapshot has to notice by itself, from the file's modification date and size.
+
+do {
+    var registryLoaderCalls = 0
+    let (state, promptsDir, commandsDir, registryPath, _, _, _) = freshManageFixture(
+        promptDeliveryRegistryLoader: { path in
+            registryLoaderCalls += 1
+            return PromptCompiler.installedCommands(registryPath: path)
+        }
+    )
+    let standupBody = "Summarize: {{notes}}"
+    writeRawPromptFile(promptFixture(["---", "schema: 1", "description: Daily standup summary",
+                                      "---", standupBody]),
+                       name: "standup", in: promptsDir)
+    state.prepareForShow()
+    state.mode = .manage
+    state.dialect = .prompt
+    state.promptBucket = .delivery
+
+    guard let standup = state.promptManageResults.first(where: { $0.name == "standup" }) else {
+        check("standup is present in Delivery before any install", false)
+        fatalError("unreachable — check() above already failed")
+    }
+    check("with no registry on disk at all, the snapshot answers notInstalled",
+          state.promptDeliveryStatus(for: standup) == .notInstalled)
+    let callsAfterFirstRead = registryLoaderCalls
+    _ = state.promptDeliveryStatus(for: standup)
+    check("an unchanged registry file is never re-read — the stat is the whole cost",
+          registryLoaderCalls == callsAfterFirstRead)
+
+    // 1. Another process installs the command. Nothing tells AppState.
+    _ = try! PromptCompiler.compile(name: standup.name, description: standup.description,
+                                    body: standup.body, commandsDir: commandsDir,
+                                    registryPath: registryPath)
+    check("an install performed entirely outside AliasBar is observed on the next read",
+          state.promptDeliveryStatus(for: standup) == .installed)
+    check("observing it took exactly one more registry read",
+          registryLoaderCalls == callsAfterFirstRead + 1)
+    let callsAfterInstall = registryLoaderCalls
+    _ = state.promptDeliveryStatus(for: standup)
+    check("and the re-read is not repeated while the file stays put",
+          registryLoaderCalls == callsAfterInstall)
+
+    // 2. A same-length rewrite: only the recorded hash changes, so the file's size is
+    //    byte-for-byte identical and the modification date is the only thing that can
+    //    give it away. Set that date explicitly rather than relying on whatever
+    //    sub-second resolution the volume happens to record.
+    let expectedHash = SHA256Digest.hex(PromptCompiler.render(description: standup.description,
+                                                              body: standup.body))
+    let driftedHash = (expectedHash.hasPrefix("0") ? "1" : "0") + expectedHash.dropFirst()
+    let installedRegistry = try! String(contentsOfFile: registryPath, encoding: .utf8)
+    let driftedRegistry = installedRegistry.replacingOccurrences(of: expectedHash,
+                                                                 with: driftedHash)
+    check("the drifted registry really is the same length, so size alone cannot detect it",
+          driftedRegistry.utf8.count == installedRegistry.utf8.count
+              && driftedRegistry != installedRegistry)
+    try! driftedRegistry.write(toFile: registryPath, atomically: true, encoding: .utf8)
+    try! FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(5)],
+                                           ofItemAtPath: registryPath)
+    check("a same-size out-of-process rewrite is caught by the modification date",
+          state.promptDeliveryStatus(for: standup) == .stale)
+
+    // 3. And the other direction: the registry disappears (a synced folder resolving a
+    //    conflict, a `rm`), which must fall back to notInstalled rather than keep
+    //    claiming an installed command that is no longer recorded anywhere.
+    try! FileManager.default.removeItem(atPath: registryPath)
+    check("a registry deleted out from under the snapshot reads notInstalled again",
+          state.promptDeliveryStatus(for: standup) == .notInstalled)
+
+    // 4. A transiently corrupt registry — a half-finished sync write, say — no longer
+    //    sticks for the whole session: the next change to the file bumps the key and
+    //    the failed read is simply retried, rather than `.notInstalled` becoming the
+    //    permanent answer until the app is relaunched.
+    try! "{ half a sync write".write(toFile: registryPath, atomically: true, encoding: .utf8)
+    check("a corrupt registry claims nothing installed, exactly as before",
+          state.promptDeliveryStatus(for: standup) == .notInstalled)
+    try! installedRegistry.write(toFile: registryPath, atomically: true, encoding: .utf8)
+    check("a corrupt read recovers as soon as the file changes, instead of sticking all session",
+          state.promptDeliveryStatus(for: standup) == .installed)
+}
+
+// --- ⌘E seeds the Claude Code checkbox from the live registry, never the snapshot --
+//
+// This value is not display-only: it becomes EditTarget.deliverToClaudeCode, and an
+// unchecked box on save uninstalls the command and strips `delivery: claude-code` out
+// of the prompt file. Seeding it from a stale snapshot turns "edit a prompt" into an
+// uninstall nobody asked for, so beginEditPrompt reads the real registry.
+
+do {
+    let (state, promptsDir, commandsDir, registryPath, _, _, _) = freshManageFixture()
+    writeRawPromptFile(promptFixture(["---", "schema: 1", "description: Ship it",
+                                      "---", "Ship the release."]),
+                       name: "shipit", in: promptsDir)
+    state.prepareForShow()
+    state.mode = .manage
+    state.dialect = .prompt
+    state.promptBucket = .delivery
+
+    guard let shipit = state.promptManageResults.first(where: { $0.name == "shipit" }) else {
+        check("shipit is present in Delivery", false)
+        fatalError("unreachable — check() above already failed")
+    }
+    state.beginEditPrompt(shipit)
+    check("⌘E on a prompt nothing has installed opens with the checkbox off",
+          state.editor?.deliverToClaudeCode == false)
+    state.editor = nil
+
+    // Installed by another process while this palette sat open. No refresh is called.
+    _ = try! PromptCompiler.compile(name: shipit.name, description: shipit.description,
+                                    body: shipit.body, commandsDir: commandsDir,
+                                    registryPath: registryPath)
+    state.beginEditPrompt(shipit)
+    check("⌘E reflects an install made out of process, so saving cannot silently uninstall it",
+          state.editor?.deliverToClaudeCode == true)
+    state.editor = nil
+
+    // The stale-hash case counts as installed too: the command file exists and is
+    // registered, it merely needs recompiling — which is what leaving the box checked
+    // and saving does. Unchecking it is the only thing that may remove it.
+    let staleShortcut = Shortcut(prompt: Prompt(name: "shipit", frontmatter: nil,
+                                                body: "Ship the release, differently now."))
+    state.beginEditPrompt(staleShortcut)
+    check("a drifted (stale) installed command still opens ⌘E with the checkbox on",
+          state.editor?.deliverToClaudeCode == true)
+    state.editor = nil
+
+    _ = try! PromptCompiler.uninstall(name: shipit.name, commandsDir: commandsDir,
+                                      registryPath: registryPath)
+    state.beginEditPrompt(shipit)
+    check("⌘E reflects an uninstall made out of process just as directly",
+          state.editor?.deliverToClaudeCode == false)
+}
+
+// ---------------------------------------------------------------------------
 print("\n" + String(repeating: "-", count: 60))
 print("\(passes) passed, \(failures) failed")
 exit(failures == 0 ? 0 : 1)

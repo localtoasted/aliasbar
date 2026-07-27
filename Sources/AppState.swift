@@ -390,6 +390,36 @@ final class AppState: ObservableObject {
         let body: String
     }
     private var promptDeliveryStatusByPrompt: [PromptDeliveryMemoKey: PromptDeliveryStatus] = [:]
+    /// What the registry file looked like at the instant the snapshot was taken.
+    ///
+    /// The snapshot is refreshed on summon and after every AliasBar-owned delivery
+    /// mutation, but AliasBar is not the only writer: `~/.aliasbar` may sit in a synced
+    /// directory (`PromptCompiler` says so in as many words — "its contents are data,
+    /// not authority") and a second copy of the app can install a command without ever
+    /// stealing focus from this one. So the snapshot also carries a filesystem key, and
+    /// a read whose key no longer matches re-reads instead of answering from memory.
+    /// This is the property the delivery chip has always promised — an install made
+    /// anywhere else shows up the next time the pane draws — kept honest by the file
+    /// itself rather than by remembering to call a refresh.
+    ///
+    /// Modification date *and* size, the same pair `loadHistoryIfNeeded` uses for
+    /// ~/.zsh_history: a same-second rewrite can leave the date looking unchanged at
+    /// whatever resolution the volume records, and a rewrite that only reorders or
+    /// re-hashes entries can leave the size unchanged, so neither field is sufficient
+    /// alone. A missing or unreadable file stamps as all-nil, which is a real
+    /// observation ("nothing to read") and distinct from `nil` for the whole stamp,
+    /// which means no snapshot has been taken yet.
+    private struct PromptDeliveryRegistryStamp: Equatable {
+        let modified: Date?
+        let size: Int?
+
+        static func current(path: String) -> PromptDeliveryRegistryStamp {
+            let attributes = try? FileManager.default.attributesOfItem(atPath: path)
+            return PromptDeliveryRegistryStamp(modified: attributes?[.modificationDate] as? Date,
+                                               size: attributes?[.size] as? Int)
+        }
+    }
+    private var promptDeliveryRegistryStamp: PromptDeliveryRegistryStamp?
     private(set) var promptDeliveryRegistryLoadCount = 0
     private(set) var promptDeliveryStatusComputationCount = 0
 
@@ -853,10 +883,18 @@ final class AppState: ObservableObject {
 
     /// Refreshes the instance snapshot exactly once. A corrupt/unreadable registry
     /// has the same product meaning as before — nothing can be claimed installed —
-    /// but that result is now shared by every row until the next explicit refresh.
+    /// but that result is now shared by every row until the registry file changes or
+    /// the next explicit refresh, whichever comes first.
     private func refreshPromptDeliverySnapshot() {
         promptDeliveryRegistryLoadCount += 1
         promptDeliveryStatusByPrompt = [:]
+        // Stamped before the load, never after. If the file is rewritten in the window
+        // between these two lines we want to record the older stamp and re-read once
+        // more than necessary, rather than record the newer one and permanently keep a
+        // half-read that never matches it again. This is also what makes a transiently
+        // corrupt read recover: the next write bumps the stamp and the failure is
+        // re-attempted, instead of `.notInstalled` sticking for the whole session.
+        promptDeliveryRegistryStamp = .current(path: AppPaths.compiledRegistryPath)
         guard case .ok(let installed) = promptDeliveryRegistryLoader(AppPaths.compiledRegistryPath) else {
             promptDeliveryRegistryByName = [:]
             return
@@ -884,9 +922,21 @@ final class AppState: ObservableObject {
         )
     }
 
-    /// Instance-side lookup against the refresh-scoped snapshot. Tests that need a
-    /// one-off fixture read keep using the static disk-based form above.
+    /// Re-reads the registry only when the file itself has changed since the snapshot
+    /// was taken — one `stat` per read, which is what the whole memo is buying time
+    /// against (a full read + JSON decode + render + SHA-256 per row, per keystroke).
+    /// A `nil` stamp means no snapshot exists yet, so any read must take one.
+    private func refreshPromptDeliverySnapshotIfRegistryChanged() {
+        let current = PromptDeliveryRegistryStamp.current(path: AppPaths.compiledRegistryPath)
+        guard promptDeliveryRegistryStamp != current else { return }
+        refreshPromptDeliverySnapshot()
+    }
+
+    /// Instance-side lookup against the refresh-scoped snapshot, invalidated by the
+    /// registry file's own mtime/size before it answers. Tests that need a one-off
+    /// fixture read keep using the static disk-based form above.
     func promptDeliveryStatus(for shortcut: Shortcut) -> PromptDeliveryStatus {
+        refreshPromptDeliverySnapshotIfRegistryChanged()
         let key = PromptDeliveryMemoKey(name: shortcut.name,
                                         description: shortcut.description,
                                         body: shortcut.body)
@@ -1297,6 +1347,10 @@ final class AppState: ObservableObject {
             promptUsageCache = [:]
             promptDeliveryRegistryByName = [:]
             promptDeliveryStatusByPrompt = [:]
+            // The stamp's only job is to describe what `promptDeliveryRegistryByName`
+            // was loaded from. Emptying that dictionary without clearing the stamp
+            // would leave a key claiming to describe a snapshot that no longer exists.
+            promptDeliveryRegistryStamp = nil
             return
         }
         let promptsDirectory = URL(fileURLWithPath: AppPaths.promptsDirectory)

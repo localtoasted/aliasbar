@@ -147,8 +147,15 @@ private struct PromptPreview: View {
         }
     }
 
-    /// Uses AppState's refresh-scoped registry/hash snapshot, shared with MANAGE and
-    /// refreshed on summon and every AliasBar-owned prompt delivery mutation.
+    /// "true only if `PromptCompiler.installedCommands` for the real registry lists it
+    /// AND the hash still matches" — still true, and still true of installs or edits
+    /// made anywhere else, but now paid for once instead of on every row of every
+    /// render. AppState keeps one registry/hash snapshot, shared with MANAGE, refreshed
+    /// on summon and after every AliasBar-owned delivery mutation, and keyed on the
+    /// registry file's own modification date and size. A read whose key no longer
+    /// matches the file re-reads before answering, so an install made by another
+    /// process — the `ab` CLI, a second copy of AliasBar, a synced `~/.aliasbar` —
+    /// shows up here the next time this pane draws, exactly as before.
     private var status: AppState.PromptDeliveryStatus {
         state.promptDeliveryStatus(for: shortcut)
     }

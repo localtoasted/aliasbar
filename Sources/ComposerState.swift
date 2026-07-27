@@ -88,9 +88,17 @@ final class ComposerState: ObservableObject {
     /// AliasBar's block" concept the way a hand-written alias does — the whole file
     /// belongs to whoever wrote it, exactly as `PromptStore.write` already assumes —
     /// so there is no refusal branch to mirror `beginEdit`'s.
+    ///
+    /// The delivery read here is deliberately a fresh read of the real registry, not
+    /// AppState's refresh-scoped snapshot: this value is not display-only. It seeds
+    /// `EditTarget.deliverToClaudeCode`, and on save `commitPromptEditor` treats it as
+    /// the user's intent — an unchecked box uninstalls the Claude Code command and
+    /// strips `delivery: claude-code` out of the prompt file. Seeding it from a stale
+    /// answer would turn "edit a prompt" into an uninstall nobody asked for. This is a
+    /// one-shot ⌘E action, not a render path, so the read costs nothing.
     func beginEditPrompt(_ shortcut: Shortcut) {
         guard shortcut.kind == .prompt else { return }
-        let installed = app.promptDeliveryStatus(for: shortcut) != .notInstalled
+        let installed = AppState.promptDeliveryStatus(for: shortcut, registryPath: AppPaths.compiledRegistryPath) != .notInstalled
         editor = .editPrompt(shortcut, installed: installed)
     }
 
