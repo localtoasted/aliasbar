@@ -73,17 +73,18 @@ struct RootView: View {
                 .environment(\.theme, theme)
         }
         .sheet(item: $state.fillIn) { target in
-            // `FillInSheet` itself knows nothing about prompts — the unwrap and the
-            // prompt-specific `render` closure happen here, at the one call site
-            // that already knows this is `AppState.fillIn`.
-            if let wrapped = Binding($state.fillIn) {
-                FillInSheet(title: "Fill in \(target.shortcut.name)",
-                            state: wrapped.fill,
-                            render: { $0.rendered(target.shortcut.body) },
-                            onConfirm: { state.confirmFillIn() },
-                            onCancel: { state.cancelFillIn() })
-                    .environment(\.theme, theme)
-            }
+            // The binding keeps a captured fallback while the sheet dismisses. A
+            // force-unwrapped optional binding crashes when Return clears `fillIn`
+            // while AppKit is still ending text-field editing.
+            FillInSheet(title: "Fill in \(target.shortcut.name)",
+                        state: fillBinding(for: target),
+                        render: { $0.rendered(target.shortcut.body) },
+                        confirmLabel: state.settings.enterAction.needsAccessibility
+                            ? "Paste"
+                            : "Copy",
+                        onConfirm: { state.confirmFillIn() },
+                        onCancel: { state.cancelFillIn() })
+                .environment(\.theme, theme)
         }
         .onAppear {
             searchFocused = true
@@ -98,6 +99,22 @@ struct RootView: View {
             arrived = false
             enter()
         }
+    }
+
+    private func fillBinding(for target: AppState.PromptFillTarget) -> Binding<SlotFillState> {
+        Binding(
+            get: {
+                guard let current = state.fillIn, current.id == target.id else {
+                    return target.fill
+                }
+                return current.fill
+            },
+            set: { fill in
+                guard var current = state.fillIn, current.id == target.id else { return }
+                current.fill = fill
+                state.fillIn = current
+            }
+        )
     }
 
     /// Plays the entrance. Focus is already set by the time this runs, so nothing about

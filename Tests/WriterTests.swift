@@ -10140,6 +10140,14 @@ check("selection actions reserve stable row width instead of reflowing text",
       rootViewSource.contains("struct StableRowActionHints")
           && rootViewSource.contains(".frame(width: 196, height: 24, alignment: .trailing)")
           && rootViewSource.contains(".opacity(visible ? 1 : 0)"))
+let fillInSheetSource = read(projectRoot.appendingPathComponent("Sources/FillInSheet.swift").path)
+check("the fill-in confirmation names the configured copy or paste action",
+      fillInSheetSource.contains("Button(confirmLabel, action: onConfirm)")
+          && rootViewSource.contains("confirmLabel: state.settings.enterAction.needsAccessibility"))
+check("the fill-in sheet can dismiss while its text field ends editing",
+      !rootViewSource.contains("Binding($state.fillIn)")
+          && rootViewSource.contains("private func fillBinding(for target:")
+          && rootViewSource.contains("guard var current = state.fillIn"))
 check("FIND's empty prompt setup notice has a dismiss control",
       promptFindViewSource.contains("DismissibleInfoBanner(text: AppState.promptLibraryEmptyHint"))
 check("MANAGE's empty prompt setup notice shares the same dismissal policy",

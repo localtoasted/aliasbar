@@ -75,6 +75,7 @@ struct FillInSheet: View {
     let title: String
     @Binding var state: SlotFillState
     let render: (SlotFillState) -> String
+    var confirmLabel = "Paste"
     let onConfirm: () -> Void
     let onCancel: () -> Void
     @FocusState private var focusedIndex: Int?
@@ -114,7 +115,7 @@ struct FillInSheet: View {
                 Spacer()
                 Button("Cancel", action: onCancel)
                     .keyboardShortcut(.cancelAction)
-                Button("Paste", action: onConfirm)
+                Button(confirmLabel, action: onConfirm)
                     .keyboardShortcut(.defaultAction)
             }
         }
