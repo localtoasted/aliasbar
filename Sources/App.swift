@@ -78,7 +78,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         NotificationCenter.default.addObserver(
             forName: .aliasBarHotkeyFired, object: nil, queue: .main
         ) { [weak self] _ in
-            Task { @MainActor in self?.summon() }
+            MainActor.assumeIsolated { self?.summon() }
         }
 
         // A look with a second ground follows macOS between light and dark. The window is
@@ -89,7 +89,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             forName: Notification.Name("AppleInterfaceThemeChangedNotification"),
             object: nil, queue: .main
         ) { [weak self] _ in
-            Task { @MainActor in
+            MainActor.assumeIsolated {
                 self?.settings.systemIsDark = AppSettings.readSystemIsDark()
             }
         }
@@ -503,7 +503,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         // window goes away, not polled while it is open.
         NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification,
                                                object: window, queue: .main) { [weak self] _ in
-            Task { @MainActor in self?.registerHotkey() }
+            MainActor.assumeIsolated { self?.registerHotkey() }
         }
     }
 
@@ -548,7 +548,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         // later, or the traffic light. There is no path that shows the flow twice.
         NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification,
                                                object: window, queue: .main) { [weak self] _ in
-            Task { @MainActor in
+            MainActor.assumeIsolated {
                 self?.settings.onboardingComplete = true
                 // A rebind made in the flow takes effect the same way one made in the
                 // settings window does.

@@ -306,7 +306,9 @@ final class VisionClipboardImageTextRecognizer: ClipboardImageTextRecognizing {
 
 /// Owns the Vision request so closing, changing selection, or retrying can stop
 /// active recognition and release its captured image data promptly.
-private final class VisionClipboardImageTextRecognitionTask: ClipboardImageTextRecognitionTask {
+/// `@unchecked Sendable` is honest here: all three mutable fields below are read and
+/// written only while `lock` is held, so instances are safe to cross threads.
+private final class VisionClipboardImageTextRecognitionTask: ClipboardImageTextRecognitionTask, @unchecked Sendable {
     private let lock = NSLock()
     private var pendingData: Data?
     private var request: VNRecognizeTextRequest?
@@ -447,9 +449,13 @@ final class ClipboardMonitor {
     func start() {
         stop()
         guard !DesktopInteractionGuard.blocks(pasteboard) else { return }
-        timer = Timer.scheduledTimer(withTimeInterval: pollInterval, repeats: true) { [weak self] _ in
+        let timer = Timer.scheduledTimer(withTimeInterval: pollInterval, repeats: true) { [weak self] _ in
             self?.poll()
         }
+        // .default mode alone stops firing while an NSMenu is tracking or a window is in a
+        // live resize, so a ⌘C during either would silently never enter clipboard history.
+        RunLoop.main.add(timer, forMode: .common)
+        self.timer = timer
         // Live monitoring is the one context where the store has a run loop to sweep on,
         // so quarantine expiry stops depending on someone opening the clipboard UI.
         quarantine.startExpirySweep()

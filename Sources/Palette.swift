@@ -95,7 +95,7 @@ final class PaletteController: NSObject, NSWindowDelegate {
             context.duration = 0.09
             panel.animator().alphaValue = 0
         } completionHandler: { [weak self] in
-            Task { @MainActor in
+            MainActor.assumeIsolated {
                 panel.orderOut(nil)
                 panel.alphaValue = 1
                 self?.onClose()
