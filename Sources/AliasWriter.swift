@@ -174,7 +174,13 @@ enum AliasWriter {
         let bounds = try locateBlock(in: lines)
         guard let begin = bounds.begin, let end = bounds.end else { return [] }
         var result: [(String, String)] = []
+        // A line an earlier statement already consumed is part of that statement's
+        // value. It looks like a definition and is not one.
+        let nested = ShellStatementLexer.linesInsideCompletedSpans(of: lines,
+                                                                  from: begin + 1,
+                                                                  upTo: end)
         for i in (begin + 1)..<end {
+            guard !nested.contains(i) else { continue }
             let line = lines[i].trimmingCharacters(in: .whitespaces)
             guard line.hasPrefix("alias ") else { continue }
             let rest = String(line.dropFirst("alias ".count))
@@ -821,7 +827,17 @@ enum AliasWriter {
                                      begin: Int,
                                      end: Int) throws -> ClosedRange<Int>? {
         guard end > begin + 1 else { return nil }
+        // Computed once for the whole block rather than per candidate: the alternative
+        // re-lexes from the begin marker for every `alias `-prefixed line, which is
+        // quadratic in the block's size. A rename asks twice (source and destination),
+        // which is two linear passes over a block, not a scan on the summon path.
+        let nested = ShellStatementLexer.linesInsideCompletedSpans(of: lines,
+                                                                  from: begin + 1,
+                                                                  upTo: end)
         for i in (begin + 1)..<end {
+            // Value bytes belonging to a statement that started earlier. Matching one
+            // here is what let an edit land *inside* another alias's quoted value.
+            guard !nested.contains(i) else { continue }
             let line = lines[i].trimmingCharacters(in: .whitespaces)
             guard line.hasPrefix("alias ") else { continue }
             let rest = String(line.dropFirst("alias ".count))
@@ -1204,6 +1220,75 @@ internal enum ShellStatementLexer {
                 $0.activeHeredoc != nil || !$0.pendingHeredocs.isEmpty
             }
         }
+    }
+
+    /// The indices in `lines[start..<end]` that belong to a statement which began on an
+    /// *earlier* line: value bytes, continuation tails and heredoc payload, never
+    /// definitions in their own right.
+    ///
+    /// A legacy multi-line alias is held together by the quotes around its value, so in
+    ///
+    ///     alias outer='first
+    ///     alias ghost=inner
+    ///     last'
+    ///
+    /// the middle line is text. Every site that locates a definition by name has to
+    /// agree on that. While they did not, `ghost` was an editable alias whose deletion
+    /// rewrote `outer` — and because removing a line from inside a quoted string leaves
+    /// perfectly well-formed zsh, the `zsh -n` gate had nothing to object to and the
+    /// user was told "Deleted" (PRE-288).
+    ///
+    /// Walked once, forward, from `start`. Deciding each candidate by lexing up to it
+    /// would be quadratic, and this runs on the path that fills the menu.
+    ///
+    /// **Only spans that complete are reported.** A span still open when the walk
+    /// reaches `end` consumes nothing, and the walk resumes at the line after its
+    /// opener. That is deliberate, not an oversight. `scan` is a hand-written lexer that
+    /// nine adversarial rounds found eight distinct bugs in, and an unsupported heredoc
+    /// delimiter poisons every line after it by design. If an unterminated span were
+    /// allowed to swallow the rest of the region, a single lexer mistake — or one
+    /// exotic-but-legal heredoc near the top of a real `.zshrc` — would erase every
+    /// alias below it from the app and turn the next save into a duplicate definition.
+    /// Ignoring such a span costs nothing instead: the lines under it stay classified
+    /// exactly the way they were before this function existed.
+    ///
+    /// Cost is linear in the region for every file that is not already broken. Resuming
+    /// after an unterminated span is what can repeat work, since the resumed walk reads
+    /// to `end` again — so a region needs *many* lines that each independently open a
+    /// construct nothing ever closes before that is measurable, and such a file does not
+    /// start a shell. The one shape that could plausibly occur more than once in a real
+    /// rc file, an unrecognized heredoc delimiter, is cut off the moment it is seen.
+    static func linesInsideCompletedSpans(of lines: [String],
+                                          from start: Int,
+                                          upTo end: Int) -> Set<Int> {
+        var inside: Set<Int> = []
+        let limit = min(end, lines.count)
+        var i = max(start, 0)
+        while i < limit {
+            var state = scan(lines[i], from: LexState())
+            var last = i
+            // `heredocStateInvalid` and `unsupportedHeredocDelimiter` are each set once
+            // and never cleared, so either one already decides this span: it cannot
+            // complete however many lines follow. Stopping here reaches the identical
+            // answer without reading the rest of the region.
+            while state.continues, last + 1 < limit,
+                  !state.heredocStateInvalid, !state.unsupportedHeredocDelimiter {
+                last += 1
+                state = scan(lines[last], from: state)
+            }
+            // `continues` already implies `hasUnconsumedHeredoc`, and the second check is
+            // still written out for the same reason `rangeOfAlias` writes it out: a
+            // future scanner change that drops a frame or forgets to propagate
+            // continuation must not be able to make unresolved heredoc input look like
+            // a finished statement.
+            if last > i, !state.continues, !state.hasUnconsumedHeredoc {
+                inside.formUnion((i + 1)...last)
+                i = last + 1
+            } else {
+                i += 1
+            }
+        }
+        return inside
     }
 
     /// Advances the lexer across one line.

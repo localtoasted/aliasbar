@@ -100,6 +100,19 @@ enum ZshrcParser {
     static func parseText(_ text: String, sourceFile: String) -> [ShellEntry] {
         var entries: [ShellEntry] = []
         let lines = text.components(separatedBy: "\n")
+        // Which physical lines are value bytes belonging to a statement that began
+        // earlier: the interior of a multi-line quoted value, a backslash-continuation
+        // tail, a heredoc body. Walked once for the whole file rather than carried along
+        // by the loop below, which jumps over function bodies and so cannot advance a
+        // lexer of its own.
+        //
+        // This is the only lexer-aware decision the parser makes. The managed-block
+        // markers are still matched as plain text on purpose: `AliasWriter.locateBlock`
+        // finds them the same way, and the two must not disagree about where the block
+        // is.
+        let nested = ShellStatementLexer.linesInsideCompletedSpans(of: lines,
+                                                                  from: 0,
+                                                                  upTo: lines.count)
         var pendingComments: [String] = []
         var insideManagedBlock = false
         var i = 0
@@ -130,6 +143,17 @@ enum ZshrcParser {
                 continue
             }
             if line.isEmpty {
+                pendingComments.removeAll()
+                i += 1
+                continue
+            }
+
+            // Inside somebody else's value, so it defines nothing — `alias ghost=inner`
+            // between `alias outer='first` and `last'` is three words of text. Placed
+            // ahead of both definition branches and behind the comment branch, so the
+            // only classification that changes is definition-or-not. Falling through
+            // clears the pending comments exactly as the untaken branches below would.
+            if nested.contains(i) {
                 pendingComments.removeAll()
                 i += 1
                 continue
