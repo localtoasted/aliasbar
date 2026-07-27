@@ -29,6 +29,7 @@ check("test mode identifies the system pasteboard as blocked",
 let sandbox = NSTemporaryDirectory() + "aliasbar-writer-tests-\(UUID().uuidString)"
 try! FileManager.default.createDirectory(atPath: sandbox, withIntermediateDirectories: true)
 defer { try? FileManager.default.removeItem(atPath: sandbox) }
+setenv("ALIASBAR_COMPILED_REGISTRY", "\(sandbox)/default-compiled.json", 1)
 
 var caseIndex = 0
 func scratch(_ contents: String) -> String {
@@ -5256,6 +5257,52 @@ func freshTestSettings() -> (settings: AppSettings, defaults: UserDefaults) {
     return (AppSettings(defaults: defaults), defaults)
 }
 
+// --- FIND memoization keys every ranking input, with no invalidation hooks ----
+
+do {
+    let (settings, _) = freshTestSettings()
+    settings.promptFeaturesEnabled = true
+    settings.searchScope = .everything
+    settings.resultLimit = 3
+    let state = AppState(store: EntryStore(), settings: settings)
+    state.prepareForShow()
+    state.dialect = .shell
+    state.query = "stored"
+
+    let beforeFirstRead = state.findResultsComputationCount
+    let first = state.findResults
+    let afterFirstRead = state.findResultsComputationCount
+    check("the first FIND read computes ranked results exactly once",
+          afterFirstRead == beforeFirstRead + 1)
+    check("an identical FIND read reuses the memoized value",
+          state.findResults == first && state.findResultsComputationCount == afterFirstRead)
+
+    state.query = "find"
+    _ = state.findResults
+    check("changing the FIND query misses the memoized ranking",
+          state.findResultsComputationCount == afterFirstRead + 1)
+
+    state.dialect = .prompt
+    _ = state.findResults
+    check("changing FIND's dialect misses the memoized ranking",
+          state.findResultsComputationCount == afterFirstRead + 2)
+
+    settings.searchScope = .name
+    _ = state.findResults
+    check("changing FIND's search scope misses the memoized ranking",
+          state.findResultsComputationCount == afterFirstRead + 3)
+
+    settings.resultLimit = 4
+    _ = state.findResults
+    check("changing FIND's effective result limit misses the memoized ranking",
+          state.findResultsComputationCount == afterFirstRead + 4)
+
+    state.promptCache.append(Prompt(name: "new-pool-member", frontmatter: nil, body: "body"))
+    _ = state.findResults
+    check("changing the materialized FIND pool misses the memoized ranking",
+          state.findResultsComputationCount == afterFirstRead + 5)
+}
+
 // --- Pins are local, durable preferences ------------------------------------
 
 do {
@@ -7481,8 +7528,12 @@ check("a prompt can carry both diagnoses at once",
 
 // --- Fixture: a full MANAGE-flavored AppState, prompts + shell + Claude Code ----
 
-func freshManageFixture() -> (state: AppState, promptsDir: URL, commandsDir: String,
-                              registryPath: String, rcPath: String, historyPath: String, ignoresPath: String) {
+func freshManageFixture(
+    promptDeliveryRegistryLoader: @escaping AppState.PromptDeliveryRegistryLoader = {
+        PromptCompiler.installedCommands(registryPath: $0)
+    }
+) -> (state: AppState, promptsDir: URL, commandsDir: String,
+      registryPath: String, rcPath: String, historyPath: String, ignoresPath: String) {
     caseIndex += 1
     let base = "\(sandbox)/manage-case\(caseIndex)"
     let promptsDir = URL(fileURLWithPath: "\(base)/prompts")
@@ -7512,7 +7563,8 @@ func freshManageFixture() -> (state: AppState, promptsDir: URL, commandsDir: Str
     setenv("ALIASBAR_SUGGESTION_IGNORES", ignoresPath, 1)
 
     let (settings, _) = freshTestSettings()
-    let state = AppState(store: EntryStore(), settings: settings)
+    let state = AppState(store: EntryStore(), settings: settings,
+                         promptDeliveryRegistryLoader: promptDeliveryRegistryLoader)
     return (state, promptsDir, commandsDir, registryPath, rcPath, historyPath, ignoresPath)
 }
 
@@ -7540,10 +7592,19 @@ do {
 // --- Delivery: install/uninstall wiring against a real fixture registry --------
 
 do {
-    let (state, promptsDir, commandsDir, _, _, _, _) = freshManageFixture()
+    var registryLoaderCalls = 0
+    let (state, promptsDir, commandsDir, _, _, _, _) = freshManageFixture(
+        promptDeliveryRegistryLoader: { registryPath in
+            registryLoaderCalls += 1
+            return PromptCompiler.installedCommands(registryPath: registryPath)
+        }
+    )
     writeRawPromptFile(promptFixture(["---", "schema: 1", "description: Ship it", "---", "Ship the release."]),
                         name: "shipit", in: promptsDir)
     state.prepareForShow()
+    check("prepareForShow loads the delivery registry exactly once for the prompt snapshot",
+          registryLoaderCalls == 1 && state.promptDeliveryRegistryLoadCount == 1
+              && state.promptDeliveryStatusComputationCount == 1)
     state.mode = .manage
     state.dialect = .prompt
     state.promptBucket = .delivery
@@ -7554,12 +7615,19 @@ do {
     }
     check("a never-compiled prompt reads notInstalled in Delivery",
           state.promptDeliveryStatus(for: shortcut) == .notInstalled)
+    _ = state.promptDeliveryStatus(for: shortcut)
+    check("repeated delivery-status reads reuse the snapshot instead of reloading or rehashing",
+          registryLoaderCalls == 1 && state.promptDeliveryRegistryLoadCount == 1
+              && state.promptDeliveryStatusComputationCount == 1)
 
     state.installPrompt(shortcut)
     check("installPrompt writes a real file through PromptCompiler",
           FileManager.default.fileExists(atPath: commandsDir + "/shipit.md"))
     check("after installPrompt, Delivery's status reads installed",
           state.promptDeliveryStatus(for: shortcut) == .installed)
+    check("a successful install refreshes the delivery snapshot exactly once",
+          registryLoaderCalls == 2 && state.promptDeliveryRegistryLoadCount == 2
+              && state.promptDeliveryStatusComputationCount == 2)
     check("installPrompt clears any prior error", state.errorMessage == nil)
 
     state.uninstallPrompt(shortcut)
@@ -7567,6 +7635,9 @@ do {
           !FileManager.default.fileExists(atPath: commandsDir + "/shipit.md"))
     check("after uninstallPrompt, Delivery's status reads notInstalled again",
           state.promptDeliveryStatus(for: shortcut) == .notInstalled)
+    check("a successful uninstall refreshes the delivery snapshot exactly once",
+          registryLoaderCalls == 3 && state.promptDeliveryRegistryLoadCount == 3
+              && state.promptDeliveryStatusComputationCount == 3)
 }
 
 // --- Delivery: a real refusal surfaces CompileError verbatim -------------------

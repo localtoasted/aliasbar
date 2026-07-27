@@ -277,6 +277,8 @@ enum BoardNavigator {
 /// to know exactly what is on screen in order to move a selection through it. Splitting
 /// that across a view and a controller is how off-by-one selection bugs happen.
 final class AppState: ObservableObject {
+    typealias PromptDeliveryRegistryLoader = (String) -> PromptCompiler.RegistryOutcome
+
     @Published var mode: ViewMode {
         didSet { normalizeSelectionAfterSurfaceChange() }
     }
@@ -376,6 +378,20 @@ final class AppState: ObservableObject {
     /// Usage counts for those prompts, loaded alongside them for the same reason.
     private var promptUsageCache: [String: PromptUsageCounter.Entry] = [:]
 
+    /// The compiled-command registry is read on prompt-cache refresh, never while a
+    /// row is rendering. Keeping the loader injectable makes the I/O boundary and
+    /// refresh count directly testable without replacing any production paths.
+    private let promptDeliveryRegistryLoader: PromptDeliveryRegistryLoader
+    private var promptDeliveryRegistryByName: [String: PromptCompiler.InstalledCommand] = [:]
+    private struct PromptDeliveryMemoKey: Hashable {
+        let name: String
+        let description: String?
+        let body: String
+    }
+    private var promptDeliveryStatusByPrompt: [PromptDeliveryMemoKey: PromptDeliveryStatus] = [:]
+    private(set) var promptDeliveryRegistryLoadCount = 0
+    private(set) var promptDeliveryStatusComputationCount = 0
+
     /// The three surfaces that own enough state to be worth their own object rather
     /// than another stripe through this class: FIND's clipboard source, MANAGE's
     /// Review bucket, and the Composer sheet. Each holds an `unowned` reference back
@@ -435,10 +451,14 @@ final class AppState: ObservableObject {
     /// Keeps the child-object subscriptions below alive for the life of the state.
     private var childObservers: [AnyCancellable] = []
 
-    init(store: EntryStore, settings: AppSettings) {
+    init(store: EntryStore, settings: AppSettings,
+         promptDeliveryRegistryLoader: @escaping PromptDeliveryRegistryLoader = {
+             PromptCompiler.installedCommands(registryPath: $0)
+         }) {
         self.store = store
         self.settings = settings
         self.mode = settings.defaultView
+        self.promptDeliveryRegistryLoader = promptDeliveryRegistryLoader
         observeChildren()
     }
 
@@ -601,6 +621,21 @@ final class AppState: ObservableObject {
 
     // MARK: - FIND: shell + prompt union
 
+    /// The exact inputs passed into FIND's ranking/capping pipeline. Using the fully
+    /// materialized pool as part of the key deliberately avoids a web of invalidation
+    /// hooks: reloads, usage changes, pins, bucket membership, and settings that alter
+    /// the pool all miss the cache automatically when their observable result changes.
+    private struct FindResultsMemoKey: Equatable {
+        let pool: [Shortcut]
+        let query: String
+        let scope: String
+        let dialect: Dialect
+        let limit: Int
+    }
+
+    private var findResultsMemo: (key: FindResultsMemoKey, results: [Shortcut])?
+    private(set) var findResultsComputationCount = 0
+
     /// FIND's pool: the shell entries the current bucket admits, plus every stored
     /// prompt — always both, per the boost-not-wall rule; ranking (`ShortcutRanker`)
     /// is what makes one kind easier to reach, never what removes the other.
@@ -631,12 +666,23 @@ final class AppState: ObservableObject {
     /// FIND's ranked, capped results — the union of shell entries and prompts. The cap
     /// mirrors `results`: don't make the user read more than the window has room for.
     var findResults: [Shortcut] {
-        let ranked = ShortcutRanker.rank(findPool, query: query,
-                                         scope: settings.searchScope, dialect: dialect)
         let limit = query.isEmpty
             ? max(settings.resultLimit, WindowLayout.restRows)
             : settings.resultLimit
-        return Array(ranked.prefix(limit))
+        let pool = findPool
+        let key = FindResultsMemoKey(pool: pool, query: query,
+                                     scope: settings.searchScope.rawValue,
+                                     dialect: dialect, limit: limit)
+        if let memo = findResultsMemo, memo.key == key {
+            return memo.results
+        }
+
+        findResultsComputationCount += 1
+        let ranked = ShortcutRanker.rank(pool, query: query,
+                                         scope: settings.searchScope, dialect: dialect)
+        let results = Array(ranked.prefix(limit))
+        findResultsMemo = (key, results)
+        return results
     }
 
     /// FIND's counterpart to `selectedEntry` — the highlighted shortcut, shell or
@@ -783,22 +829,70 @@ final class AppState: ObservableObject {
     /// worse than no chip at all. `.stale` covers exactly that drift; `.notInstalled`
     /// covers both "never compiled" and "the registry itself can't be read" — either
     /// way there is nothing on this Mac to point to.
-    static func promptDeliveryStatus(for shortcut: Shortcut, registryPath: String) -> PromptDeliveryStatus {
-        guard shortcut.kind == .prompt,
-              case .ok(let installed) = PromptCompiler.installedCommands(registryPath: registryPath),
-              let entry = installed.first(where: { $0.name == shortcut.name })
-        else { return .notInstalled }
+    private static func promptDeliveryStatus(
+        for shortcut: Shortcut,
+        installedCommand: PromptCompiler.InstalledCommand?
+    ) -> PromptDeliveryStatus {
+        guard shortcut.kind == .prompt, let entry = installedCommand else {
+            return .notInstalled
+        }
         let expected = SHA256Digest.hex(
             PromptCompiler.render(description: shortcut.description, body: shortcut.body))
         return entry.sha256 == expected ? .installed : .stale
     }
 
-    /// Instance-side convenience over the static `promptDeliveryStatus(for:registryPath:)`
-    /// above, always against the real registry — the one MANAGE's Delivery bucket
-    /// (an instance context) reads. Tests call the static form directly against a
-    /// fixture path; nothing here duplicates its logic.
+    static func promptDeliveryStatus(for shortcut: Shortcut, registryPath: String) -> PromptDeliveryStatus {
+        guard case .ok(let installed) = PromptCompiler.installedCommands(registryPath: registryPath)
+        else { return .notInstalled }
+        return promptDeliveryStatus(
+            for: shortcut,
+            installedCommand: installed.first(where: { $0.name == shortcut.name })
+        )
+    }
+
+    /// Refreshes the instance snapshot exactly once. A corrupt/unreadable registry
+    /// has the same product meaning as before — nothing can be claimed installed —
+    /// but that result is now shared by every row until the next explicit refresh.
+    private func refreshPromptDeliverySnapshot() {
+        promptDeliveryRegistryLoadCount += 1
+        promptDeliveryStatusByPrompt = [:]
+        guard case .ok(let installed) = promptDeliveryRegistryLoader(AppPaths.compiledRegistryPath) else {
+            promptDeliveryRegistryByName = [:]
+            return
+        }
+        promptDeliveryRegistryByName = installed.reduce(into: [:]) { commands, command in
+            // `PromptCompiler`'s real registry cannot contain duplicate names. Keep
+            // the first if a test loader supplies one so this matches the old
+            // `first(where:)` lookup exactly.
+            if commands[command.name] == nil { commands[command.name] = command }
+        }
+        for prompt in promptCache {
+            let shortcut = Shortcut(prompt: prompt)
+            let key = PromptDeliveryMemoKey(name: shortcut.name,
+                                            description: shortcut.description,
+                                            body: shortcut.body)
+            promptDeliveryStatusByPrompt[key] = computePromptDeliveryStatus(for: shortcut)
+        }
+    }
+
+    private func computePromptDeliveryStatus(for shortcut: Shortcut) -> PromptDeliveryStatus {
+        promptDeliveryStatusComputationCount += 1
+        return Self.promptDeliveryStatus(
+            for: shortcut,
+            installedCommand: promptDeliveryRegistryByName[shortcut.name]
+        )
+    }
+
+    /// Instance-side lookup against the refresh-scoped snapshot. Tests that need a
+    /// one-off fixture read keep using the static disk-based form above.
     func promptDeliveryStatus(for shortcut: Shortcut) -> PromptDeliveryStatus {
-        Self.promptDeliveryStatus(for: shortcut, registryPath: AppPaths.compiledRegistryPath)
+        let key = PromptDeliveryMemoKey(name: shortcut.name,
+                                        description: shortcut.description,
+                                        body: shortcut.body)
+        if let status = promptDeliveryStatusByPrompt[key] { return status }
+        let status = computePromptDeliveryStatus(for: shortcut)
+        promptDeliveryStatusByPrompt[key] = status
+        return status
     }
 
     /// Whether the prompt library is completely empty — the one fact FIND's prompt
@@ -987,6 +1081,7 @@ final class AppState: ObservableObject {
                                                      body: shortcut.body,
                                                      commandsDir: AppPaths.claudeCommandsDirectory,
                                                      registryPath: AppPaths.compiledRegistryPath)
+            refreshPromptDeliverySnapshot()
             errorMessage = nil
             if result.builtinCollision != nil {
                 show(toast: "Installed /\(shortcut.name). It shadows a Claude Code built-in.")
@@ -1008,6 +1103,7 @@ final class AppState: ObservableObject {
             _ = try PromptCompiler.uninstall(name: shortcut.name,
                                              commandsDir: AppPaths.claudeCommandsDirectory,
                                              registryPath: AppPaths.compiledRegistryPath)
+            refreshPromptDeliverySnapshot()
             errorMessage = nil
             show(toast: "Uninstalled /\(shortcut.name) from Claude Code")
         } catch let error as PromptCompiler.CompileError {
@@ -1198,11 +1294,14 @@ final class AppState: ObservableObject {
         guard settings.promptFeaturesEnabled else {
             promptCache = []
             promptUsageCache = [:]
+            promptDeliveryRegistryByName = [:]
+            promptDeliveryStatusByPrompt = [:]
             return
         }
         let promptsDirectory = URL(fileURLWithPath: AppPaths.promptsDirectory)
         promptCache = PromptStore.scan(directory: promptsDirectory).prompts
         promptUsageCache = PromptUsageCounter.all(path: AppPaths.promptUsagePath)
+        refreshPromptDeliverySnapshot()
     }
 
     // MARK: - History

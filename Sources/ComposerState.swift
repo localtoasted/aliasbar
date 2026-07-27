@@ -89,7 +89,7 @@ final class ComposerState: ObservableObject {
     /// so there is no refusal branch to mirror `beginEdit`'s.
     func beginEditPrompt(_ shortcut: Shortcut) {
         guard shortcut.kind == .prompt else { return }
-        let installed = AppState.promptDeliveryStatus(for: shortcut, registryPath: AppPaths.compiledRegistryPath) != .notInstalled
+        let installed = app.promptDeliveryStatus(for: shortcut) != .notInstalled
         editor = .editPrompt(shortcut, installed: installed)
     }
 
