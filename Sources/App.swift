@@ -340,7 +340,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         // It no longer does: with a centred palette on a working hotkey, everything is
         // still reachable, and interrupting launch with a modal would be noise.
         if settings.presentationStyle == .palette && settings.hotkeyEnabled {
-            Diag.log("icon unplaced, but palette + hotkey are available — not warning")
+            Diag.log("icon unplaced; palette and hotkey remain available, so no warning")
             return
         }
         let alert = NSAlert()

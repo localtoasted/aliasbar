@@ -200,6 +200,69 @@ enum FindSource: Equatable {
     case aliases, history, clipboard
 }
 
+enum BoardMoveDirection {
+    case left, right, up, down
+}
+
+/// Pure grid navigation for BOARD while a search is active. The cards keep their
+/// positions, but the keyboard cursor only lands on cards that match the query.
+enum BoardNavigator {
+    static func destination(from selection: Int,
+                            moving direction: BoardMoveDirection,
+                            columns: Int,
+                            itemCount: Int,
+                            matchingIndices: [Int]) -> Int {
+        guard itemCount > 0 else { return 0 }
+        let columns = max(1, columns)
+        let eligible = matchingIndices
+            .filter { (0..<itemCount).contains($0) }
+            .sorted()
+        guard !eligible.isEmpty else { return min(max(selection, 0), itemCount - 1) }
+        guard eligible.count > 1 else { return eligible[0] }
+
+        let current = min(max(selection, 0), itemCount - 1)
+        switch direction {
+        case .right:
+            return eligible.first(where: { $0 > current }) ?? eligible[0]
+        case .left:
+            return eligible.last(where: { $0 < current }) ?? eligible[eligible.count - 1]
+        case .up, .down:
+            let rows = max(1, (itemCount + columns - 1) / columns)
+            let currentRow = current / columns
+            let currentColumn = current % columns
+            let currentMatches = eligible.contains(current)
+            let candidates = eligible.filter { $0 != current }
+            guard !candidates.isEmpty else { return current }
+
+            func rowDistance(to index: Int) -> Int {
+                let row = index / columns
+                let raw: Int
+                if direction == .down {
+                    raw = (row - currentRow + rows) % rows
+                } else {
+                    raw = (currentRow - row + rows) % rows
+                }
+                // Once the cursor is on a match, vertical movement should prefer a
+                // different row. If it starts on a dimmed card, a match in that row
+                // is the closest useful destination.
+                return raw == 0 && currentMatches ? rows : raw
+            }
+
+            return candidates.min { lhs, rhs in
+                let lhsRowDistance = rowDistance(to: lhs)
+                let rhsRowDistance = rowDistance(to: rhs)
+                if lhsRowDistance != rhsRowDistance { return lhsRowDistance < rhsRowDistance }
+                let lhsColumnDistance = abs((lhs % columns) - currentColumn)
+                let rhsColumnDistance = abs((rhs % columns) - currentColumn)
+                if lhsColumnDistance != rhsColumnDistance {
+                    return lhsColumnDistance < rhsColumnDistance
+                }
+                return lhs < rhs
+            } ?? current
+        }
+    }
+}
+
 /// The single source of truth for what the popover is showing and what the keyboard
 /// should do next.
 ///
@@ -276,12 +339,6 @@ final class AppState: ObservableObject {
     /// app, so `onAppear` fires exactly once and cannot be used to restore focus to the
     /// search field on the second and every subsequent open.
     @Published var showCount = 0
-    /// Bumped on every keystroke the window sees, handled or not. Exists for exactly one
-    /// consumer: the footer's idle-revealed hints, which hide the moment this moves and
-    /// come back after a beat of stillness. A count rather than a timestamp so the view
-    /// can watch it with `onChange` and never needs to poll.
-    @Published private(set) var keystrokeCount = 0
-
     let store: EntryStore
     let settings: AppSettings
 
@@ -322,6 +379,11 @@ final class AppState: ObservableObject {
     var onOpenSettings: (() -> Void)?
 
     private var toastWorkItem: DispatchWorkItem?
+    private var copyFeedbackDismissWorkItem: DispatchWorkItem?
+
+    /// Keeps the success state visible long enough to register before Close-after-copy
+    /// dismisses the palette. A new summon cancels the pending close.
+    static let copyFeedbackDismissDelay: TimeInterval = 0.55
 
     /// Set the moment the one-shot "want the same for your AI prompts?" hint earns
     /// itself, then shown the *next* time the window opens rather than fighting
@@ -592,7 +654,7 @@ final class AppState: ObservableObject {
     /// once here so FIND's prompt dialect, MANAGE's Library bucket, and BOARD's
     /// prompt deck can never drift on what pressing it actually does.
     static let promptLibraryEmptyHint =
-        "⌘I copies an audit prompt for ChatGPT or Claude — paste back what it suggests to review here, one item at a time."
+        "⌘I copies a library review prompt. Run it in ChatGPT or Claude, then review the suggestions here."
 
     // MARK: - Manage: prompt dialect (Library / Delivery / Health)
 
@@ -755,7 +817,7 @@ final class AppState: ObservableObject {
                                                      registryPath: AppPaths.compiledRegistryPath)
             errorMessage = nil
             if result.builtinCollision != nil {
-                show(toast: "Installed /\(shortcut.name) — heads up, that shadows a Claude Code builtin")
+                show(toast: "Installed /\(shortcut.name). It shadows a Claude Code built-in.")
             } else {
                 show(toast: "Installed /\(shortcut.name) in Claude Code")
             }
@@ -1449,6 +1511,25 @@ final class AppState: ObservableObject {
         return prompt.body.lowercased().contains(q)
     }
 
+    /// Full-grid indices that remain lit under the current BOARD query.
+    var boardMatchingIndices: [Int] {
+        switch dialect {
+        case .shell:
+            let entries = boardEntries
+            return entries.indices.filter { boardMatches(entries[$0]) }
+        case .prompt:
+            let prompts = boardPrompts
+            return prompts.indices.filter { boardPromptMatches(prompts[$0]) }
+        }
+    }
+
+    /// Query edits reset every list to its first row. BOARD keeps nonmatches in place,
+    /// so its first selectable row is the first lit card instead.
+    func resetSelectionForQuery() {
+        guard mode == .board else { selection = 0; return }
+        selection = boardMatchingIndices.first ?? 0
+    }
+
     /// A prompt card's usage badge, from the same cache FIND's union pool reads.
     func promptUsage(for name: String) -> Int {
         promptUsageCache[name]?.count ?? 0
@@ -1521,6 +1602,16 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// The number beside an active search. BOARD keeps nonmatches in the grid, so its
+    /// useful count is the number of lit cards rather than the deck's total size.
+    var searchMatchCount: Int {
+        if mode == .board,
+           !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return boardMatchingIndices.count
+        }
+        return navigableCount
+    }
+
     /// The selected entry, or nil when the selection no longer points at anything.
     ///
     /// Deliberately does **not** fall back to the first item. The selection is an index
@@ -1567,6 +1658,8 @@ final class AppState: ObservableObject {
 
     /// Called every time the popover opens.
     func prepareForShow() {
+        copyFeedbackDismissWorkItem?.cancel()
+        copyFeedbackDismissWorkItem = nil
         store.reload()
         errorMessage = store.loadError
         mode = settings.defaultView
@@ -1620,10 +1713,6 @@ final class AppState: ObservableObject {
     /// This runs from a *local* event monitor, which sees only events destined for this
     /// app and therefore needs no permission. A global monitor would need Accessibility.
     func handleKey(_ event: NSEvent) -> Bool {
-        // Counted before any routing: "the user is typing" includes keys the search
-        // field will consume and keys nothing consumes.
-        keystrokeCount += 1
-
         // The editor sheet owns the keyboard while it is up, apart from escape.
         if editor != nil {
             if event.keyCode == UInt16(kVK_Escape) {
@@ -1795,19 +1884,19 @@ final class AppState: ObservableObject {
         // vertically, a key at a time horizontally. Nothing collides with ⌥ — that is
         // still the view switch here as everywhere else.
         case kVK_DownArrow where mode == .board:
-            move(by: boardColumns)
+            moveBoard(.down)
             return true
 
         case kVK_UpArrow where mode == .board:
-            move(by: -boardColumns)
+            moveBoard(.up)
             return true
 
         case kVK_LeftArrow where mode == .board:
-            move(by: -1)
+            moveBoard(.left)
             return true
 
         case kVK_RightArrow where mode == .board:
-            move(by: 1)
+            moveBoard(.right)
             return true
 
         case kVK_DownArrow:
@@ -1831,11 +1920,11 @@ final class AppState: ObservableObject {
             return true
 
         case kVK_ANSI_N where control:
-            move(by: 1)
+            if mode == .board { moveBoard(.right) } else { move(by: 1) }
             return true
 
         case kVK_ANSI_P where control:
-            move(by: -1)
+            if mode == .board { moveBoard(.left) } else { move(by: -1) }
             return true
 
         case kVK_ANSI_1 where command:
@@ -1946,6 +2035,28 @@ final class AppState: ObservableObject {
         selection = ((selection + delta) % count + count) % count
     }
 
+    func moveBoard(_ direction: BoardMoveDirection) {
+        let count = dialect == .prompt ? boardPrompts.count : boardEntries.count
+        guard count > 0 else { selection = 0; return }
+
+        let trimmedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedQuery.isEmpty else {
+            switch direction {
+            case .left: move(by: -1)
+            case .right: move(by: 1)
+            case .up: move(by: -boardColumns)
+            case .down: move(by: boardColumns)
+            }
+            return
+        }
+
+        selection = BoardNavigator.destination(from: selection,
+                                               moving: direction,
+                                               columns: boardColumns,
+                                               itemCount: count,
+                                               matchingIndices: boardMatchingIndices)
+    }
+
     private func switchTo(_ newMode: ViewMode) {
         mode = newMode
         // History is a state of FIND, so leaving FIND leaves it.
@@ -2039,7 +2150,7 @@ final class AppState: ObservableObject {
         case false:
             PasteboardBroker.write(transient: payload, to: pasteboard)
             show(toast: toast)
-            finish()
+            finishAfterCopyFeedback()
 
         case true:
             Diag.log("deliver: pasting \(payload.count) chars, "
@@ -2078,13 +2189,22 @@ final class AppState: ObservableObject {
         }
     }
 
-    private func finish() {
-        if settings.afterAction == .close {
-            dismiss(restoringFocus: true)
+    private func finishAfterCopyFeedback() {
+        guard settings.afterAction == .close else { return }
+        copyFeedbackDismissWorkItem?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.copyFeedbackDismissWorkItem = nil
+            self.dismiss(restoringFocus: true)
         }
+        copyFeedbackDismissWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.copyFeedbackDismissDelay,
+                                      execute: work)
     }
 
     func dismiss(restoringFocus: Bool) {
+        copyFeedbackDismissWorkItem?.cancel()
+        copyFeedbackDismissWorkItem = nil
         onDismiss?()
         if restoringFocus { PreviousApp.restore() }
     }
@@ -2103,7 +2223,7 @@ final class AppState: ObservableObject {
         guard settings.promptFeaturesEnabled else { return }
         let text = AuditPrompt.generate(library: promptCache, ending: ending)
         PasteboardBroker.write(transient: text, to: pasteboard)
-        show(toast: "Audit prompt copied — paste it into ChatGPT/Claude")
+        show(toast: "Audit prompt copied. Paste it into ChatGPT or Claude.")
     }
 
     // MARK: - Composer (PRE-267)
@@ -2211,11 +2331,11 @@ final class AppState: ObservableObject {
         if let clash = store.ranked.first(where: { $0.name == trimmedName && !$0.entry.managed }) {
             let file = (clash.entry.sourceFile as NSString).lastPathComponent
             return ComposerValidation(
-                blocking: "\(trimmedName) already defined at \(file):\(clash.entry.line) — outside the managed block, can't edit it")
+                blocking: "\(trimmedName) is defined outside the managed block at \(file):\(clash.entry.line), so AliasBar can't edit it.")
         }
 
         if store.ranked.contains(where: { $0.name == trimmedName && $0.entry.kind == .function }) {
-            return ComposerValidation(advisory: "A function named \(trimmedName) already exists — the alias would always win.")
+            return ComposerValidation(advisory: "A function named \(trimmedName) already exists. The alias will take priority.")
         }
         if ConflictDetector.isShadowed(trimmedName, searchPaths: searchPaths) {
             return ComposerValidation(advisory: "\(trimmedName) shadows a command on your PATH.")
@@ -2239,7 +2359,7 @@ final class AppState: ObservableObject {
         }
         if BuiltinSlashCommands.collides(name: trimmed) != nil {
             return ComposerValidation(
-                advisory: "Heads up: \(BuiltinSlashCommands.version) already defines /\(trimmed) as a builtin. Installing still works; it just shadows it.")
+                advisory: "\(BuiltinSlashCommands.version) already defines /\(trimmed). Installing this prompt shadows the built-in command.")
         }
         return ComposerValidation()
     }

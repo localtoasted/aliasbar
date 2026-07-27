@@ -228,15 +228,14 @@ struct PromptManageView: View {
     private func deliveryDetail(_ shortcut: Shortcut) -> some View {
         let status = state.promptDeliveryStatus(for: shortcut)
         return VStack(alignment: .leading, spacing: 10) {
-            InfoBanner(text: "Whether a prompt reaches Claude Code is a separate, "
-                       + "explicit step from saving it — nothing here is installed "
-                       + "just by being in your library.")
+            InfoBanner(text: "Saving a prompt does not install it in Claude Code. "
+                       + "Install it here when you want a slash command.")
 
             switch status {
             case .notInstalled:
                 Text(shortcut.uses > 0
-                     ? "used ×\(shortcut.uses) on this Mac but popover-only → install as /\(shortcut.name)?"
-                     : "Not installed as a Claude Code command on this Mac yet.")
+                     ? "Used ×\(shortcut.uses) on this Mac. Install /\(shortcut.name) in Claude Code?"
+                     : "Not installed in Claude Code.")
                     .font(.system(size: 12, design: theme.bodyDesign))
                     .foregroundStyle(theme.dim)
                     .fixedSize(horizontal: false, vertical: true)
@@ -254,7 +253,7 @@ struct PromptManageView: View {
                 }
 
             case .stale:
-                Label("Installed copy is out of date — the prompt changed since",
+                Label("Prompt changed after /\(shortcut.name) was installed",
                       systemImage: "exclamationmark.circle.fill")
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(.orange)
@@ -284,7 +283,7 @@ struct PromptManageView: View {
     @ViewBuilder
     private func collisionAdvisory(for name: String) -> some View {
         if BuiltinSlashCommands.collides(name: name) != nil {
-            Text("Heads up: \(BuiltinSlashCommands.version) already defines /\(name) as a builtin. Installing still works; it just shadows it.")
+            Text("\(BuiltinSlashCommands.version) already defines /\(name). Installing this prompt shadows the built-in command.")
                 .font(.system(size: 10))
                 .foregroundStyle(theme.faint)
                 .fixedSize(horizontal: false, vertical: true)
@@ -464,9 +463,8 @@ struct SuggestedManageView: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .background(theme.surface, in: RoundedRectangle(cornerRadius: theme.cornerRadius + 1))
 
-                    InfoBanner(text: "Mined from your shell history on this Mac. Nothing "
-                               + "here is saved until you say so — Ignore just hides it "
-                               + "again for you, here.")
+                    InfoBanner(text: "AliasBar found this command in your shell history. "
+                               + "Ignore hides the suggestion.")
 
                     HStack(spacing: 6) {
                         actionButton("Create", "plus.circle.fill", prominent: true) {
@@ -480,7 +478,7 @@ struct SuggestedManageView: View {
                         }
                         Spacer(minLength: 0)
                     }
-                    Text("AliasBar fills in the name and command. Save to create it.")
+                    Text("The name and command are ready. Save to create the alias.")
                         .font(.system(size: 10))
                         .foregroundStyle(theme.faint)
 

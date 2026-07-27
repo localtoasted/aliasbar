@@ -43,7 +43,7 @@ enum SnippetTriggerValidation {
             case .containsWhitespaceOrControl:
                 return "A trigger can't contain spaces, tabs, newlines, or control characters."
             case .duplicate(let existing):
-                return "\"\(existing)\" is already a trigger — triggers can't differ only by case."
+                return "\"\(existing)\" is already a trigger. Trigger names can't differ only by case."
             }
         }
     }

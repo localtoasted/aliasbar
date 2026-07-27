@@ -97,29 +97,38 @@ struct ClipboardFindView: View {
 
     private var list: some View {
         let rows = state.clipboardRows
-        return ScrollView {
-            VStack(alignment: .leading, spacing: 3) {
-                if !state.activeQuarantine.isEmpty {
-                    QuarantineSummaryRow(clips: state.activeQuarantine)
-                        .padding(.bottom, 3)
+        return ScrollViewReader { proxy in
+            ScrollView {
+                VStack(alignment: .leading, spacing: 3) {
+                    if !state.activeQuarantine.isEmpty {
+                        QuarantineSummaryRow(clips: state.activeQuarantine)
+                            .padding(.bottom, 3)
+                    }
+                    if state.query.isEmpty {
+                        Text("CLIPBOARD")
+                            .font(.system(size: 9, weight: .bold))
+                            .kerning(0.7)
+                            .foregroundStyle(theme.faint)
+                            .padding(.horizontal, 10)
+                            .padding(.bottom, 2)
+                    }
+                    ForEach(Array(rows.enumerated()), id: \.element.id) { index, clip in
+                        ClipRow(clip: clip, selected: state.selection == index, highlight: highlight)
+                            .id(clip.id)
+                            .onTapGesture { state.selection = index }
+                            .arriving(index)
+                    }
                 }
-                if state.query.isEmpty {
-                    Text("CLIPBOARD")
-                        .font(.system(size: 9, weight: .bold))
-                        .kerning(0.7)
-                        .foregroundStyle(theme.faint)
-                        .padding(.horizontal, 10)
-                        .padding(.bottom, 2)
-                }
-                ForEach(Array(rows.enumerated()), id: \.element.id) { index, clip in
-                    ClipRow(clip: clip, selected: state.selection == index, highlight: highlight)
-                        .onTapGesture { state.selection = index }
-                        .arriving(index)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 9)
+                .animation(motion(Motion.standard), value: state.selection)
+            }
+            .onChange(of: state.selection) { _ in
+                guard let selected = state.selectedClip else { return }
+                withAnimation(.easeOut(duration: 0.12)) {
+                    proxy.scrollTo(selected.id, anchor: .center)
                 }
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 9)
-            .animation(motion(Motion.standard), value: state.selection)
         }
         .frame(maxHeight: .infinity)
     }
@@ -270,6 +279,13 @@ private struct ClipDetailPane: View {
                     state.clipActionSelection = nil
                     state.performClipboardEnter()
                 }
+
+            SelectedActionHints(
+                primaryKeys: "⏎",
+                primaryLabel: state.settings.enterAction.needsAccessibility ? "paste clip" : "copy clip",
+                secondaryKeys: actions.isEmpty ? nil : "⇥",
+                secondaryLabel: actions.isEmpty ? nil : "transforms")
+                .frame(maxWidth: .infinity, alignment: .trailing)
 
             if !actions.isEmpty {
                 VStack(alignment: .leading, spacing: 4) {

@@ -46,7 +46,7 @@ enum PromptCompiler {
             case .hashMismatch(let name, let path):
                 return "\(path) was edited since AliasBar installed it, so \"\(name)\" wasn't touched. Reinstall on purpose if you want AliasBar's version back."
             case .notInstalled(let name):
-                return "\"\(name)\" isn't in AliasBar's registry, so there's nothing to uninstall."
+                return "AliasBar's registry does not contain \"\(name)\"."
             case .registryPathEscape(let name, let path):
                 return "The registry entry for \"\(name)\" points at \(path), which is not where AliasBar installs commands. Nothing was touched."
             case .registryCorrupt(let path):

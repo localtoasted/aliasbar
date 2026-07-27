@@ -62,27 +62,23 @@ enum AuditPrompt {
     }
 
     private static let instructions = """
-    ## Your task
+    ## Task
 
-    Review the library above against how these prompts are actually used, and propose \
-    changes. Follow these rules exactly:
+    Review the library above and propose useful changes. Follow these rules:
 
-    1. Never re-suggest a prompt that already exists in the library above — matching by \
-    name or by near-identical purpose — even under a slightly different name.
-    2. If a prompt's usage has drifted from what it currently says, propose an update: \
-    the item must carry both the existing prompt's name (as "replaces") and the full new \
-    body, so the change is reviewable rather than a bare replacement.
-    3. If two or more existing prompts are near-duplicates of each other, propose merging \
-    them into one survivor rather than leaving both in place.
-    4. Output STRICT JSON matching this schema, and nothing else besides what the output \
-    instructions below ask for — no prose outside the required output, no markdown fences \
-    unless the ending below specifically asks for one:
+    1. Never re-suggest a prompt that already exists. Match by name and purpose, including \
+    prompts with different names but the same job.
+    2. If a prompt no longer fits how it is used, propose an update. Include the existing \
+    name in "replaces" and provide the full new body.
+    3. If existing prompts overlap, merge them into one prompt.
+    4. Return strict JSON that matches this schema. Include no prose or markdown unless \
+    the output instructions request a code block.
 
     {
       "items": [
         {
           "type": "new" | "update" | "merge",
-          "name": "the prompt's name — letters, digits, - and _ only",
+          "name": "the prompt's name; letters, digits, hyphens, and underscores only",
           "description": "optional one-line description",
           "body": "the full prompt body",
           "replaces": "for type=update only: the existing prompt name this replaces",
@@ -91,9 +87,8 @@ enum AuditPrompt {
       ]
     }
 
-    Every item you propose is reviewed and decided on individually by a human before \
-    anything is written to the real library — nothing you produce here is applied \
-    automatically, and no batch of items is accepted or rejected as a group.
+    A person reviews each item before AliasBar changes the library. AliasBar does not \
+    apply the whole list at once.
     """
 
     private static func endingText(_ ending: Ending) -> String {

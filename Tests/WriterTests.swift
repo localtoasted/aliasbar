@@ -2463,7 +2463,7 @@ for stateName in [
     "\"Stop recording keyboard shortcut\"",
     "\"Change keyboard shortcut, currently \\(settings.hotkey.displayString)\"",
     "\"Show the macOS Accessibility permission prompt again\"",
-    "\"Allow typing by showing the macOS Accessibility permission prompt\"",
+    "\"Allow pasting by showing the macOS Accessibility permission prompt\"",
     "\"Hide appearance controls\"",
     "\"Customise appearance\"",
 ] {
@@ -4775,7 +4775,7 @@ for (bundleID, name) in dialectBrowserBundleIDs {
     check("browser \(name) guesses no dialect (a tab could be either kind of work)",
           guess.dialect == nil)
     check("browser \(name) chip names it and points at ⇥",
-          guess.chip == "\(name) — can't see the tab · ⇥ flips")
+          guess.chip == "\(name) · tab hidden · ⇥ switches")
 }
 
 check("an unrecognized bundle ID guesses nothing",
@@ -5991,6 +5991,28 @@ check("the prompt deck fits no more columns than the keycap deck at the same den
 check("PromptCardMetrics is in fact wider than a keycap at both densities",
       PromptCardMetrics.width(for: .comfortable) > BoardDensity.comfortable.keyWidth
           && PromptCardMetrics.width(for: .dense) > BoardDensity.dense.keyWidth)
+
+// --- Search-aware grid movement: every direction skips dimmed cards ----------
+
+let litBoardIndices = [1, 4, 8]
+check("BOARD search moves right to the next lit card",
+      BoardNavigator.destination(from: 1, moving: .right, columns: 3,
+                                 itemCount: 10, matchingIndices: litBoardIndices) == 4)
+check("BOARD search moves left to the previous lit card",
+      BoardNavigator.destination(from: 4, moving: .left, columns: 3,
+                                 itemCount: 10, matchingIndices: litBoardIndices) == 1)
+check("BOARD search moves down to the nearest lit card in a later row",
+      BoardNavigator.destination(from: 1, moving: .down, columns: 3,
+                                 itemCount: 10, matchingIndices: litBoardIndices) == 4)
+check("BOARD search moves up to the nearest lit card in an earlier row",
+      BoardNavigator.destination(from: 1, moving: .up, columns: 3,
+                                 itemCount: 10, matchingIndices: litBoardIndices) == 8)
+check("BOARD search wraps horizontal movement among lit cards only",
+      BoardNavigator.destination(from: 8, moving: .right, columns: 3,
+                                 itemCount: 10, matchingIndices: litBoardIndices) == 1)
+check("BOARD search leaves a sole lit card selected in every direction",
+      BoardNavigator.destination(from: 7, moving: .down, columns: 3,
+                                 itemCount: 10, matchingIndices: [4]) == 4)
 print("\n38. AuditPrompt: ⌘I audit prompt generator (PRE-265)")
 
 let emptyLibraryPrompt = AuditPrompt.generate(library: [], ending: .localAgent)
@@ -6025,9 +6047,9 @@ check("instructions tell the agent never to re-suggest what exists",
 check("instructions mention proposing updates when usage drifted",
       libraryPrompt.contains("propose an update"))
 check("instructions mention merging near-duplicates",
-      libraryPrompt.lowercased().contains("merging"))
+      libraryPrompt.lowercased().contains("merge them"))
 check("instructions make clear nothing is applied automatically",
-      libraryPrompt.contains("nothing you produce here is applied automatically"))
+      libraryPrompt.contains("does not apply the whole list at once"))
 
 check("localAgent ending tells the agent to write into the inbox directory",
       AuditPrompt.generate(library: [], ending: .localAgent).contains("~/.aliasbar/inbox/"))
@@ -6676,7 +6698,10 @@ do {
     state.performFind(copyOnly, secondary: false)
     check("copy-mode delivers the exact body to the broker",
           fake.string(forType: .string) == "Copy-only body, no slots here.")
-    check("copy-mode honors afterAction == .close",  dismissed)
+    check("copy feedback appears before a Close-after-copy dismissal",
+          state.toast == "Copied copyonlyprompt" && !dismissed)
+    RunLoop.current.run(until: Date().addingTimeInterval(AppState.copyFeedbackDismissDelay + 0.08))
+    check("copy-mode honors afterAction == .close after feedback is visible", dismissed)
     check("copying a prompt records a use", usageCount("copyonlyprompt") == before + 1)
 }
 
@@ -7499,7 +7524,7 @@ do {
 
     let outsideBlock = state.composerAliasValidation(name: "gs", command: "git status", originalName: "")
     check("a name already defined outside the managed block is blocking, in the packet's terse phrasing",
-          outsideBlock.blocking == "gs already defined at zshrc:1 — outside the managed block, can't edit it",
+          outsideBlock.blocking == "gs is defined outside the managed block at zshrc:1, so AliasBar can't edit it.",
           outsideBlock.blocking ?? "nil")
 
     // `myfunc` sits *inside* the managed block in this fixture (managed: true), so
@@ -8094,7 +8119,7 @@ do {
     check("the web ending asks for a single JSON code block",
           copiedWeb?.contains("one JSON code block") == true)
     check("⌘I shows the paste-into-chat toast",
-          state.toast == "Audit prompt copied — paste it into ChatGPT/Claude")
+          state.toast == "Audit prompt copied. Paste it into ChatGPT or Claude.")
 
     state.copyAuditPrompt(ending: .localAgent)
     let copiedLocal = fake.string(forType: .string)
@@ -9090,6 +9115,51 @@ do {
         check("flagged-edit fixture produced an inbox row", false)
     }
 }
+
+// ---------------------------------------------------------------------------
+print("\n44. Interaction feedback, contextual hints, and Find scrolling")
+
+let interactionViewsSource = read(projectRoot.appendingPathComponent("Sources/Views.swift").path)
+let clipboardFindSource = read(projectRoot.appendingPathComponent("Sources/ClipboardFindView.swift").path)
+check("interaction view sources are readable",
+      interactionViewsSource != "<unreadable>" && clipboardFindSource != "<unreadable>")
+check("history rows own scroll targets",
+      interactionViewsSource.contains(".id(command.id)")
+          && interactionViewsSource.contains("guard let selected = state.selectedHistory"))
+check("alias and prompt rows share selection-following scroll targets",
+      interactionViewsSource.contains(".id(shortcut.id)")
+          && interactionViewsSource.contains("guard let selected = state.selectedShortcut"))
+check("clipboard rows own selection-following scroll targets",
+      clipboardFindSource.contains(".id(clip.id)")
+          && clipboardFindSource.contains("guard let selected = state.selectedClip"))
+check("the all-purpose footer is gone",
+      !interactionViewsSource.contains("private var footer"))
+check("shortcuts live with selected actions",
+      interactionViewsSource.contains("struct SelectedActionHints")
+          && interactionViewsSource.contains("primaryKeys: \"⏎\""))
+check("copy feedback has a visible success icon and an accessibility label",
+      interactionViewsSource.contains("checkmark.circle.fill")
+          && interactionViewsSource.contains(".accessibilityLabel(\"Status: ")
+          && interactionViewsSource.contains(".accessibilityFocused($statusFocused)"))
+
+let sourceDirectory = projectRoot.appendingPathComponent("Sources")
+let sourceEnumerator = FileManager.default.enumerator(at: sourceDirectory,
+                                                       includingPropertiesForKeys: nil)
+var nonCommentDashLines: [String] = []
+while let url = sourceEnumerator?.nextObject() as? URL {
+    guard url.pathExtension == "swift" else { continue }
+    let source = read(url.path)
+    for (lineNumber, line) in source.components(separatedBy: .newlines).enumerated() {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.hasPrefix("//") else { continue }
+        if line.contains("—") || line.contains("–") {
+            nonCommentDashLines.append("\(url.lastPathComponent):\(lineNumber + 1)")
+        }
+    }
+}
+check("user-facing Swift text contains no em or en dashes",
+      nonCommentDashLines.isEmpty,
+      nonCommentDashLines.joined(separator: ", "))
 
 // ---------------------------------------------------------------------------
 print("\n" + String(repeating: "-", count: 60))

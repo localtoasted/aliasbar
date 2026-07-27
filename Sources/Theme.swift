@@ -108,8 +108,8 @@ enum WindowLayout {
     /// changed the window's height by a point when you switched typeface would be exactly
     /// the thing this was supposed to stop.
     static let headerHeight: CGFloat = 93
-    /// The area between the header rule and the footer rule. Header and footer are fixed
-    /// by their own content, so fixing this fixes the window.
+    /// The fixed area below the header. Every view scrolls inside this height, so search
+    /// results and view changes never resize the window.
     /// Sized so the whole window still clears the Dock at the 20%-from-top position on a
     /// 1280 × 800 display, the smallest ground worth designing for.
     static let bodyHeight: CGFloat = 420

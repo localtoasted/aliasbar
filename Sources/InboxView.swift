@@ -251,7 +251,7 @@ private struct ItemDetail: View {
         VStack(alignment: .leading, spacing: 8) {
             descriptionLine
             HStack(alignment: .top, spacing: 8) {
-                diffColumn(title: "CURRENT", text: state.inboxUpdateOldBody(for: item) ?? "(not found — may have been renamed or removed)")
+                diffColumn(title: "CURRENT", text: state.inboxUpdateOldBody(for: item) ?? "(not found; renamed or removed)")
                 diffColumn(title: "PROPOSED", text: item.body, highlighted: true)
             }
         }

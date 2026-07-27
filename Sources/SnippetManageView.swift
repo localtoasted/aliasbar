@@ -128,9 +128,8 @@ struct SnippetManageView: View {
                     metaRow("Holes", holesSummary(snippet.template))
                     metaRow("Edited", Self.editedDateFormatter.string(from: snippet.modifiedAt))
 
-                    InfoBanner(text: "Only expands while inline expansion is on in Settings "
-                               + "→ Expansion, and never inside a password or other secure "
-                               + "field — that's excluded automatically, always.")
+                    InfoBanner(text: "Turn on inline expansion in Settings > Expansion. "
+                               + "AliasBar skips password and secure fields.")
 
                     actionButton("Delete", "trash", prominent: false) {
                         state.deleteSnippet(snippet)

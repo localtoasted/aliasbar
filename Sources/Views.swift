@@ -6,19 +6,12 @@ struct RootView: View {
     @ObservedObject var state: AppState
     @ObservedObject var settings: AppSettings
     @FocusState private var searchFocused: Bool
+    @AccessibilityFocusState private var statusFocused: Bool
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     /// Drives the window's entrance. Deliberately not gating anything: focus and key
     /// handling do not wait on it, so ⌥⌘A then `gs⏎` lands the paste with the window
     /// still growing.
     @State private var arrived = false
-    /// Whether the footer's keyboard hints are showing. They hide the instant a key goes
-    /// down and return after a beat of stillness — present when someone is wondering
-    /// what to press, invisible while they already know.
-    @State private var hintsShown = false
-    /// Invalidates any reveal already scheduled. A counter instead of a cancellable
-    /// because the codebase schedules with `asyncAfter`, and a stale closure comparing
-    /// generations is simpler than a task handle it would only ever cancel.
-    @State private var hintGeneration = 0
 
     private var motion: MotionPlan {
         MotionPlan.resolve(settings.motionLevel, reduceMotion: reduceMotion)
@@ -53,9 +46,6 @@ struct RootView: View {
             // no view can move the window by having more or less to show.
             .frame(height: WindowLayout.bodyHeight)
             .frame(maxWidth: .infinity)
-
-            Rectangle().fill(theme.rule.opacity(0.6)).frame(height: 1)
-            footer
         }
         .frame(width: WindowLayout.windowWidth)
         // Tells AppKit which way round this window is, which decides everything we do not
@@ -71,7 +61,7 @@ struct RootView: View {
         .environment(\.motion, motion)
         .overlay(alignment: .top) { topHighlight }
         .environment(\.theme, theme)
-        .overlay(alignment: .bottom) { toast }
+        .overlay(alignment: .bottom) { statusOverlay }
         .sheet(item: $state.editor) { _ in
             ComposerSheet(state: state).environment(\.theme, theme)
         }
@@ -107,34 +97,6 @@ struct RootView: View {
             DispatchQueue.main.async { searchFocused = true }
             arrived = false
             enter()
-            restartHintClock(hideFirst: false)
-        }
-        .onAppear { restartHintClock(hideFirst: false) }
-        .onChange(of: state.keystrokeCount) { _ in restartHintClock(hideFirst: true) }
-    }
-
-    /// Hides the hints (when asked) and books their return after 600ms of stillness.
-    ///
-    /// Hiding is immediate and fast — a hint still fading while its reader is already
-    /// typing is noise. The return uses the entrance curve for the same reason rows do:
-    /// nothing is waiting on it.
-    private func restartHintClock(hideFirst: Bool) {
-        if hideFirst && hintsShown {
-            if let animation = motion(Motion.hover) {
-                withAnimation(animation) { hintsShown = false }
-            } else {
-                hintsShown = false
-            }
-        }
-        hintGeneration += 1
-        let generation = hintGeneration
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
-            guard generation == hintGeneration, !hintsShown else { return }
-            if let animation = motion(Motion.entrance) {
-                withAnimation(animation) { hintsShown = true }
-            } else {
-                hintsShown = true
-            }
         }
     }
 
@@ -269,6 +231,15 @@ struct RootView: View {
                     .frame(maxWidth: 190, alignment: .trailing)
                     .layoutPriority(-1)
                     .help(ZshrcParser.path)
+
+                Button { state.onOpenSettings?() } label: {
+                    Image(systemName: "gearshape.fill")
+                        .font(.system(size: 11, weight: .semibold))
+                }
+                .liveButton()
+                .foregroundStyle(theme.dim)
+                .accessibilityLabel("Open settings")
+                .help("Settings. Press ⌘,.")
             }
 
             HStack(spacing: 7) {
@@ -280,9 +251,9 @@ struct RootView: View {
                     .font(.system(size: 15.5, design: theme.bodyDesign))
                     .foregroundStyle(theme.text)
                     .focused($searchFocused)
-                    .onChange(of: state.query) { _ in state.selection = 0 }
+                    .onChange(of: state.query) { _ in state.resetSelectionForQuery() }
                 if !state.query.isEmpty {
-                    Text("\(state.navigableCount)")
+                    Text("\(state.searchMatchCount)")
                         .font(.system(size: 10, weight: .semibold, design: .monospaced))
                         .foregroundStyle(theme.faint)
                 }
@@ -335,107 +306,46 @@ struct RootView: View {
             .help("\(mode.label). Press ⌘\(mode == .find ? "1" : mode == .board ? "2" : "3").")
     }
 
-    // MARK: Footer
-
-    private var footer: some View {
-        HStack(spacing: 10) {
-            if let error = state.errorMessage {
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(.orange)
-                // One line, not two. An error arriving must not make the footer taller,
-                // because the footer's height is part of the window's.
-                Text(error)
-                    .font(.system(size: 10))
-                    .foregroundStyle(theme.dim)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                    .help(error)
-            } else {
-                // Idle-revealed: opacity, not presence. The hints keep their layout
-                // whether or not they are visible, because the footer's height and the
-                // gear's position must not move with the user's typing rhythm.
-                Group {
-                    if state.historyMode {
-                        KeyHint(keys: "⏎", label: "run it")
-                        KeyHint(keys: "⌘⏎", label: "make an alias")
-                        KeyHint(keys: "⌘H", label: "back")
-                    } else if state.findSource == .clipboard {
-                        // Checked ahead of the dialect branch below: the clipboard
-                        // source has no dialect of its own (⇥ there cycles transforms,
-                        // not shell/prompt), so its hints always win regardless of
-                        // whatever `state.dialect` still says from before ⌘K was hit.
-                        KeyHint(keys: "⏎", label: "copy")
-                        KeyHint(keys: "⇥", label: "cycle transforms")
-                        KeyHint(keys: "⌘K", label: "back")
-                    } else if state.dialect == .prompt {
-                        // PRE-260's paste/copy-raw/fill-in flows replaced PRE-259's
-                        // interim copy-only Enter, but the footer never caught up —
-                        // this is that catch-up. `enterAction`'s copy/paste split is a
-                        // shell-only preference (it governs typing vs. copying a name
-                        // or command into the app behind), so it has nothing to say
-                        // about a prompt paste and is left out entirely rather than
-                        // shown and ignored.
-                        KeyHint(keys: "⏎", label: "paste prompt")
-                        KeyHint(keys: "⌘⏎", label: "copy raw")
-                        KeyHint(keys: "⇥", label: "shell")
-                        KeyHint(keys: "⌘↑↓", label: "buckets")
-                        KeyHint(keys: "⌘N", label: "new")
-                        KeyHint(keys: "⌘H", label: "history")
-                        KeyHint(keys: "⌘K", label: "clipboard")
-                    } else {
-                        KeyHint(keys: "⏎", label: settings.enterAction.short)
-                        KeyHint(keys: "⌘⏎", label: settings.enterAction.secondary.short)
-                        // The new movement keys earn their place here over ⌘N: a
-                        // shortcut nobody can discover is one nobody uses, and ⌘N is
-                        // already on the sidebar button in MANAGE.
-                        KeyHint(keys: "⌥←→", label: "views")
-                        KeyHint(keys: "⌘↑↓", label: "buckets")
-                        // ⇥'s dialect flip only ever goes somewhere while the prompt
-                        // side of the app is switched on (`flipDialect` no-ops
-                        // otherwise, per `promptFeaturesEnabled`) — advertising it
-                        // when it wouldn't do anything would be worse than silence.
-                        if settings.promptFeaturesEnabled {
-                            KeyHint(keys: "⇥", label: "prompts")
-                        }
-                        KeyHint(keys: "⌘N", label: "new")
-                        KeyHint(keys: "⌘H", label: "history")
-                        KeyHint(keys: "⌘K", label: "clipboard")
-                    }
-                }
-                .opacity(hintsShown ? 1 : 0)
-                .accessibilityHidden(!hintsShown)
-            }
-
-            Spacer()
-
-            Text("\(state.store.functions.count)ƒ \(state.store.aliases.count)@")
-                .font(.system(size: 10, weight: .medium, design: .monospaced))
-                .foregroundStyle(theme.faint)
-
-            Button { state.onOpenSettings?() } label: {
-                Image(systemName: "gearshape.fill").font(.system(size: 10.5, weight: .semibold))
-            }
-            .liveButton()
-            .foregroundStyle(theme.dim)
-            .help("Settings. Press ⌘,.")
-        }
-        .frame(height: 16)
-        .padding(.horizontal, 12)
-        .padding(.vertical, 7)
-    }
-
     @ViewBuilder
-    private var toast: some View {
-        if let message = state.toast {
-            Text(message)
-                .font(.system(size: 11, weight: .medium, design: theme.bodyDesign))
-                .foregroundStyle(theme.onAccent)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 7)
-                .background(theme.accent, in: Capsule())
-                .padding(.bottom, 44)
-                .transition(.opacity.combined(with: .offset(y: 6)))
+    private var statusOverlay: some View {
+        if let error = state.errorMessage {
+            HStack(spacing: 6) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                Text(error).lineLimit(2)
+            }
+            .font(.system(size: 11, weight: .medium, design: theme.bodyDesign))
+            .foregroundStyle(theme.text)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(theme.surface, in: RoundedRectangle(cornerRadius: theme.cornerRadius + 2))
+            .overlay(RoundedRectangle(cornerRadius: theme.cornerRadius + 2)
+                .strokeBorder(Color.orange.opacity(0.65), lineWidth: 1))
+            .padding(.horizontal, 12)
+            .padding(.bottom, 10)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Error: \(error)")
+            .accessibilityFocused($statusFocused)
+            .onAppear { statusFocused = true }
+            .transition(.opacity.combined(with: .offset(y: 6)))
+        } else if let message = state.toast {
+            HStack(spacing: 6) {
+                Image(systemName: message.hasPrefix("Copied")
+                      ? "checkmark.circle.fill"
+                      : "info.circle.fill")
+                Text(message)
+            }
+            .font(.system(size: 11.5, weight: .semibold, design: theme.bodyDesign))
+            .foregroundStyle(theme.onAccent)
+            .padding(.horizontal, 13)
+            .padding(.vertical, 8)
+            .background(theme.accent, in: Capsule())
+            .padding(.bottom, 10)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Status: \(message)")
+            .accessibilityAddTraits(.isStaticText)
+            .accessibilityFocused($statusFocused)
+            .onAppear { statusFocused = true }
+            .transition(.opacity.combined(with: .offset(y: 6)))
         }
     }
 }
@@ -461,6 +371,29 @@ struct KeyHint: View {
                 .font(.system(size: 10.5))
                 .foregroundStyle(theme.faint)
         }
+    }
+}
+
+/// The actions that apply to the current row or card. Keeping this beside the
+/// selection makes the shortcuts discoverable without a window-wide command strip.
+struct SelectedActionHints: View {
+    @Environment(\.theme) private var theme
+    let primaryKeys: String
+    let primaryLabel: String
+    var secondaryKeys: String?
+    var secondaryLabel: String?
+
+    var body: some View {
+        HStack(spacing: 8) {
+            KeyHint(keys: primaryKeys, label: primaryLabel)
+            if let secondaryKeys, let secondaryLabel {
+                KeyHint(keys: secondaryKeys, label: secondaryLabel)
+            }
+        }
+        .padding(.horizontal, 6)
+        .padding(.vertical, 3)
+        .background(theme.background.opacity(0.9), in: Capsule())
+        .accessibilityElement(children: .combine)
     }
 }
 
@@ -712,27 +645,36 @@ struct FindView: View {
                                    : "No history matches \"\(state.query)\"",
                                hint: "Press ⌘H to return.")
             } else {
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text("WHAT YOU HAVE RUN")
-                            .font(.system(size: 9, weight: .bold))
-                            .kerning(0.7)
-                            .foregroundStyle(theme.faint)
-                            .padding(.horizontal, 10)
-                            .padding(.bottom, 2)
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("WHAT YOU HAVE RUN")
+                                .font(.system(size: 9, weight: .bold))
+                                .kerning(0.7)
+                                .foregroundStyle(theme.faint)
+                                .padding(.horizontal, 10)
+                                .padding(.bottom, 2)
 
-                        ForEach(Array(commands.enumerated()), id: \.element.id) { index, command in
-                            HistoryRow(command: command,
-                                       selected: state.selection == index,
-                                       suggestion: state.suggestedName(for: command.text),
-                                       highlight: highlight)
-                                .onTapGesture { state.selection = index; state.run(command) }
-                                .arriving(index)
+                            ForEach(Array(commands.enumerated()), id: \.element.id) { index, command in
+                                HistoryRow(command: command,
+                                           selected: state.selection == index,
+                                           suggestion: state.suggestedName(for: command.text),
+                                           highlight: highlight)
+                                    .id(command.id)
+                                    .onTapGesture { state.selection = index; state.run(command) }
+                                    .arriving(index)
+                            }
+                        }
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 9)
+                        .animation(motion(Motion.standard), value: state.selection)
+                    }
+                    .onChange(of: state.selection) { _ in
+                        guard let selected = state.selectedHistory else { return }
+                        withAnimation(.easeOut(duration: 0.12)) {
+                            proxy.scrollTo(selected.id, anchor: .center)
                         }
                     }
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 9)
-                    .animation(motion(Motion.standard), value: state.selection)
                 }
                 .frame(maxHeight: .infinity)
             }
@@ -789,54 +731,75 @@ struct FindView: View {
     /// pane (prompt dialect, `PromptFindPreviewLayout` in PromptFindView.swift).
     private var resultsList: some View {
         let results = state.findResults
-        return ScrollView {
-            VStack(alignment: .leading, spacing: 5) {
-                // At rest there is no answer yet, so nothing gets the primary
-                // treatment. Promoting an arbitrary entry into a big card would
-                // be the interface asserting something it does not know.
-                if state.query.isEmpty {
-                    Text(restLabel)
-                        .font(.system(size: 9, weight: .bold))
-                        .kerning(0.7)
-                        .foregroundStyle(theme.faint)
-                        .padding(.horizontal, 10)
-                        .padding(.bottom, 2)
-                }
-
-                ForEach(Array(results.enumerated()), id: \.element.id) { index, shortcut in
-                    Group {
-                        // Prompts keep the plain PromptRow shape regardless of
-                        // dialect — the preview pane is what changes with dialect,
-                        // not this row.
-                        if shortcut.kind == .prompt {
-                            PromptRow(shortcut: shortcut,
-                                      selected: state.selection == index,
-                                      highlight: highlight)
-                                .onTapGesture { state.selection = index; activate(shortcut) }
-                        } else if index == 0 && !state.query.isEmpty {
-                            PrimaryResult(entry: rankedEntry(for: shortcut),
-                                          selected: state.selection == 0,
-                                          conflicts: state.store.conflicts(for: shortcut.name),
-                                          highlight: highlight)
-                                .onTapGesture { state.selection = 0; activate(shortcut) }
-                        } else {
-                            AlternateRow(entry: rankedEntry(for: shortcut),
-                                         selected: state.selection == index,
-                                         highlight: highlight)
-                                .onTapGesture { state.selection = index; activate(shortcut) }
-                        }
+        return ScrollViewReader { proxy in
+            ScrollView {
+                VStack(alignment: .leading, spacing: 5) {
+                    // At rest there is no answer yet, so nothing gets the primary
+                    // treatment. Promoting an arbitrary entry into a big card would
+                    // be the interface asserting something it does not know.
+                    if state.query.isEmpty {
+                        Text(restLabel)
+                            .font(.system(size: 9, weight: .bold))
+                            .kerning(0.7)
+                            .foregroundStyle(theme.faint)
+                            .padding(.horizontal, 10)
+                            .padding(.bottom, 2)
                     }
-                    .arriving(index)
+
+                    ForEach(Array(results.enumerated()), id: \.element.id) { index, shortcut in
+                        Group {
+                            // Prompts keep the plain PromptRow shape regardless of
+                            // dialect. The preview pane carries the extra detail.
+                            if shortcut.kind == .prompt {
+                                PromptRow(shortcut: shortcut,
+                                          selected: state.selection == index,
+                                          showsActions: state.dialect != .prompt,
+                                          primaryAction: promptPrimaryAction,
+                                          secondaryAction: "copy raw",
+                                          highlight: highlight)
+                                    .onTapGesture { state.selection = index; activate(shortcut) }
+                            } else if index == 0 && !state.query.isEmpty {
+                                PrimaryResult(entry: rankedEntry(for: shortcut),
+                                              selected: state.selection == 0,
+                                              conflicts: state.store.conflicts(for: shortcut.name),
+                                              showsActions: state.dialect != .prompt,
+                                              primaryAction: settings.enterAction.short,
+                                              secondaryAction: settings.enterAction.secondary.short,
+                                              highlight: highlight)
+                                    .onTapGesture { state.selection = 0; activate(shortcut) }
+                            } else {
+                                AlternateRow(entry: rankedEntry(for: shortcut),
+                                             selected: state.selection == index,
+                                             showsActions: state.dialect != .prompt,
+                                             primaryAction: settings.enterAction.short,
+                                             secondaryAction: settings.enterAction.secondary.short,
+                                             highlight: highlight)
+                                    .onTapGesture { state.selection = index; activate(shortcut) }
+                            }
+                        }
+                        .id(shortcut.id)
+                        .arriving(index)
+                    }
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 9)
+                // The capsule below only travels if the selection change is animated.
+                // Animating the container rather than each caller means every route
+                // into the selection moves it the same way.
+                .animation(motion(Motion.standard), value: state.selection)
+            }
+            .onChange(of: state.selection) { _ in
+                guard let selected = state.selectedShortcut else { return }
+                withAnimation(.easeOut(duration: 0.12)) {
+                    proxy.scrollTo(selected.id, anchor: .center)
                 }
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 9)
-            // The capsule below only travels if the selection change is animated.
-            // Animating the container rather than each caller means every route
-            // into the selection — arrows, typing, a click — moves it the same way.
-            .animation(motion(Motion.standard), value: state.selection)
         }
         .frame(maxHeight: .infinity)
+    }
+
+    private var promptPrimaryAction: String {
+        settings.enterAction.needsAccessibility ? "paste prompt" : "copy prompt"
     }
 
     /// Names the rest state honestly. With no shell history to rank by, calling the list
@@ -864,6 +827,9 @@ private struct PrimaryResult: View {
     let entry: RankedEntry
     let selected: Bool
     let conflicts: [Conflict]
+    let showsActions: Bool
+    let primaryAction: String
+    let secondaryAction: String
     let highlight: Namespace.ID
 
     var body: some View {
@@ -880,6 +846,10 @@ private struct PrimaryResult: View {
                         .help(conflicts.map(\.reason.headline).joined(separator: " · "))
                 }
                 Spacer(minLength: 4)
+                if selected && showsActions {
+                    SelectedActionHints(primaryKeys: "⏎", primaryLabel: primaryAction,
+                                        secondaryKeys: "⌘⏎", secondaryLabel: secondaryAction)
+                }
                 if entry.uses > 0 {
                     Text("\(entry.uses)×")
                         .font(.system(size: 10, weight: .semibold, design: .monospaced))
@@ -949,14 +919,10 @@ private struct HistoryRow: View {
                             .frame(width: 24)
                     }
                 )
-            if selected && !suggestion.isEmpty {
-                Text("⌘↩ \(suggestion)")
-                    .font(.system(size: 10, weight: .medium, design: .monospaced))
-                    .foregroundStyle(theme.accent)
-                    .padding(.horizontal, 5)
-                    .padding(.vertical, 2)
-                    .background(theme.accent.opacity(0.14),
-                                in: RoundedRectangle(cornerRadius: theme.cornerRadius))
+            if selected {
+                SelectedActionHints(primaryKeys: "⏎", primaryLabel: "run",
+                                    secondaryKeys: suggestion.isEmpty ? nil : "⌘⏎",
+                                    secondaryLabel: suggestion.isEmpty ? nil : "alias \(suggestion)")
             }
             Text("\(command.count)×")
                 .font(.system(size: 9.5, design: .monospaced))
@@ -1001,6 +967,9 @@ private struct AlternateRow: View {
     @Environment(\.theme) private var theme
     let entry: RankedEntry
     let selected: Bool
+    let showsActions: Bool
+    let primaryAction: String
+    let secondaryAction: String
     let highlight: Namespace.ID
 
     var body: some View {
@@ -1031,6 +1000,10 @@ private struct AlternateRow: View {
                             .frame(width: 24)
                     }
                 )
+            if selected && showsActions {
+                SelectedActionHints(primaryKeys: "⏎", primaryLabel: primaryAction,
+                                    secondaryKeys: "⌘⏎", secondaryLabel: secondaryAction)
+            }
             if entry.uses > 0 {
                 Text("\(entry.uses)×")
                     .font(.system(size: 9.5, design: .monospaced))
@@ -1065,6 +1038,9 @@ private struct PromptRow: View {
     @Environment(\.theme) private var theme
     let shortcut: Shortcut
     let selected: Bool
+    let showsActions: Bool
+    let primaryAction: String
+    let secondaryAction: String
     let highlight: Namespace.ID
 
     var body: some View {
@@ -1091,6 +1067,10 @@ private struct PromptRow: View {
                             .frame(width: 24)
                     }
                 )
+            if selected && showsActions {
+                SelectedActionHints(primaryKeys: "⏎", primaryLabel: primaryAction,
+                                    secondaryKeys: "⌘⏎", secondaryLabel: secondaryAction)
+            }
             if shortcut.uses > 0 {
                 Text("\(shortcut.uses)×")
                     .font(.system(size: 9.5, design: .monospaced))
@@ -1179,8 +1159,8 @@ struct BoardView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }
 
-    /// Fixed-height footer. The focused key's details go here rather than inline so
-    /// nothing in the grid moves as the selection travels.
+    /// Fixed-height action readout. The focused key's details and shortcuts live here,
+    /// so nothing in the grid moves as the selection travels.
     private var readout: some View {
         VStack(alignment: .leading, spacing: 3) {
             if let entry = state.selectedEntry {
@@ -1201,6 +1181,10 @@ struct BoardView: View {
                             .font(.system(size: 9.5, design: .monospaced))
                             .foregroundStyle(theme.faint)
                     }
+                    SelectedActionHints(primaryKeys: "⏎",
+                                        primaryLabel: settings.enterAction.short,
+                                        secondaryKeys: settings.promptFeaturesEnabled ? "⇥" : nil,
+                                        secondaryLabel: settings.promptFeaturesEnabled ? "prompts" : nil)
                 }
                 CommandText(command: entry.entry.command, lineLimit: 1, size: 11)
             } else {

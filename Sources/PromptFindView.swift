@@ -52,9 +52,9 @@ private struct PromptDetailPane: View {
                 if let shortcut = state.selectedShortcut {
                     switch shortcut.kind {
                     case .prompt:
-                        PromptPreview(shortcut: shortcut)
+                        PromptPreview(state: state, shortcut: shortcut)
                     case .alias, .function:
-                        ShellMinimalPreview(shortcut: shortcut)
+                        ShellMinimalPreview(state: state, shortcut: shortcut)
                     }
                 } else {
                     EmptyStateView(symbol: "text.book.closed",
@@ -72,6 +72,7 @@ private struct PromptDetailPane: View {
 /// two chips underneath — whether it is live as a Claude Code slash command on this
 /// Mac, and how often it has actually been used here.
 private struct PromptPreview: View {
+    @ObservedObject var state: AppState
     @Environment(\.theme) private var theme
     let shortcut: Shortcut
 
@@ -112,6 +113,15 @@ private struct PromptPreview: View {
                 chip(usageText, symbol: "clock.arrow.circlepath")
                 Spacer(minLength: 0)
             }
+
+            SelectedActionHints(
+                primaryKeys: "⏎",
+                primaryLabel: state.settings.enterAction.needsAccessibility
+                    ? "paste prompt"
+                    : "copy prompt",
+                secondaryKeys: "⌘⏎",
+                secondaryLabel: "copy raw")
+                .frame(maxWidth: .infinity, alignment: .trailing)
         }
     }
 
@@ -165,6 +175,7 @@ private struct PromptPreview: View {
 /// leave the right side blank, not to rebuild shell's own presentation. That stays
 /// `PrimaryResult`/`AlternateRow`'s job.
 private struct ShellMinimalPreview: View {
+    @ObservedObject var state: AppState
     @Environment(\.theme) private var theme
     let shortcut: Shortcut
 
@@ -188,6 +199,13 @@ private struct ShellMinimalPreview: View {
                     .font(.system(size: 10, design: .monospaced))
                     .foregroundStyle(theme.faint)
             }
+
+            SelectedActionHints(
+                primaryKeys: "⏎",
+                primaryLabel: state.settings.enterAction.short,
+                secondaryKeys: "⌘⏎",
+                secondaryLabel: state.settings.enterAction.secondary.short)
+                .frame(maxWidth: .infinity, alignment: .trailing)
         }
     }
 }
