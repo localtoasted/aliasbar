@@ -141,13 +141,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                 await self.openOnboarding()
             }
 
-            if statusItemReady {
-                await self.reportPlacement()
-            } else {
-                // The rescue writes persistent preferred positions, so a false
-                // measurement is worse than a deferred diagnostic.
-                Diag.log("placement check skipped because status item is not ready")
-            }
+            // Never gated on readiness: an item that never became measurable is one of
+            // the states placementIsBad() exists to name (no window, or a degenerate
+            // frame), and skipping the check would silently drop exactly the diagnosis
+            // and the rescue the user needs. Readiness is an input to the log, nothing more.
+            await self.reportPlacement(statusItemReady: statusItemReady)
         }
     }
 
@@ -323,11 +321,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             if let window = statusItem.button?.window {
                 let frame = window.frame
                 // Fresh status items can briefly report {{0,-42},{w,42}}: nonzero,
-                // but still AppKit's unpositioned sentinel. A real screen association
-                // makes the same coordinates valid on an unusually-arranged display.
+                // but still AppKit's unpositioned sentinel, and it is never a real
+                // placement — so it disqualifies unconditionally. A screen association
+                // cannot rescue it either: on a display arranged below and left of the
+                // menu-bar screen the sentinel frame intersects that secondary screen,
+                // which is how a sentinel used to read as measurable. A menu-bar item
+                // only ever lives on the menu-bar display, NSScreen.screens.first.
                 let unpositionedSentinel = frame.minX == 0 && frame.maxY == 0
-                if frame.width >= 1, frame.height >= 1,
-                   window.screen != nil || !unpositionedSentinel {
+                if frame.width >= 1, frame.height >= 1, !unpositionedSentinel,
+                   let screen = window.screen, screen == NSScreen.screens.first {
                     return true
                 }
             }
@@ -339,7 +341,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         return false
     }
 
-    private func reportPlacement() async {
+    /// The floor a measurement waits out even when the frame already looks positioned.
+    /// A newly created status item is not positioned until AppKit gets a run loop turn,
+    /// and reading it earlier makes a fresh item measure as {{0,-42}} and produces a
+    /// false diagnosis — one that the rescue then persists as a preferred position.
+    private static let settleFloorNanoseconds: UInt64 = 600_000_000
+
+    /// Waits for readiness OR the layout floor, whichever is longer, and never aborts:
+    /// an item that stays unmeasurable is a placement result, not a reason to stop
+    /// measuring. Every caller measures immediately afterwards.
+    private func settleForMeasurement() async {
+        async let floor: Void? = try? await Task.sleep(nanoseconds: Self.settleFloorNanoseconds)
+        _ = await waitForStatusItemReadiness()
+        _ = await floor
+    }
+
+    private func reportPlacement(statusItemReady: Bool) async {
+        Diag.log("placement check starting statusItemReady=\(statusItemReady)")
+        await settleForMeasurement()
         guard placementIsBad().bad else {
             Diag.log("OK placement looks good")
             return
@@ -350,12 +369,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         for position in [CGFloat(0), 200, 400, 800, 1600] {
             UserDefaults.standard.set(position, forKey: Self.positionKey)
             rebuildStatusItem()
-            guard await waitForStatusItemReadiness() else {
-                UserDefaults.standard.removeObject(forKey: Self.positionKey)
-                rebuildStatusItem()
-                Diag.log("placement rescue stopped before an AppKit-ready frame")
-                return
-            }
+            await settleForMeasurement()
             if !placementIsBad().bad {
                 Diag.log("OK rescue succeeded at preferred position \(position)")
                 return
@@ -364,10 +378,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
         UserDefaults.standard.removeObject(forKey: Self.positionKey)
         rebuildStatusItem()
-        guard await waitForStatusItemReadiness() else {
-            Diag.log("final placement warning skipped before an AppKit-ready frame")
-            return
-        }
+        await settleForMeasurement()
 
         let result = placementIsBad()
         Diag.log("FAIL placement unrecoverable offscreen=\(result.offscreen) "
