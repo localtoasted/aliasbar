@@ -1,24 +1,33 @@
 ![AliasBar](docs/brand/title.png)
 
-**Your aliases and prompts, ready in any app.**
+**Prompts and zsh shortcuts from the files you already use.**
 
-Press `⌥⌘A`, type a few letters, and press Return. AliasBar copies or pastes the selected text.
+AliasBar reads local Markdown prompts and the aliases and functions in `~/.zshrc`. Press `⌥⌘A`, search both, then copy or paste into the app you were using.
 
 <img src="docs/hero.png" alt="AliasBar Find view showing a saved prompt and shell alias in one search" width="660">
 
-## Aliases and prompts
+## Why AliasBar
 
-| Aliases | Prompts |
-|---|---|
-| Find shell aliases and functions. | Save prompts for ChatGPT, Claude, and other apps. |
-| See commands, usage, and conflicts. | Add `{{slots}}` for details that change. |
-| Create and edit aliases without changing the rest of your shell file. | Use a prompt as a Claude Code `/command`. |
+Your aliases stay real zsh aliases. Your prompts stay plain Markdown. AliasBar adds one fast search without moving either into a closed snippet database. It needs no account and does not send your library to a hosted AI service.
 
-AliasBar reads aliases from `~/.zshrc` and prompts from `~/.aliasbar/prompts/`.
+## Features
 
-### Fill in the details
+<img src="docs/features.png" alt="AliasBar feature map showing aliases and prompts in one local library" width="800">
 
-AliasBar asks for each `{{slot}}`, then shows the text it will copy or paste.
+- **Search both.** Prompts, aliases, and functions share one search. Pin frequent prompts and aliases. Press Tab to favor either library.
+- **Fill the changing parts.** Add `{{project}}` to a prompt. AliasBar asks for each value and previews the finished text.
+- **See what zsh will use.** Manage shows duplicate definitions, the winning line, and the file that contains it.
+- **Edit aliases safely.** AliasBar edits its marked block, backs up the shell file, and validates zsh before saving.
+- **Save from the clipboard.** Selected text opens in the prompt or alias editor. Selected image text opens in the prompt editor for review.
+- **Build a library with review.** Copy a ready-made request into ChatGPT, Codex, or Claude Code. AliasBar validates each suggestion and waits for approval.
+
+## See it work
+
+[<img src="docs/shortcut.gif" alt="Opening AliasBar, finding an item, and copying it" width="660">](docs/shortcut.mp4)
+
+### Fill prompt slots
+
+AliasBar asks for each `{{slot}}`, then shows the exact text it will copy or paste.
 
 <img src="docs/prompt-fill.png" alt="A saved prompt with two fill-in fields and a copy confirmation" width="660">
 
@@ -36,21 +45,21 @@ Manage shows duplicate aliases, which definition wins, and where to fix it.
 | type | Search |
 | `↑` `↓` | Move |
 | `⏎` | Use the selected item |
-| `⇥` | Switch between prompts and aliases |
+| `⇥` | Favor prompts or aliases |
+| `⌘K` | Open or close Clipboard |
 | `⌘1` `⌘2` `⌘3` | Find, Board, Manage |
 | `⌘P` | Pin or unpin an alias or prompt |
 | `esc` | Close |
-
-[<img src="docs/shortcut.gif" alt="Opening AliasBar, finding an item, and copying it" width="660">](docs/shortcut.mp4)
 
 ## Your files stay on your Mac
 
 <img src="docs/local-flow.svg" alt="Shell aliases and saved prompts flow through AliasBar back to the active app" width="720">
 
-- Clipboard monitoring and text expansion start off.
+- Clipboard monitoring and disk history are off by default.
+- Clipboard images stay in memory. AliasBar opens recognized text in the prompt editor for review.
 - Pasting into another app requires Accessibility. Copying does not.
 - AliasBar backs up your shell config before changing its own block.
-- The only network access is an optional update check.
+- AliasBar uses the network only to check for and download updates. Automatic checks can be turned off.
 
 ## Install
 
@@ -78,8 +87,6 @@ The build includes `.build/ab`:
 .build/ab search git
 .build/ab add gs 'git status -sb'
 ```
-
-Install the CLI with `brew install localtoasted/aliasbar/aliasbar`.
 
 ## Build and test
 

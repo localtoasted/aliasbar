@@ -37,9 +37,10 @@ Board is a different view of the same library. It is not a separate content syst
 - Pins that persist and rank first in search.
 - A prompt setup notice that stays dismissed after the user closes it.
 - Save as Prompt and Save as Alias actions on the selected clipboard clip.
+- Local text recognition for the selected clipboard image, with review before saving a prompt.
 - Starter suggestions in onboarding and Settings for ChatGPT, Codex, and Claude Code.
 - A versioned five-item import with secret checks and item-by-item review.
-- Real Retina README captures and a six-second product demo.
+- Real Retina README captures, a six-second product demo, and a visual feature map.
 - Plain user interface copy with em dashes and filler removed.
 
 ## Strong next candidates
@@ -54,7 +55,7 @@ Board is a different view of the same library. It is not a separate content syst
 - Background inspection of chats, browser pages, or shell history.
 - Prompt marketplaces, prompt chains, scoring dashboards, or version graphs.
 - Cloud accounts and team workspaces.
-- A full image, file, OCR, or cross device clipboard manager.
+- Bulk image OCR, file indexing, or a cross-device clipboard manager.
 - Folders, tags, boards, and workspaces as competing organization systems.
 
 ## Success signals
