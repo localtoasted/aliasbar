@@ -419,13 +419,15 @@ final class AppState: ObservableObject {
     /// observation ("nothing to read") and distinct from `nil` for the whole stamp,
     /// which means no snapshot has been taken yet.
     private struct PromptDeliveryRegistryStamp: Equatable {
-        let modified: Date?
-        let size: Int?
+        /// `FileStamp` for the same reason `SuggestionStamp` uses it: the reader follows
+        /// symlinks and the stamp must describe the bytes the reader will get. Lower
+        /// stakes here — the app writes this file itself, so a synced or symlinked
+        /// `~/.aliasbar` is the only way to reach it — but there is no reason for two
+        /// freshness gates in one file to disagree about what "changed" means.
+        let file: FileStamp?
 
         static func current(path: String) -> PromptDeliveryRegistryStamp {
-            let attributes = try? FileManager.default.attributesOfItem(atPath: path)
-            return PromptDeliveryRegistryStamp(modified: attributes?[.modificationDate] as? Date,
-                                               size: attributes?[.size] as? Int)
+            PromptDeliveryRegistryStamp(file: FileStamp.of(path))
         }
     }
     private var promptDeliveryRegistryStamp: PromptDeliveryRegistryStamp?
@@ -491,15 +493,19 @@ final class AppState: ObservableObject {
     /// because "nothing worth suggesting" is a perfectly ordinary steady state and
     /// would re-mine on every summon for exactly the people with nothing to gain.
     private struct SuggestionStamp: Equatable {
-        let modified: Date?
-        let size: Int?
+        /// `FileStamp`, not `attributesOfItem`: the read this gates
+        /// (`SuggestionEngine.suggest` → `FileManager.contents(atPath:)`) follows
+        /// symlinks, so the stamp has to as well. `~/.zsh_history ->
+        /// ~/dotfiles/zsh_history` is an ordinary dotfiles layout, and zsh appends
+        /// through the link rather than replacing it — so an `lstat` stamp records the
+        /// link's own unchanging mtime, `refreshSuggestions` returns early forever, and
+        /// MANAGE › Suggested silently stops noticing anything the user runs. See
+        /// `FileStamp` for why one shared declaration matters here.
+        let file: FileStamp?
         let entriesGeneration: Int
 
         static func current(path: String, entriesGeneration: Int) -> SuggestionStamp {
-            let attributes = try? FileManager.default.attributesOfItem(atPath: path)
-            return SuggestionStamp(modified: attributes?[.modificationDate] as? Date,
-                                   size: attributes?[.size] as? Int,
-                                   entriesGeneration: entriesGeneration)
+            SuggestionStamp(file: FileStamp.of(path), entriesGeneration: entriesGeneration)
         }
     }
     private var suggestionStamp: SuggestionStamp?

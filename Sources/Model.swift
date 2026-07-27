@@ -490,6 +490,47 @@ struct Conflict: Identifiable, Hashable {
     var id: String { "\(name)-\(reason.headline)" }
 }
 
+/// What a file or directory looked like at an instant: modification time to the
+/// nanosecond, and size. `nil` for a path that could not be `stat`'d at all, which is
+/// its own stable observation — a path that stays missing never re-reads, and one that
+/// appears does.
+///
+/// Raw `stat(2)` rather than `FileManager.attributesOfItem`, for two reasons that each
+/// decide correctness or cost somewhere in this app:
+///
+///   - **`stat` follows symbolic links; `attributesOfItem` does not** (it has `lstat`
+///     semantics on the final component). Every reader these stamps guard —
+///     `contentsOfDirectory`, `FileManager.contents(atPath:)`, `String(contentsOfFile:)`
+///     — *does* follow. Stamp a symlink with `lstat` and you record the link's own mtime
+///     and size, which nothing the target does can ever move: the stamp never disagrees,
+///     the guarded read never happens again, and the cache is frozen for the life of the
+///     process. That is not hypothetical for a menu-bar app that stays resident for
+///     weeks — `~/bin -> ~/dotfiles/bin` and `~/.zsh_history -> ~/dotfiles/zsh_history`
+///     are the ordinary dotfiles layout, and both froze a cache here once.
+///   - **`attributesOfItem` is not one stat.** It builds a ~15-key dictionary including
+///     `getpwuid`/`getgrgid` account-name resolution. Measured over a 32-directory PATH,
+///     once per directory: 396 µs against 21 µs for the raw call, and 24 µs for the whole
+///     per-name loop `PathExecutableIndex` exists to replace — so paying it inside
+///     `revalidate` made a keystroke in the Composer 16x more expensive than no caching
+///     at all.
+///
+/// One declaration, shared by every freshness gate in the app, so a fix to the semantics
+/// cannot land at one site and be forgotten at the next-door one. That is exactly how the
+/// second of the two symlink freezes above survived the fix to the first.
+struct FileStamp: Equatable {
+    var seconds: Int
+    var nanoseconds: Int
+    var size: Int64
+
+    static func of(_ path: String) -> FileStamp? {
+        var info = stat()
+        guard stat(path, &info) == 0 else { return nil }
+        return FileStamp(seconds: info.st_mtimespec.tv_sec,
+                         nanoseconds: info.st_mtimespec.tv_nsec,
+                         size: info.st_size)
+    }
+}
+
 /// A snapshot of which command names each PATH directory offers.
 ///
 /// `ConflictDetector.detect(in:)` used to ask the filesystem "is `<dir>/<name>`
@@ -522,46 +563,26 @@ struct Conflict: Identifiable, Hashable {
 /// — see `Listing.foldedNames`. Get that backwards and the `continue` fires before the
 /// confirming stat ever runs, and a real shadow goes unreported.
 ///
-/// The result is answer-for-answer identical to the loop it replaces, including which
-/// directory wins when several hold the same name: PATH order, first match.
+/// That "at least as permissive" claim is only provable for ASCII, which is why the skip
+/// is gated on it. `String.lowercased()` is Unicode case *mapping*; a case-insensitive
+/// APFS volume compares by case *folding*, and the two are not the same relation. Where
+/// they differ the volume is the more permissive of the two, so an un-gated skip would
+/// drop a directory the volume would have matched. Outside ASCII the filter is simply
+/// switched off and every directory is confirmed by `isExecutableFile`, exactly as the
+/// original loop did — slower for a handful of names, never wrong.
+///
+/// With that gate in place the result is answer-for-answer identical to the loop it
+/// replaces, including which directory wins when several hold the same name: PATH order,
+/// first match. (Without it, it was not: an earlier directory holding a spelling that
+/// folds to the query but does not lowercase to it was skipped, and a *later* directory
+/// got reported — so `Conflict.shadowsBinary` could name a binary the user's shell would
+/// not actually run.)
 struct PathExecutableIndex {
     /// PATH order, which is the order a lookup reports its winner in. Also the cache
     /// key — an index built for injected test paths can never answer for the real PATH.
     let searchPaths: [String]
 
-    /// What a directory looked like when it was listed: modification time to the
-    /// nanosecond, and size. `nil` for a directory that could not be stat'd at all,
-    /// which is its own stable observation — a path that stays missing never re-lists,
-    /// and one that appears does.
-    private struct Stamp: Equatable {
-        var seconds: Int
-        var nanoseconds: Int
-        var size: Int64
-    }
-
-    /// Raw `stat(2)`, not `FileManager.attributesOfItem`, for two reasons that both
-    /// decide correctness or cost on the per-keystroke path:
-    ///
-    ///   - `stat` follows symbolic links; `attributesOfItem` does not (`lstat`
-    ///     semantics), while `contentsOfDirectory` does. A PATH entry that is itself a
-    ///     link to a directory — `~/bin -> ~/dotfiles/bin`, the ordinary dotfiles
-    ///     layout — would otherwise be stamped with the *link's* mtime and size, which
-    ///     the target's contents can never move. The stamp would never disagree, the
-    ///     directory would never re-list, and everything installed there after launch
-    ///     would stay invisible for the life of a process that stays resident for weeks.
-    ///   - `attributesOfItem` is not one stat: it builds a ~15-key dictionary including
-    ///     `getpwuid`/`getgrgid` account-name resolution. Measured over this machine's
-    ///     32-directory PATH, once per directory: 396 µs against 21 µs for the raw call,
-    ///     and 24 µs for the whole per-name loop this type exists to replace. Paying it
-    ///     inside `revalidate` made a keystroke in the Composer's name field 16x more
-    ///     expensive than doing no caching at all.
-    private static func stamp(of path: String) -> Stamp? {
-        var info = stat()
-        guard stat(path, &info) == 0 else { return nil }
-        return Stamp(seconds: info.st_mtimespec.tv_sec,
-                     nanoseconds: info.st_mtimespec.tv_nsec,
-                     size: info.st_size)
-    }
+    private typealias Stamp = FileStamp
 
     private struct Listing {
         var stamp: Stamp?
@@ -570,11 +591,19 @@ struct PathExecutableIndex {
         /// `/usr/bin` alone ships `Rez`, `DeRez`, `SetFile`, `GetFileInfo`,
         /// `networkQuality` and two dozen more; on an exact-byte set, asking about
         /// `rez` skips the directory that holds it and the shadow advisory goes silent
-        /// on a name that really is taken. Folding can only ever add a candidate, and
-        /// the `isExecutableFile` confirm below still decides — so a genuinely
-        /// case-sensitive volume gets the same answer as before, at the price of one
-        /// extra stat on a fold collision.
+        /// on a name that really is taken. Only consulted when `allASCII` holds, where
+        /// lowercasing and the volume's fold are the same relation — so folding really
+        /// can only add a candidate, and the `isExecutableFile` confirm still decides.
         var foldedNames: Set<String>
+        /// True when every name in this listing is ASCII, which is the region where
+        /// `lowercased()` provably agrees with a case-insensitive volume's comparison.
+        /// One non-ASCII filename anywhere in the directory disables the skip for that
+        /// directory: the cost is a stat per lookup there, and the alternative is a
+        /// silently missed shadow. Deliberately NOT solved by swapping in
+        /// `folding(options: .caseInsensitive)` — that still disagrees with the volume on
+        /// about ten pairs (the U+1C80–1C88 historic Cyrillic forms, U+FEFF) and is
+        /// slower on the listing path.
+        var allASCII: Bool
         /// False when the directory refused to be listed; lookups fall back to a
         /// direct `isExecutableFile` there, exactly as before this index existed.
         var listable: Bool
@@ -584,7 +613,7 @@ struct PathExecutableIndex {
     init(searchPaths: [String]) {
         self.searchPaths = searchPaths
         self.listings = Array(repeating: Listing(stamp: nil, foldedNames: [],
-                                                 listable: false),
+                                                 allASCII: false, listable: false),
                               count: searchPaths.count)
         for index in searchPaths.indices { load(index) }
     }
@@ -594,7 +623,7 @@ struct PathExecutableIndex {
     /// one stat per (name, directory) before.
     mutating func revalidate() {
         for index in searchPaths.indices {
-            if Self.stamp(of: searchPaths[index]) != listings[index].stamp {
+            if Stamp.of(searchPaths[index]) != listings[index].stamp {
                 load(index)
             }
         }
@@ -606,11 +635,17 @@ struct PathExecutableIndex {
         // stamp looking older than the listing, so the next request re-lists and is
         // merely redundant. The other order would bake in a stamp that already
         // describes content this listing missed, and the miss would be permanent.
-        let stamp = Self.stamp(of: path)
+        let stamp = Stamp.of(path)
         let contents = try? FileManager.default.contentsOfDirectory(atPath: path)
+        let entries = contents ?? []
         listings[index] = Listing(stamp: stamp,
-                                  foldedNames: Set((contents ?? []).map { $0.lowercased() }),
+                                  foldedNames: Set(entries.map { $0.lowercased() }),
+                                  allASCII: entries.allSatisfy(Self.isASCII),
                                   listable: contents != nil)
+    }
+
+    private static func isASCII(_ s: String) -> Bool {
+        s.unicodeScalars.allSatisfy(\.isASCII)
     }
 
     /// The first executable on PATH with this name, or nil. The full path, because
@@ -621,9 +656,14 @@ struct PathExecutableIndex {
         // what the old loop did for every name.
         let listable = !name.isEmpty && !name.contains("/")
         let folded = name.lowercased()
+        // Both sides of the comparison have to be ASCII for lowercasing to mean what the
+        // volume means. A non-ASCII query, or a directory holding any non-ASCII name,
+        // falls through to the confirming stat rather than risking a skip the volume
+        // would not have made.
+        let comparable = listable && Self.isASCII(name)
         let fm = FileManager.default
         for (index, directory) in searchPaths.enumerated() {
-            if listable, listings[index].listable,
+            if comparable, listings[index].listable, listings[index].allASCII,
                !listings[index].foldedNames.contains(folded) {
                 continue
             }

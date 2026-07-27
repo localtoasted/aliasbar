@@ -11213,6 +11213,56 @@ do {
 }
 
 do {
+    // Non-ASCII. `String.lowercased()` is Unicode case MAPPING; a case-insensitive APFS
+    // volume compares by case FOLDING, and the two are different relations. Where they
+    // differ the volume is the more permissive one, so a skip keyed on lowercasing drops
+    // a directory the volume would have matched — and the skip fires BEFORE the
+    // confirming `isExecutableFile`, so the shadow advisory goes silent on a name that
+    // really is taken.
+    //
+    // Concretely on this machine: `Straße`.lowercased() is "straße", which is not
+    // "strasse" — yet the volume answers `isExecutableFile(".../strasse287")` true.
+    //
+    // The oracle is the loop the index replaced: whatever a direct `isExecutableFile`
+    // says on whatever volume this runs on, the index has to say the same. That keeps
+    // this honest on a case-sensitive volume too, where both sides answer false.
+    let dir = pathIndexDirectory("nonascii")
+    let fm = FileManager.default
+    _ = writeFile(dir + "/Stra\u{00DF}e287", executable: true)
+    _ = writeFile(dir + "/Caf\u{00C9}287", executable: true)
+
+    for query in ["strasse287", "STRASSE287", "stra\u{00DF}e287",
+                  "caf\u{00E9}287", "CAF\u{00C9}287", "cafe287"] {
+        check("the index agrees with the volume about \(query.debugDescription)",
+              (ConflictDetector.executableIndex(searchPaths: [dir])
+                  .executablePath(for: query) != nil)
+                  == fm.isExecutableFile(atPath: dir + "/" + query))
+    }
+}
+
+do {
+    // PATH order, first match — the second symptom of the same root cause. When an
+    // EARLIER directory holds a spelling the volume matches but lowercasing does not, a
+    // lowercase-keyed skip drops that directory and the lookup reports a LATER one.
+    // `Conflict.shadowsBinary` would then name a binary the user's shell would not
+    // actually run, which is worse than saying nothing at all.
+    let first = pathIndexDirectory("order-first")
+    let second = pathIndexDirectory("order-second")
+    let fm = FileManager.default
+    _ = writeFile(first + "/Stra\u{00DF}etool", executable: true)
+    _ = writeFile(second + "/strassetool", executable: true)
+
+    // The oracle again: base walked the directories in order and took the first hit.
+    let expected = [first, second]
+        .first { fm.isExecutableFile(atPath: $0 + "/strassetool") }
+        .map { $0 + "/strassetool" }
+    check("a fold-only match in an earlier PATH entry still wins first match",
+          ConflictDetector.executableIndex(searchPaths: [first, second])
+              .executablePath(for: "strassetool") == expected,
+          "expected \(String(describing: expected))")
+}
+
+do {
     // A PATH entry that is itself a symlink to a directory — `~/bin -> ~/dotfiles/bin`,
     // the ordinary dotfiles layout. `contentsOfDirectory` follows the link, so the
     // freshness stamp has to follow it too. A stamp read with `lstat` semantics records
@@ -11348,6 +11398,75 @@ do {
     state.prepareForShow()
     check("and does not re-mine on the next summon",
           state.suggestionMiningCount == 1)
+}
+
+do {
+    // A symlinked history file — `~/.zsh_history -> ~/dotfiles/zsh_history`, the ordinary
+    // dotfiles layout, and the same shape as the symlinked PATH entry in section 49.
+    //
+    // The gate must stamp the bytes the reader will actually read. `attributesOfItem` has
+    // `lstat` semantics on the final component and records the LINK's own mtime and size
+    // — values nothing the target does can ever move — while the read it guards follows
+    // the link. Stamp with the wrong one and `refreshSuggestions` returns early forever:
+    // MANAGE › Suggested silently stops noticing anything the user runs, for the life of
+    // a process that stays resident for weeks. Before the suggestion cache existed there
+    // was no stamp at all and every summon re-mined, so getting this wrong is a
+    // regression rather than a missing nicety.
+    //
+    // Appended in place with O_APPEND, which is how zsh's own APPEND_HISTORY writes and
+    // is why the link survives instead of being replaced by a regular file.
+    caseIndex += 1
+    let base = "\(sandbox)/history-symlink-case\(caseIndex)"
+    let target = "\(base)/dotfiles"
+    try! FileManager.default.createDirectory(atPath: target, withIntermediateDirectories: true)
+
+    let rcPath = "\(base)/zshrc"
+    try! """
+    \(ManagedBlock.begin)
+    \(ManagedBlock.notice)
+    alias aa='echo aa'
+    \(ManagedBlock.end)
+    """.write(toFile: rcPath, atomically: true, encoding: .utf8)
+
+    let realHistory = "\(target)/zsh_history"
+    try! String(repeating: "docker compose up -d\n", count: 5)
+        .write(toFile: realHistory, atomically: true, encoding: .utf8)
+    let linkedHistory = "\(base)/history-link"
+    try! FileManager.default.createSymbolicLink(atPath: linkedHistory,
+                                                withDestinationPath: realHistory)
+
+    setenv("ALIASBAR_ZSHRC", rcPath, 1)
+    setenv("ALIASBAR_HISTORY", linkedHistory, 1)
+    setenv("ALIASBAR_SUGGESTION_IGNORES", "\(base)/suggestion-ignores.json", 1)
+
+    let (settings, _) = freshTestSettings()
+    settings.historyUsageRankingEnabled = true
+    let store = EntryStore(settings: settings)
+    let state = AppState(store: store, settings: settings)
+    state.pasteboard = FakePasteboard()
+
+    state.prepareForShow()
+    check("the first summon mines through the link",
+          state.suggestionMiningCount == 1)
+    check("and sees what the target holds",
+          state.suggestedEntries.contains { $0.command == "docker compose up -d" })
+
+    state.prepareForShow()
+    check("an unchanged symlinked history does not re-mine",
+          state.suggestionMiningCount == 1)
+
+    // Append to the TARGET, the way a shell does. The link's own metadata does not move.
+    let fd = open(realHistory, O_WRONLY | O_APPEND)
+    let addition = String(repeating: "kubectl get pods -A\n", count: 6)
+    _ = addition.withCString { write(fd, $0, strlen($0)) }
+    close(fd)
+
+    state.prepareForShow()
+    check("a history change made through the link is noticed",
+          state.suggestionMiningCount == 2,
+          "miningCount=\(state.suggestionMiningCount) — a stamp that does not follow the link freezes here forever")
+    check("and the newly repeated command reaches Suggested",
+          state.suggestedEntries.contains { $0.command == "kubectl get pods -A" })
 }
 
 // ---------------------------------------------------------------------------
