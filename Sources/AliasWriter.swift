@@ -1428,6 +1428,13 @@ enum AliasWriter {
 
     // MARK: - Backup
 
+    /// The fixed part of a backup name, between the target's path and its stamp.
+    private static let backupInfix = ".aliasbar-backup-"
+    /// How many recovery points a single target keeps. Deep enough to cover a run of
+    /// bad edits nobody noticed until later; shallow enough that the directory does
+    /// not accumulate unbounded full copies of the rc file.
+    private static let backupsKept = 10
+
     /// Timestamped backup beside the original. The UUID keeps two writes in the same
     /// second from selecting the same path and overwriting the first recovery point.
     /// Returns its path so the UI can name it.
@@ -1438,13 +1445,63 @@ enum AliasWriter {
         formatter.timeZone = TimeZone.current
         let stamp = formatter.string(from: Date())
         let unique = UUID().uuidString.lowercased()
-        let backupPath = "\(path).aliasbar-backup-\(stamp)-\(unique)"
+        let backupPath = "\(path)\(backupInfix)\(stamp)-\(unique)"
+        let fm = FileManager.default
         do {
             try contents.write(toFile: backupPath, atomically: true, encoding: .utf8)
         } catch {
             throw WriteError.backupFailed(error.localizedDescription)
         }
+
+        // A backup is a byte-for-byte copy of the rc file, so it is exactly as sensitive
+        // as the original — an rc file deliberately kept at 0600 must not leave a
+        // umask-default 0644 twin beside itself. Same carry `atomicWrite` performs on its
+        // temp file, read here while the original is still in place. Best-effort: a
+        // permission that cannot be carried is not worth failing an existing backup over,
+        // and the write that follows is the thing the user asked for.
+        if let posix = (try? fm.attributesOfItem(atPath: path))?[.posixPermissions] {
+            try? fm.setAttributes([.posixPermissions: posix], ofItemAtPath: backupPath)
+        }
+
+        pruneBackups(for: path)
         return backupPath
+    }
+
+    /// Keeps only the newest `backupsKept` backups of `path`. Nothing else ever removes
+    /// them: one backup per write, forever, means a year of edits leaves a directory of
+    /// full rc-file copies sitting beside the original.
+    ///
+    /// Best-effort by construction. This runs after the backup is already on disk, so a
+    /// directory that cannot be listed or an entry that refuses to delete is a reason to
+    /// stop pruning, never a reason to fail the write that is about to happen.
+    private static func pruneBackups(for path: String) {
+        let fm = FileManager.default
+        let directory = (path as NSString).deletingLastPathComponent
+        let prefix = (path as NSString).lastPathComponent + backupInfix
+        guard let entries = try? fm.contentsOfDirectory(atPath: directory) else { return }
+
+        // Stamp first, mtime only to break a tie. The stamp is fixed-width and leads the
+        // suffix, so it orders whole seconds without trusting a timestamp a dotfile syncer
+        // may have rewritten — but it has one-second resolution, and the UUID that follows
+        // it is random, so several writes inside one second would otherwise be ordered by
+        // nothing at all and prune an arbitrary ten. The name is the last resort so the
+        // order stays deterministic even if two files somehow agree on both.
+        let stampLength = "yyyy-MM-dd-HHmmss".count
+        let ordered = entries.filter { $0.hasPrefix(prefix) }
+            .map { name -> (stamp: String, modified: Date, name: String) in
+                let stamp = String(name.dropFirst(prefix.count).prefix(stampLength))
+                let attributes = try? fm.attributesOfItem(atPath: directory + "/" + name)
+                let modified = attributes?[FileAttributeKey.modificationDate] as? Date
+                return (stamp, modified ?? .distantPast, name)
+            }
+            .sorted {
+                if $0.stamp != $1.stamp { return $0.stamp > $1.stamp }
+                if $0.modified != $1.modified { return $0.modified > $1.modified }
+                return $0.name > $1.name
+            }
+        for backup in ordered.dropFirst(backupsKept) {
+            try? fm.removeItem(atPath: directory + "/" + backup.name)
+        }
     }
 
     // MARK: - Atomic write

@@ -18,6 +18,10 @@ enum SensitiveContentClassifier {
         case githubToken = "github-token"
         case gitlabToken = "gitlab-token"
         case slackToken = "slack-token"
+        case anthropicAPIKey = "anthropic-api-key"
+        case openAIAPIKey = "openai-api-key"
+        case stripeSecretKey = "stripe-secret-key"
+        case googleAPIKey = "google-api-key"
         case environmentSecret = "environment-secret"
         case databaseCredentialURL = "database-credential-url"
         case signedJWT = "signed-jwt"
@@ -41,6 +45,14 @@ enum SensitiveContentClassifier {
                 return "GitLab authentication token"
             case .slackToken:
                 return "Slack authentication token"
+            case .anthropicAPIKey:
+                return "Anthropic API key"
+            case .openAIAPIKey:
+                return "OpenAI API key"
+            case .stripeSecretKey:
+                return "Stripe secret key"
+            case .googleAPIKey:
+                return "Google API key"
             case .environmentSecret:
                 return "Secret-shaped environment assignment"
             case .databaseCredentialURL:
@@ -94,6 +106,21 @@ enum SensitiveContentClassifier {
         if containsPrefixedToken(bytes, prefixes: slackPrefixes) {
             return .slackToken
         }
+        // Anthropic before OpenAI, and not reorderable: `sk-ant-` is also a valid `sk-`
+        // match, so the more specific vendor has to be asked first or every Anthropic key
+        // reports as an OpenAI one.
+        if containsPrefixedToken(bytes, prefixes: anthropicPrefixes) {
+            return .anthropicAPIKey
+        }
+        if containsPrefixedToken(bytes, prefixes: openAIPrefixes) {
+            return .openAIAPIKey
+        }
+        if containsPrefixedToken(bytes, prefixes: stripePrefixes) {
+            return .stripeSecretKey
+        }
+        if containsGoogleAPIKey(bytes) {
+            return .googleAPIKey
+        }
         if containsCredentialDatabaseURL(bytes) {
             return .databaseCredentialURL
         }
@@ -124,6 +151,50 @@ enum SensitiveContentClassifier {
     private static let slackPrefixes = [
         "xoxe.xoxb-", "xoxe.xoxp-", "xoxb-", "xoxp-", "xwfp-", "xapp-", "xoxe-",
     ].map { Array($0.utf8) }
+
+    private static let anthropicPrefixes = [
+        "sk-ant-",
+    ].map { Array($0.utf8) }
+
+    /// Covers the project-scoped `sk-proj-` form too: the body scan runs past the extra
+    /// segment, so one prefix is enough and stays right if OpenAI adds another segment.
+    private static let openAIPrefixes = [
+        "sk-",
+    ].map { Array($0.utf8) }
+
+    /// Live secret and restricted keys only. Test keys (`sk_test_`, `rk_test_`) are
+    /// published in Stripe's own docs and pasted around deliberately — quarantining them
+    /// would train the user to ignore quarantine.
+    private static let stripePrefixes = [
+        "sk_live_", "rk_live_",
+    ].map { Array($0.utf8) }
+
+    /// Google API keys are fixed-width: `AIza` plus 35 URL-safe base64 characters.
+    /// Length is the whole signal — the body is not distinctive enough on its own, and at
+    /// 39 bytes it also falls under the generic entropy floor.
+    private static func containsGoogleAPIKey(_ bytes: [UInt8]) -> Bool {
+        let prefix = Array("AIza".utf8)
+        let total = 39
+        var index = 0
+        while index + total <= bytes.count {
+            guard matches(bytes, at: index, prefix: prefix) else {
+                index += 1
+                continue
+            }
+
+            let end = index + total
+            let body = bytes[(index + prefix.count)..<end]
+            if body.allSatisfy(isBase64URLByte),
+               hasTokenBoundary(bytes, before: index, after: end),
+               // `-` and `_` are body characters but not identifier bytes, so the
+               // boundary check alone would accept a longer key truncated at 39.
+               end == bytes.count || !isBase64URLByte(bytes[end]) {
+                return true
+            }
+            index += 1
+        }
+        return false
+    }
 
     private static func containsAWSAccessKeyID(_ bytes: [UInt8]) -> Bool {
         for prefix in [Array("AKIA".utf8), Array("ASIA".utf8)] {

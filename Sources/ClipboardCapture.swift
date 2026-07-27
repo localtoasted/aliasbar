@@ -116,26 +116,54 @@ enum ClipIngestor {
 /// background queue, that assumption needs revisiting.
 final class QuarantineStore {
     static let expiryInterval: TimeInterval = 90
+    /// How often the optional sweep re-evaluates expiry. A third of the expiry window,
+    /// so a clip outlives its deadline by at most that much when nobody is looking.
+    static let sweepInterval: TimeInterval = 30
 
     private let clock: () -> Date
     private var clips: [MemoryClip] = []
+    private var sweepTimer: Timer?
 
     init(clock: @escaping () -> Date = Date.init) {
         self.clock = clock
+    }
+
+    deinit {
+        sweepTimer?.invalidate()
     }
 
     func add(_ clip: MemoryClip) {
         clips.append(clip)
     }
 
-    /// Pruning happens as a side effect of asking, not on a background timer — there is
-    /// no thread here to run one. Pass `now` explicitly in tests; callers in the app can
-    /// omit it and get the store's own clock.
+    /// Pruning also happens as a side effect of asking. Pass `now` explicitly in tests;
+    /// callers in the app can omit it and get the store's own clock.
     @discardableResult
     func active(now: Date? = nil) -> [MemoryClip] {
         let reference = now ?? clock()
         clips.removeAll { $0.expiresAt <= reference }
         return clips
+    }
+
+    /// Expires clips on the run loop instead of waiting to be asked.
+    ///
+    /// `active` alone is not enough: a user who copies a password and then never opens
+    /// the clipboard UI never triggers a read, so the quarantined secret sits in process
+    /// memory for the life of the app — the exact case the 90-second window exists for.
+    ///
+    /// Started explicitly by app wiring (`ClipboardMonitor.start`) rather than in `init`,
+    /// because this type is also built in contexts with no run loop to schedule on, and a
+    /// store nobody started must behave exactly as it did before.
+    func startExpirySweep(interval: TimeInterval = QuarantineStore.sweepInterval) {
+        stopExpirySweep()
+        sweepTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
+            self?.active()
+        }
+    }
+
+    func stopExpirySweep() {
+        sweepTimer?.invalidate()
+        sweepTimer = nil
     }
 
     func clear() {
@@ -188,13 +216,23 @@ enum ClipboardHistoryStore {
         let capped = Array(clips.prefix(cap))
         guard let data = try? encoder.encode(capped) else { return }
         let directory = (path as NSString).deletingLastPathComponent
-        try? FileManager.default.createDirectory(atPath: directory, withIntermediateDirectories: true)
+        // Owner-only, not the umask default: this file is a verbatim record of things the
+        // user copied, and the ingest gate keeps secrets out of it only as well as
+        // heuristics allow. Anything that slips past should at least not be readable by
+        // every other account on the machine.
+        try? FileManager.default.createDirectory(atPath: directory,
+                                                 withIntermediateDirectories: true,
+                                                 attributes: [.posixPermissions: 0o700])
         let tempPath = directory + "/.aliasbar-clips-\(UUID().uuidString)"
         do {
             try data.write(to: URL(fileURLWithPath: tempPath))
         } catch {
             return
         }
+        // Tightened on the temp file, before the rename: the mode travels with the file,
+        // so the live path is never briefly 0644, and a clips.json written by a build
+        // that predates this is retightened by the first save that replaces it.
+        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: tempPath)
         if rename(tempPath, path) != 0 {
             try? FileManager.default.removeItem(atPath: tempPath)
         }

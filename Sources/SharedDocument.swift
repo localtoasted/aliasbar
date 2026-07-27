@@ -437,10 +437,14 @@ final class SharedDocumentStore {
             return false
         }
 
-        if let attributes = originalAttributes {
-            var carried: [FileAttributeKey: Any] = [:]
-            if let posix = attributes[.posixPermissions] { carried[.posixPermissions] = posix }
-            try? fm.setAttributes(carried, ofItemAtPath: tempURL.path)
+        if let posix = originalAttributes?[.posixPermissions] {
+            try? fm.setAttributes([.posixPermissions: posix], ofItemAtPath: tempURL.path)
+        } else {
+            // No original to carry from: this rename creates the document. It holds
+            // synced settings and clipboard records, so it starts owner-only rather than
+            // inheriting whatever the process umask happens to be. A user who later
+            // widens it deliberately keeps that choice — the branch above carries it.
+            try? fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: tempURL.path)
         }
 
         if rename(tempURL.path, url.path) != 0 {

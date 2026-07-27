@@ -450,11 +450,15 @@ final class ClipboardMonitor {
         timer = Timer.scheduledTimer(withTimeInterval: pollInterval, repeats: true) { [weak self] _ in
             self?.poll()
         }
+        // Live monitoring is the one context where the store has a run loop to sweep on,
+        // so quarantine expiry stops depending on someone opening the clipboard UI.
+        quarantine.startExpirySweep()
     }
 
     func stop() {
         timer?.invalidate()
         timer = nil
+        quarantine.stopExpirySweep()
     }
 
     /// Quarantined clips still alive right now. Exposed rather than reaching into

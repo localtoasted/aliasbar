@@ -306,6 +306,40 @@ check("no temp files left behind",
       (try! FileManager.default.contentsOfDirectory(atPath: sandbox))
           .allSatisfy { !$0.hasPrefix(".aliasbar-write-") })
 
+// A backup is a full copy of the rc file, so an rc file kept at 0600 must not leave a
+// umask-default 0644 twin beside itself.
+let backupMode = (try! FileManager.default.attributesOfItem(atPath: backupPath)[.posixPermissions]
+                  as! NSNumber).intValue
+check("backup carries the original's permissions (0600)",
+      backupMode == 0o600, String(format: "got %o", backupMode))
+
+func backupsBeside(_ path: String) -> [String] {
+    let directory = (path as NSString).deletingLastPathComponent
+    let prefix = (path as NSString).lastPathComponent + ".aliasbar-backup-"
+    return (try! FileManager.default.contentsOfDirectory(atPath: directory))
+        .filter { $0.hasPrefix(prefix) }
+}
+
+let prunePath = scratch("alias keep='1'\n")
+var pruneBackupPaths: [String] = []
+for index in 0..<14 {
+    pruneBackupPaths.append(
+        try! AliasWriter.apply(.upsert(name: "p", command: "echo \(index)", comment: nil),
+                               path: prunePath, allEntries: []))
+}
+let keptBackups = Set(backupsBeside(prunePath))
+check("backups are pruned to the newest ten", keptBackups.count == 10,
+      "found \(keptBackups.count)")
+// Pruning the wrong end would also leave ten files and no recent recovery point, which
+// the count alone cannot catch.
+let expectedSurvivors = Set(pruneBackupPaths.suffix(10).map { ($0 as NSString).lastPathComponent })
+check("the survivors are the ten most recent writes", keptBackups == expectedSurvivors)
+check("the newest backup still holds what it was taken for",
+      read(pruneBackupPaths.last!).contains("alias p='echo 12'"))
+// Pruning is per target file: a sibling rc file's backups are not siblings of this one.
+check("pruning one file's backups leaves another file's alone",
+      backupsBeside(permPath).count == 3, "found \(backupsBeside(permPath).count)")
+
 // ---------------------------------------------------------------------------
 print("\n8. Newline handling")
 
@@ -2749,6 +2783,40 @@ for prefix in [
 }
 check("short Slack-looking token stays safe",
       classifierReason("xoxb-\(shortProviderBody)") == nil)
+
+// `sk-ant-` is also a valid `sk-` match, so the two vendors are only told apart by the
+// order the prefixes are asked in.
+check("Anthropic key is quarantined as Anthropic, not OpenAI",
+      classifierReason("sk-ant-api03-\(providerTokenBody)") == .anthropicAPIKey)
+check("OpenAI key is quarantined",
+      classifierReason("sk-\(providerTokenBody)") == .openAIAPIKey)
+check("project-scoped OpenAI key is quarantined",
+      classifierReason("OPENAI_API_KEY=sk-proj-\(providerTokenBody)") == .openAIAPIKey)
+check("short OpenAI-looking key stays safe",
+      classifierReason("sk-\(shortProviderBody)") == nil)
+check("embedded OpenAI-looking key stays safe",
+      classifierReason("xsk-\(providerTokenBody)") == nil)
+
+for prefix in ["sk_live_", "rk_live_"] {
+    check("Stripe key prefix \(prefix) is quarantined",
+          classifierReason("\(prefix)\(providerTokenBody)") == .stripeSecretKey)
+}
+// Stripe publishes test keys in its own docs; quarantining them would train the user to
+// ignore quarantine.
+check("Stripe test key stays safe",
+      classifierReason("sk_test_\(providerTokenBody)") == nil)
+
+let googleKeyBody = String(repeating: "Ab3_Z9-y", count: 5).prefix(35)
+check("Google API key is quarantined",
+      classifierReason("AIza\(googleKeyBody)") == .googleAPIKey)
+check("Google API key in an assignment is quarantined",
+      classifierReason("GOOGLE_API_KEY=AIza\(googleKeyBody)") == .googleAPIKey)
+check("short Google-looking key stays safe",
+      classifierReason("AIza\(googleKeyBody.dropLast())") == nil)
+check("long Google-looking key stays safe",
+      classifierReason("AIza\(googleKeyBody)z") == nil)
+check("embedded Google-looking key stays safe",
+      classifierReason("xAIza\(googleKeyBody)") == nil)
 
 for label in [
     "PRIVATE KEY",
