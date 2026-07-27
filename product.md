@@ -26,22 +26,26 @@ Board is a different view of the same library. It is not a separate content syst
 
 ## Shipped in the current pass
 
-- Refined Classic icon based on the selected compression mark.
+- Machined Metal icon based on the selected compression mark.
 - Copy feedback that remains visible before the window closes.
+- Precise copy messages that name the action and item.
 - Board navigation that skips nonmatching results while search is active.
 - Find selections that stay in view as the user moves through results.
+- Search above the view controls, with stable result-row geometry.
 - Contextual shortcut hints near the controls they affect.
-- Automatic, Aliases, and Prompts choices for the opening library.
+- Prompts as the fresh-install default, with Tab switching between libraries.
+- Pins that persist and rank first in search.
+- A prompt setup notice that stays dismissed after the user closes it.
 - Save as Prompt and Save as Alias actions on the selected clipboard clip.
 - Starter suggestions in onboarding and Settings for ChatGPT, Codex, and Claude Code.
 - A versioned five-item import with secret checks and item-by-item review.
+- Real Retina README captures and a six-second product demo.
 - Plain user interface copy with em dashes and filler removed.
 
 ## Strong next candidates
 
-- Pins, followed by usage and recency as ranking tie breakers.
-- More precise copy messages that name the action and item.
-- Real Retina README captures with aliases and prompts given equal space.
+- Validate the first-run setup with users who have no saved prompts.
+- Watch whether pins remain useful without adding folders or tags.
 
 ## Keep out
 

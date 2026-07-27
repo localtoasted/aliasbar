@@ -1,0 +1,65 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="420" viewBox="0 0 1440 420" role="img" aria-labelledby="title desc">
+  <title id="title">AliasBar keeps aliases and prompts on your Mac</title>
+  <desc id="desc">Shell aliases and saved prompt files flow into AliasBar. AliasBar copies or pastes the selected text into the app you were using.</desc>
+  <defs>
+    <linearGradient id="panel" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#232329"/>
+      <stop offset="1" stop-color="#151519"/>
+    </linearGradient>
+    <linearGradient id="mark" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#4f3b98"/>
+      <stop offset="1" stop-color="#150b46"/>
+    </linearGradient>
+    <filter id="shadow" x="-30%" y="-30%" width="160%" height="160%">
+      <feDropShadow dx="0" dy="14" stdDeviation="20" flood-color="#000" flood-opacity=".28"/>
+    </filter>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
+      <path d="M0 0L9 5L0 10Z" fill="#8f82e8"/>
+    </marker>
+  </defs>
+
+  <rect width="1440" height="420" rx="36" fill="#0d0d10"/>
+
+  <g font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
+    <g transform="translate(64 70)">
+      <rect width="330" height="122" rx="22" fill="url(#panel)" stroke="#3b3b43"/>
+      <rect x="24" y="25" width="50" height="60" rx="9" fill="#282831" stroke="#565665"/>
+      <path d="M36 45h25M36 56h20M36 67h17" stroke="#b7b5c5" stroke-width="4" stroke-linecap="round"/>
+      <text x="96" y="49" fill="#f3f1f5" font-size="24" font-weight="650">Shell aliases</text>
+      <text x="96" y="79" fill="#9b99a8" font-size="18" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">~/.zshrc</text>
+    </g>
+
+    <g transform="translate(64 228)">
+      <rect width="330" height="122" rx="22" fill="url(#panel)" stroke="#3b3b43"/>
+      <rect x="24" y="25" width="50" height="60" rx="9" fill="#282831" stroke="#565665"/>
+      <path d="M36 45h25M36 56h20M36 67h17" stroke="#b7b5c5" stroke-width="4" stroke-linecap="round"/>
+      <text x="96" y="49" fill="#f3f1f5" font-size="24" font-weight="650">Saved prompts</text>
+      <text x="96" y="79" fill="#9b99a8" font-size="18" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">~/.aliasbar/prompts</text>
+    </g>
+
+    <path d="M420 131C480 131 490 210 542 210" fill="none" stroke="#8f82e8" stroke-width="3" marker-end="url(#arrow)"/>
+    <path d="M420 289C480 289 490 210 542 210" fill="none" stroke="#8f82e8" stroke-width="3" marker-end="url(#arrow)"/>
+
+    <g transform="translate(574 74)" filter="url(#shadow)">
+      <rect width="292" height="272" rx="54" fill="url(#mark)" stroke="#6250b6" stroke-width="2"/>
+      <path d="M74 91L137 136L74 181" fill="none" stroke="#fff" stroke-width="24" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M165 118h63M165 159h43" stroke="#fff" stroke-width="20" stroke-linecap="round"/>
+      <text x="146" y="232" fill="#f7f5fa" text-anchor="middle" font-size="25" font-weight="700">AliasBar</text>
+    </g>
+
+    <path d="M896 210H1016" fill="none" stroke="#8f82e8" stroke-width="3" marker-end="url(#arrow)"/>
+
+    <g transform="translate(1050 112)">
+      <rect width="326" height="196" rx="24" fill="url(#panel)" stroke="#3b3b43"/>
+      <rect x="28" y="27" width="270" height="84" rx="14" fill="#0f0f13" stroke="#4d4d58"/>
+      <circle cx="49" cy="47" r="5" fill="#6854ce"/>
+      <circle cx="66" cy="47" r="5" fill="#6854ce" opacity=".65"/>
+      <circle cx="83" cy="47" r="5" fill="#6854ce" opacity=".35"/>
+      <path d="M48 78h116M48 94h189" stroke="#aaa7b8" stroke-width="5" stroke-linecap="round"/>
+      <text x="163" y="150" fill="#f3f1f5" text-anchor="middle" font-size="24" font-weight="650">Back to your app</text>
+      <text x="163" y="177" fill="#9b99a8" text-anchor="middle" font-size="17">Copy or paste</text>
+    </g>
+
+    <text x="720" y="390" fill="#777583" text-anchor="middle" font-size="17">Your library stays on this Mac.</text>
+  </g>
+</svg>

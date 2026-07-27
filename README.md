@@ -1,26 +1,32 @@
 ![AliasBar](docs/brand/title.png)
 
-**Aliases and prompts. Ready anywhere.**
+**Your aliases and prompts, ready in any app.**
 
-Press `⌥⌘A` in any app. Find an alias or prompt, then paste it.
+Press `⌥⌘A`, type a few letters, and press Return. AliasBar copies or pastes the selected text.
 
-![AliasBar showing aliases and prompts side by side](docs/hero.png)
+<img src="docs/hero.png" alt="AliasBar Find view showing a saved prompt and shell alias in one search" width="660">
 
 ## Aliases and prompts
 
 | Aliases | Prompts |
 |---|---|
-| Find any alias or shell function. | Save prompts for ChatGPT, Claude, and other apps. |
-| See commands, usage, and conflicts. | Add `{{slots}}` for details that change each time. |
-| Create and edit aliases safely. | Use any prompt as a Claude Code `/command`. |
+| Find shell aliases and functions. | Save prompts for ChatGPT, Claude, and other apps. |
+| See commands, usage, and conflicts. | Add `{{slots}}` for details that change. |
+| Create and edit aliases without changing the rest of your shell file. | Use a prompt as a Claude Code `/command`. |
 
 AliasBar reads aliases from `~/.zshrc` and prompts from `~/.aliasbar/prompts/`.
 
-## Three views
+### Fill in the details
 
-- **Find** searches aliases and prompts.
-- **Board** shows your library as a grid.
-- **Manage** lets you edit items and settings.
+AliasBar asks for each `{{slot}}`, then shows the text it will copy or paste.
+
+<img src="docs/prompt-fill.png" alt="A saved prompt with two fill-in fields and a copy confirmation" width="660">
+
+### Fix alias conflicts
+
+Manage shows duplicate aliases, which definition wins, and where to fix it.
+
+<img src="docs/alias-safety.png" alt="AliasBar showing a duplicate alias and its source lines" width="660">
 
 ## Keys
 
@@ -28,21 +34,23 @@ AliasBar reads aliases from `~/.zshrc` and prompts from `~/.aliasbar/prompts/`.
 |---|---|
 | `⌥⌘A` | Open AliasBar |
 | type | Search |
-| `↑` `↓` or `⌃n` `⌃p` | Move |
+| `↑` `↓` | Move |
 | `⏎` | Use the selected item |
-| `⌘⏎` | Use its second action |
-| `⇥` | Switch between aliases and prompts |
-| `⌘1` `⌘2` `⌘3` | Find / Board / Manage |
-| `⌘N` `⌘E` | New / edit |
-| `esc` | Close and return focus |
+| `⇥` | Switch between prompts and aliases |
+| `⌘1` `⌘2` `⌘3` | Find, Board, Manage |
+| `⌘P` | Pin or unpin an alias or prompt |
+| `esc` | Close |
 
-## Privacy
+[<img src="docs/shortcut.gif" alt="Opening AliasBar, finding an item, and copying it" width="660">](docs/shortcut.mp4)
 
-- AliasBar stores your data on this Mac.
+## Your files stay on your Mac
+
+<img src="docs/local-flow.svg" alt="Shell aliases and saved prompts flow through AliasBar back to the active app" width="720">
+
 - Clipboard monitoring and text expansion start off.
-- Pasting into other apps requires Accessibility; copying does not.
+- Pasting into another app requires Accessibility. Copying does not.
 - AliasBar backs up your shell config before changing its own block.
-- Its only network access is an optional update check.
+- The only network access is an optional update check.
 
 ## Install
 
@@ -55,7 +63,7 @@ cd aliasbar
 open ~/Applications/AliasBar.app
 ```
 
-To use another shell config:
+Use another shell config with:
 
 ```sh
 ALIASBAR_ZSHRC=~/.config/zsh/.zshrc open ~/Applications/AliasBar.app
@@ -71,13 +79,7 @@ The build includes `.build/ab`:
 .build/ab add gs 'git status -sb'
 ```
 
-Install only the CLI with Homebrew:
-
-```sh
-brew install localtoasted/aliasbar/aliasbar
-```
-
-Run `ab help` for all commands.
+Install the CLI with `brew install localtoasted/aliasbar/aliasbar`.
 
 ## Build and test
 
@@ -86,12 +88,4 @@ Run `ab help` for all commands.
 ./test.sh
 ```
 
-Built with SwiftUI. No account or background helper.
-
-## Roadmap
-
-- Sourced shell files
-- Bash and fish
-- Run an alias in a terminal tab
-
-MIT licensed.
+Built with SwiftUI. MIT licensed.
