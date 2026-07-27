@@ -322,9 +322,22 @@ struct SettingsView: View {
                                    options: ViewMode.allCases,
                                    label: { $0.label })
                 }
+                SettingsRow("Prompts", hint: "Show prompts in Find, Board, and Manage.") {
+                    ThemedToggle(isOn: $settings.promptFeaturesEnabled,
+                                 label: settings.promptFeaturesEnabled ? "On" : "Off")
+                }
                 SettingsRow("Starts with", hint: "You can switch libraries with ⇥.") {
-                    Picker("Default library", selection: $settings.defaultLibrary) {
-                        ForEach(DefaultLibrary.allCases) { option in
+                    Picker("Default library", selection: Binding(
+                        get: {
+                            settings.promptFeaturesEnabled || settings.defaultLibrary != .prompts
+                                ? settings.defaultLibrary
+                                : .automatic
+                        },
+                        set: { settings.defaultLibrary = $0 }
+                    )) {
+                        ForEach(DefaultLibrary.available(
+                            promptFeaturesEnabled: settings.promptFeaturesEnabled
+                        )) { option in
                             Text(option.label).tag(option)
                         }
                     }
@@ -548,7 +561,7 @@ struct SettingsView: View {
             }
 
             SettingsGroup("Build your library") {
-                LibraryBuilderPanel()
+                LibraryBuilderPanel(promptsEnabled: settings.promptFeaturesEnabled)
             }
 
             SettingsGroup("Usage data") {

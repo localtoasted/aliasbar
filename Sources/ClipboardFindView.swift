@@ -115,7 +115,8 @@ struct ClipboardFindView: View {
                     ForEach(Array(rows.enumerated()), id: \.element.id) { index, clip in
                         ClipRow(clip: clip, selected: state.selection == index, highlight: highlight)
                             .id(clip.id)
-                            .onTapGesture { state.selection = index }
+                            .live { state.selection = index }
+                            .accessibilityHint("Show clip details")
                             .arriving(index)
                     }
                 }
@@ -252,6 +253,15 @@ private struct ClipDetailPane: View {
 
     private var actions: [ClipAction] { state.clipboardActions }
 
+    private var actionVerb: String {
+        state.settings.enterAction.needsAccessibility ? "Paste" : "Copy"
+    }
+
+    private func activateRawClip() {
+        state.clipActionSelection = nil
+        state.performClipboardEnter()
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 7) {
@@ -275,10 +285,13 @@ private struct ClipDetailPane: View {
                     }
                 }
                 .contentShape(Rectangle())
-                .onTapGesture {
-                    state.clipActionSelection = nil
-                    state.performClipboardEnter()
-                }
+                .onTapGesture { activateRawClip() }
+                // Keep the content selectable with the pointer while giving VoiceOver
+                // the same default action as a native button.
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel("\(actionVerb) original clip")
+                .accessibilityAddTraits(.isButton)
+                .accessibilityAction { activateRawClip() }
 
             HStack(spacing: 7) {
                 if state.settings.promptFeaturesEnabled {
@@ -305,10 +318,11 @@ private struct ClipDetailPane: View {
                         .foregroundStyle(theme.faint)
                     ForEach(Array(actions.enumerated()), id: \.offset) { index, action in
                         ClipActionRow(action: action, selected: state.clipActionSelection == index)
-                            .onTapGesture {
+                            .live {
                                 state.clipActionSelection = index
                                 state.performClipboardEnter()
                             }
+                            .accessibilityLabel("\(actionVerb) \(action.title) result")
                     }
                 }
             }

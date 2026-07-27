@@ -280,7 +280,7 @@ struct OnboardingView: View {
             }
 
             DisclosureGroup(isExpanded: $showsLibraryBuilder) {
-                LibraryBuilderPanel()
+                LibraryBuilderPanel(promptsEnabled: decisions.claudeCodePromptFeatures)
                     .padding(.top, 8)
             } label: {
                 VStack(alignment: .leading, spacing: 2) {

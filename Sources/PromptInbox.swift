@@ -240,6 +240,9 @@ enum PromptInbox {
             guard let str = raw as? String else {
                 return .failure(ItemShapeError(reason: "\"description\" must be a string"))
             }
+            guard !str.contains("\n"), !str.contains("\r") else {
+                return .failure(ItemShapeError(reason: "\"description\" must be one line"))
+            }
             description = str
         }
 
@@ -439,6 +442,9 @@ enum PromptInbox {
     private static func writeApprovedPrompt(_ item: Item, to directory: URL, now: Date) throws -> ApproveResult {
         var frontmatter = PromptFrontmatter.empty()
         if let description = item.description, !description.isEmpty {
+            guard !description.contains("\n"), !description.contains("\r") else {
+                throw ApproveError.underlying("A prompt description must fit on one line.")
+            }
             frontmatter = frontmatter.setting("description", to: description)
         }
         frontmatter = frontmatter.setting("edited", to: iso8601.string(from: now))

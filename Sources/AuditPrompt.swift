@@ -136,6 +136,10 @@ enum LibraryBuildKind: String, CaseIterable, Identifiable {
         case .alias: return .alias
         }
     }
+
+    static func available(promptFeaturesEnabled: Bool) -> [LibraryBuildKind] {
+        promptFeaturesEnabled ? allCases : [.alias]
+    }
 }
 
 /// Where the user plans to paste the generated instructions. ChatGPT returns JSON for
