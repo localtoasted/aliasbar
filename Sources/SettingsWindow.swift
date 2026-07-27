@@ -189,7 +189,9 @@ struct SettingsView: View {
                     Text("AliasBar")
                         .font(.system(size: 13, weight: .bold))
                         .foregroundStyle(theme.text)
-                    Text("v0.2")
+                    Text("v" + (Bundle.main.object(
+                        forInfoDictionaryKey: "CFBundleShortVersionString"
+                    ) as? String ?? "?"))
                         .font(.system(size: 10, design: .monospaced))
                         .foregroundStyle(theme.faint)
                 }

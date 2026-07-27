@@ -18,7 +18,7 @@ The tools ship in the same Sparkle download `build.sh` caches: `.deps/Sparkle-<v
 
 1. **Bump the version** in `build.sh`'s Info.plist heredoc: `CFBundleShortVersionString`
    (marketing, e.g. `0.3`) and `CFBundleVersion` (monotonic integer — Sparkle compares
-   this one). Also bump the `v0.x` string in `SettingsWindow.swift`'s sidebar footer.
+   this one). Settings reads the marketing version from the built bundle.
 2. **Build**: `./build.sh`. The bundle lands in `.build/AliasBar.app` without changing
    `~/Applications`. Pass `--install` only when you also want to replace the local
    installed copy.

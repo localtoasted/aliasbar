@@ -10505,6 +10505,10 @@ check("Settings does not render every default option while prompts are off",
 check("Settings passes the prompt feature state into the builder",
       combinedSettingsSource.contains(
           "LibraryBuilderPanel(promptsEnabled: settings.promptFeaturesEnabled)"))
+check("Settings reads the displayed app version from the built bundle",
+      combinedSettingsSource.contains(
+          "forInfoDictionaryKey: \"CFBundleShortVersionString\"")
+          && !combinedSettingsSource.contains("Text(\"v0."))
 check("onboarding passes its current prompt choice into the builder",
       libraryOnboardingSource.contains(
           "LibraryBuilderPanel(promptsEnabled: decisions.claudeCodePromptFeatures)"))
