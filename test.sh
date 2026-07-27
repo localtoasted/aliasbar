@@ -111,12 +111,37 @@ cli_status=0
 run_cli_integration_tests "${AB_BIN}" || cli_status=$?
 
 # ---------------------------------------------------------------------------
+# SwiftPM test target (Tests/AliasBarCoreTests)
+#
+# The two legs above compile a hand-listed set of sources; neither one can see an XCTest
+# case. Without this leg the lexer and WriteError-identity suites are 600-odd lines that
+# compile nowhere and run never, and `./test.sh` — the command README.md documents —
+# prints "All test suites passed" over a regression in either of them.
+#
+# --scratch-path keeps SwiftPM's build products out of .build/tests and .build/cli-tests,
+# and clear of build.sh, which does `rm -rf .build/AliasBar.app` and friends.
+# ---------------------------------------------------------------------------
+echo
+echo "3. SwiftPM test target"
+
+spm_status=0
+if xcrun --find xctest >/dev/null 2>&1; then
+    swift test --scratch-path "${PROJECT_DIR}/.build/spm" || spm_status=$?
+else
+    # Loud, not silent. Command Line Tools alone cannot run XCTest (see Package.swift),
+    # and a skip that looks identical to a pass is how the suite above went unnoticed in
+    # the first place.
+    echo "SKIPPING swift test: XCTest requires a full Xcode install, not just Command Line Tools." >&2
+    echo "  The lexer and WriteError-identity suites did NOT run." >&2
+fi
+
+# ---------------------------------------------------------------------------
 echo
 echo "$(printf -- '-%.0s' {1..60})"
-if [ "${swift_status}" -eq 0 ] && [ "${cli_status}" -eq 0 ]; then
+if [ "${swift_status}" -eq 0 ] && [ "${cli_status}" -eq 0 ] && [ "${spm_status}" -eq 0 ]; then
     echo "All test suites passed."
     exit 0
 else
-    echo "Some tests failed (writer-tests exit=${swift_status}, ab CLI exit=${cli_status})."
+    echo "Some tests failed (writer-tests exit=${swift_status}, ab CLI exit=${cli_status}, swift test exit=${spm_status})."
     exit 1
 fi

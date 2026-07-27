@@ -66,15 +66,18 @@ CLI_CORE_SOURCES=(
     "${PROJECT_DIR}/Sources/AliasWriter.swift"
 )
 CLI_SOURCES=("${PROJECT_DIR}"/Sources/CLI/*.swift)
-# SWIFT_CONCURRENCY_FLAGS. One declaration, shared with build.sh and test.sh so the
-# shipped binary can never end up built under a weaker check than the one test.sh
-# proved. (SWIFT_CLI_LANGUAGE_FLAGS is deliberately not applied here — see the note in
-# tools/swift-flags.sh.)
+# SWIFT_CONCURRENCY_FLAGS *and* SWIFT_CLI_LANGUAGE_FLAGS. One declaration, shared with
+# build.sh and test.sh so the shipped binary can never end up built under a weaker check
+# than the one test.sh proved. Both arrays, because ABMain.swift is compiled by exactly
+# three scripts and nothing else — if this one dropped the language flag it would be the
+# only source file in the repo whose shipped build used a different language mode from
+# the build that tested it.
 source "${PROJECT_DIR}/tools/swift-flags.sh"
 
 build_arch() {
     local arch="$1" out="$2"
-    swiftc -O "${SWIFT_CONCURRENCY_FLAGS[@]}" -target "${arch}-apple-macos13.0" \
+    swiftc -O "${SWIFT_CONCURRENCY_FLAGS[@]}" "${SWIFT_CLI_LANGUAGE_FLAGS[@]}" \
+        -target "${arch}-apple-macos13.0" \
         "${CLI_CORE_SOURCES[@]}" "${CLI_SOURCES[@]}" \
         -o "${out}"
 }

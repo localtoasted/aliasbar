@@ -15,9 +15,11 @@
 #   source "${PROJECT_DIR}/tools/swift-flags.sh"
 #   swiftc "${SWIFT_CONCURRENCY_FLAGS[@]}" ...
 
-# Every target: the app, the AliasBarCore module, the writer tests, and both `ab`
-# builds. `targeted` rather than `complete` because the SwiftUI/AppKit surface is not
-# clean under `complete` yet; raising it is its own piece of work.
+# Every target: the app, the AliasBarCore module, the writer tests, and all three `ab`
+# builds — build.sh's, test.sh's, and the one tools/release-cli.sh ships (which is two
+# swiftc invocations of its own, one per architecture slice). `targeted` rather than
+# `complete` because the SwiftUI/AppKit surface is not clean under `complete` yet;
+# raising it is its own piece of work.
 SWIFT_CONCURRENCY_FLAGS=(
     -warn-concurrency
     -strict-concurrency=targeted
@@ -29,11 +31,15 @@ SWIFT_CONCURRENCY_FLAGS=(
 # rewrites ~/.zshrc, which is the code that can least afford to be wrong. Applied on top
 # of SWIFT_CONCURRENCY_FLAGS, not instead of it.
 #
-# Deliberately NOT applied by tools/release-cli.sh, and this is a decision rather than
-# an oversight: the language mode is enforced on this source set by both build.sh and
-# test.sh, so a regression is caught before a release can be cut (release-cli.sh refuses
-# a dirty tree, i.e. it only ever builds a commit test.sh has run against), and the
-# shipped binary keeps building in the same language mode it always has.
+# Applied by all three `ab` builds, release included. It briefly was not, on the theory
+# that build.sh and test.sh enforce the mode anyway so a regression is caught before a
+# release can be cut. That theory rested on release-cli.sh's dirty-tree refusal meaning
+# "this commit passed test.sh", and it does not: the check proves only that the build
+# corresponds to *some* commit. There is no CI, no git hook and no Makefile in this tree
+# connecting a commit to a test run. The gap it left ran the wrong way — `ab` would build
+# and test clean under Swift 6, then fail to compile at release time on any construct the
+# two modes disagree about (a bare-slash regex literal is enough). One flag list for one
+# source set is the whole point of this file.
 SWIFT_CLI_LANGUAGE_FLAGS=(
     -swift-version 6
 )

@@ -384,10 +384,18 @@ final class AppState: ObservableObject {
     /// refresh count directly testable without replacing any production paths.
     private let promptDeliveryRegistryLoader: PromptDeliveryRegistryLoader
     private var promptDeliveryRegistryByName: [String: PromptCompiler.InstalledCommand] = [:]
+    /// Every field `promptDeliveryStatus(for:)` reads, `kind` included. `kind` is not
+    /// reachable as a wrong answer today — all three instance-form call sites filter to
+    /// prompts before calling, and the static disk form guards on it itself — but the
+    /// memo is keyed by value and the computation branches on kind, so leaving it out
+    /// makes correctness depend on every future caller remembering to pre-filter. An
+    /// alias and a prompt that happen to share a name, description and body would
+    /// otherwise collide on one entry and the second would be served the first's status.
     private struct PromptDeliveryMemoKey: Hashable {
         let name: String
         let description: String?
         let body: String
+        let kind: ShortcutKind
     }
     private var promptDeliveryStatusByPrompt: [PromptDeliveryMemoKey: PromptDeliveryStatus] = [:]
     /// What the registry file looked like at the instant the snapshot was taken.
@@ -951,7 +959,8 @@ final class AppState: ObservableObject {
             let shortcut = Shortcut(prompt: prompt)
             let key = PromptDeliveryMemoKey(name: shortcut.name,
                                             description: shortcut.description,
-                                            body: shortcut.body)
+                                            body: shortcut.body,
+                                            kind: shortcut.kind)
             promptDeliveryStatusByPrompt[key] = computePromptDeliveryStatus(for: shortcut)
         }
     }
@@ -981,7 +990,8 @@ final class AppState: ObservableObject {
         refreshPromptDeliverySnapshotIfRegistryChanged()
         let key = PromptDeliveryMemoKey(name: shortcut.name,
                                         description: shortcut.description,
-                                        body: shortcut.body)
+                                        body: shortcut.body,
+                                        kind: shortcut.kind)
         if let status = promptDeliveryStatusByPrompt[key] { return status }
         let status = computePromptDeliveryStatus(for: shortcut)
         promptDeliveryStatusByPrompt[key] = status
