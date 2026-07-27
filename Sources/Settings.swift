@@ -104,6 +104,13 @@ enum DefaultLibrary: String, CaseIterable, Identifiable {
     func resolvedDialect(context: Dialect?) -> Dialect {
         fixedDialect ?? context ?? .shell
     }
+
+    /// Prompt cannot be a useful default while the prompt side of AliasBar is off.
+    /// Keep this policy outside the Settings view so every caller presents the same
+    /// choices and tests can verify the reduced set without rendering SwiftUI.
+    static func available(promptFeaturesEnabled: Bool) -> [DefaultLibrary] {
+        promptFeaturesEnabled ? allCases : [.automatic, .aliases]
+    }
 }
 
 enum SortOrder: String, CaseIterable, Identifiable {

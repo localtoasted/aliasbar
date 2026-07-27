@@ -9691,8 +9691,10 @@ do {
 
 let libraryPanelSource = read(projectRoot.appendingPathComponent("Sources/LibraryBuilderPanel.swift").path)
 check("Settings and onboarding share one library-builder control",
-      read(projectRoot.appendingPathComponent("Sources/SettingsWindow.swift").path).contains("LibraryBuilderPanel()")
-          && read(projectRoot.appendingPathComponent("Sources/Onboarding.swift").path).contains("LibraryBuilderPanel()"))
+      read(projectRoot.appendingPathComponent("Sources/SettingsWindow.swift").path)
+          .contains("LibraryBuilderPanel(promptsEnabled:")
+          && read(projectRoot.appendingPathComponent("Sources/Onboarding.swift").path)
+              .contains("LibraryBuilderPanel(promptsEnabled:"))
 check("the shared control exposes copy and review actions",
       libraryPanelSource.contains("Copy instructions")
           && libraryPanelSource.contains("Import copied JSON"))
@@ -9784,6 +9786,221 @@ do {
     check("the reviewed Inbox file completes only after the successful save",
           !FileManager.default.fileExists(atPath: file.path))
 }
+
+// ---------------------------------------------------------------------------
+print("\n46. Combined state and safety regression fixes")
+
+// --- Prompt Manage and Review never act on cached shell rows ----------------
+
+do {
+    let (state, promptsDir, _, _, rcPath, _, _) = freshManageFixture()
+    try! """
+    # >>> aliasbar managed block >>>
+    # Edited by AliasBar. Anything outside these markers is never touched.
+    alias hidden-shell='printf hidden'
+    # <<< aliasbar managed block <<<
+    """.write(toFile: rcPath, atomically: true, encoding: .utf8)
+    writeRawPromptFile(promptFixture(["---", "schema: 1", "---", "Visible prompt"]),
+                       name: "visible-prompt", in: promptsDir)
+    let fake = FakePasteboard()
+    state.pasteboard = fake
+    state.settings.enterAction = .copyCommand
+    state.settings.afterAction = .stayOpen
+    state.prepareForShow()
+    state.mode = .manage
+    state.dialect = .prompt
+    state.promptBucket = .library
+    state.selection = 0
+
+    check("prompt Manage never resolves a hidden shell selection", state.selectedEntry == nil)
+    let consumed = state.handleKey(keyEvent(keyCode: UInt16(kVK_Return)))
+    check("Return is consumed inside prompt Manage", consumed)
+    check("Return inside prompt Manage does not copy the hidden shell command",
+          fake.string(forType: .string) == nil && state.toast == nil)
+}
+
+do {
+    let (state, promptsDir, inboxDir, fake) = freshInboxFixture()
+    try! """
+    # >>> aliasbar managed block >>>
+    # Edited by AliasBar. Anything outside these markers is never touched.
+    alias hidden-review='printf hidden-review'
+    # <<< aliasbar managed block <<<
+    """.write(toFile: ZshrcParser.path, atomically: true, encoding: .utf8)
+    _ = writeInboxFile("""
+    {"items":[{"kind":"alias","type":"new","name":"review-only","command":"git status"}]}
+    """, name: "prompt-off-return", in: inboxDir)
+    state.settings.promptFeaturesEnabled = false
+    state.settings.enterAction = .copyCommand
+    state.settings.afterAction = .stayOpen
+    state.prepareForShow()
+    state.mode = .manage
+    state.flipManageDialect()
+    state.selection = 0
+
+    check("prompt-off alias Review opens on the visible Inbox",
+          state.dialect == .prompt && state.promptBucket == .inbox)
+    _ = state.handleKey(keyEvent(keyCode: UInt16(kVK_Return)))
+    check("Return in prompt-off Review does not copy a hidden shell row",
+          fake.string(forType: .string) == nil)
+
+    _ = state.handleKey(keyEvent(keyCode: UInt16(kVK_ANSI_N), modifiers: .command))
+    check("Cmd-N in prompt-off Review opens an alias Composer",
+          state.editor?.kind == .alias)
+
+    state.editor = nil
+    state.errorMessage = nil
+    state.openComposer(prefill: ComposerPrefill(kind: .prompt,
+                                                name: "blocked-open",
+                                                body: "Blocked body"))
+    check("prompt-off state rejects a programmatic prompt Composer",
+          state.editor == nil && state.errorMessage?.contains("Turn on prompts") == true)
+
+    state.errorMessage = nil
+    state.editor = .createPrompt(name: "blocked-save", body: "Blocked body")
+    state.commitEditor()
+    check("prompt-off commit refuses a prompt even if a stale Composer exists",
+          state.editor != nil
+              && state.errorMessage?.contains("Turn on prompts") == true
+              && !FileManager.default.fileExists(
+                  atPath: promptsDir.appendingPathComponent("blocked-save.md").path))
+}
+
+// --- Changing kind breaks Inbox approval provenance --------------------------
+
+do {
+    let (state, promptsDir, inboxDir, _) = freshInboxFixture()
+    let file = writeInboxFile("""
+    {"items":[{"kind":"alias","type":"new","name":"kind-switch","command":"git status --short"}]}
+    """, name: "kind-switch", in: inboxDir)
+    state.prepareForShow()
+    guard case .item(let rowFile, let index) = state.inboxRows.first else {
+        check("kind-switch fixture has an Inbox row", false)
+        fatalError("unreachable")
+    }
+    state.editInboxItem(file: rowFile, index: index)
+    state.switchComposerKind(to: .prompt)
+    var prompt = state.editor!
+    prompt.body = "A new prompt written after changing kind."
+    state.editor = prompt
+    state.commitEditor()
+
+    check("changing kind removes Inbox provenance from the new item",
+          prompt.source == nil && prompt.flagReasons.isEmpty)
+    check("saving the new kind leaves the original suggestion pending",
+          FileManager.default.fileExists(atPath: file.path) && state.inboxPendingCount == 1)
+    check("the new prompt saves without approving the original alias",
+          FileManager.default.fileExists(
+              atPath: promptsDir.appendingPathComponent("kind-switch.md").path)
+              && !read(ZshrcParser.path).contains("alias kind-switch="))
+}
+
+// --- Inbox descriptions cannot add frontmatter lines -------------------------
+
+do {
+    let dir = inboxScratchDir()
+    _ = writeInboxFile("""
+    {"items":[{"type":"new","name":"metadata-injection",
+                "description":"Looks fine\\ndelivery: claude-code",
+                "body":"Visible body"}]}
+    """, name: "multiline-description", in: dir)
+    guard case .ok(let files) = PromptInbox.scan(inboxDirectory: dir),
+          let first = files.first,
+          case .invalid(_, let reason) = first else {
+        check("multiline Inbox description is rejected", false)
+        fatalError("unreachable")
+    }
+    check("multiline Inbox description names the one-line rule",
+          reason.contains("description") && reason.contains("one line"))
+}
+
+do {
+    let inbox = inboxScratchDir()
+    do {
+        _ = try PromptInbox.importText("""
+        {"items":[{"kind":"prompt","type":"new","name":"import-injection",
+                    "description":"Looks fine\\ndelivery: codex","body":"Visible body"}]}
+        """, to: inbox)
+        check("generic import rejects a multiline prompt description", false)
+    } catch PromptInbox.ImportError.invalid(let reason) {
+        check("generic import rejects a multiline prompt description",
+              reason.contains("description") && reason.contains("one line"))
+    } catch {
+        check("generic import reports multiline descriptions as invalid", false)
+    }
+    let written = (try? FileManager.default.contentsOfDirectory(
+        at: inbox, includingPropertiesForKeys: nil)) ?? []
+    check("generic multiline description rejection writes no Inbox file", written.isEmpty)
+}
+
+do {
+    let dir = URL(fileURLWithPath: "\(sandbox)/direct-description-guard")
+    let item = PromptInbox.Item(
+        sourceFile: dir.appendingPathComponent("source.json"),
+        kind: .prompt,
+        type: .new,
+        name: "direct-injection",
+        description: "Looks fine\n---\nInjected body",
+        body: "Reviewed body",
+        replaces: nil,
+        merges: [],
+        unknownFields: [],
+        flags: [])
+    do {
+        _ = try PromptInbox.approve(item, existingLibrary: [], promptsDirectory: dir,
+                                    acknowledgedFlags: true)
+        check("approval rejects a multiline description from a direct caller", false)
+    } catch {
+        check("approval rejects a multiline description from a direct caller",
+              error.localizedDescription.contains("one line"))
+    }
+    check("a refused description injection writes no prompt file",
+          !FileManager.default.fileExists(
+              atPath: dir.appendingPathComponent("direct-injection.md").path))
+}
+
+// --- Prompt-off controls expose only usable choices --------------------------
+
+check("prompt-off default choices omit Prompts",
+      DefaultLibrary.available(promptFeaturesEnabled: false) == [.automatic, .aliases])
+check("prompt-on default choices include every library",
+      DefaultLibrary.available(promptFeaturesEnabled: true) == DefaultLibrary.allCases)
+check("prompt-off builder choices contain Aliases only",
+      LibraryBuildKind.available(promptFeaturesEnabled: false) == [.alias])
+check("prompt-on builder choices include prompts and aliases",
+      LibraryBuildKind.available(promptFeaturesEnabled: true) == LibraryBuildKind.allCases)
+
+let combinedSettingsSource = read(
+    projectRoot.appendingPathComponent("Sources/SettingsWindow.swift").path)
+check("Settings exposes a prompt feature toggle",
+      combinedSettingsSource.contains("$settings.promptFeaturesEnabled"))
+check("Settings default options use the prompt-aware availability list",
+      combinedSettingsSource.contains("DefaultLibrary.available("))
+check("Settings does not render every default option while prompts are off",
+      !combinedSettingsSource.contains("ForEach(DefaultLibrary.allCases)"))
+check("Settings passes the prompt feature state into the builder",
+      combinedSettingsSource.contains(
+          "LibraryBuilderPanel(promptsEnabled: settings.promptFeaturesEnabled)"))
+check("onboarding passes its current prompt choice into the builder",
+      libraryOnboardingSource.contains(
+          "LibraryBuilderPanel(promptsEnabled: decisions.claudeCodePromptFeatures)"))
+let combinedLibraryPanelSource = read(
+    projectRoot.appendingPathComponent("Sources/LibraryBuilderPanel.swift").path)
+check("library builder renders only its prompt-aware available kinds",
+      combinedLibraryPanelSource.contains("ForEach(availableKinds)"))
+check("library builder does not render every kind while prompts are off",
+      !combinedLibraryPanelSource.contains("ForEach(LibraryBuildKind.allCases)"))
+
+// --- Clipboard pointer actions expose native or explicit accessibility actions -
+
+check("clipboard list rows use native Button-backed live controls",
+      clipboardFindSource.contains(".live { state.selection = index }"))
+check("clipboard transform rows use native Button-backed live controls",
+      clipboardFindSource.contains(".live {")
+          && clipboardFindSource.contains("state.clipActionSelection = index"))
+check("selectable raw clip text exposes a VoiceOver default action",
+      clipboardFindSource.contains(".accessibilityAddTraits(.isButton)")
+          && clipboardFindSource.contains(".accessibilityAction { activateRawClip() }"))
 
 // ---------------------------------------------------------------------------
 print("\n" + String(repeating: "-", count: 60))

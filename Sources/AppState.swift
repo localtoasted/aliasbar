@@ -1720,6 +1720,10 @@ final class AppState: ObservableObject {
             guard list.indices.contains(selection), boardMatches(list[selection]) else { return nil }
             return list[selection]
         }
+        // MANAGE's prompt side renders Prompt, Health, Delivery, or Inbox rows. Its
+        // shell bucket remains cached underneath that surface, but must never resolve
+        // into an actionable selection while those rows are on screen.
+        guard !(mode == .manage && dialect == .prompt) else { return nil }
         let list = activeList
         guard list.indices.contains(selection) else { return nil }
         return list[selection]
@@ -1960,6 +1964,12 @@ final class AppState: ObservableObject {
             performBoardPrompt(prompt)
             return true
 
+        // Prompt MANAGE surfaces own explicit controls. Return must not fall through
+        // to the shell-only handler below and act on a cached alias row that is hidden
+        // behind Library, Delivery, Health, or Review.
+        case kVK_Return where mode == .manage && dialect == .prompt:
+            return true
+
         // ⇥ flips the dialect boost in FIND's aliases source and the deck in BOARD,
         // instead of cycling the view — MANAGE keeps ⇥ as a view switch below, since
         // it has no dialect to flip.
@@ -2078,7 +2088,10 @@ final class AppState: ObservableObject {
         // "which kind is this session favoring" — and the Composer's own Kind control
         // stays switchable from there regardless of which one this opened on.
         case kVK_ANSI_N where command:
-            openComposer(prefill: ComposerPrefill(kind: dialect == .prompt ? .prompt : .alias))
+            let kind: EditTarget.Kind = settings.promptFeaturesEnabled && dialect == .prompt
+                ? .prompt
+                : .alias
+            openComposer(prefill: ComposerPrefill(kind: kind))
             return true
 
         case kVK_ANSI_E where command:
@@ -2412,6 +2425,10 @@ final class AppState: ObservableObject {
     /// funnels a `ComposerPrefill` through here rather than constructing `EditTarget`
     /// directly, so every one of them agrees about what "prefilled" means.
     func openComposer(prefill: ComposerPrefill) {
+        guard prefill.kind != .prompt || settings.promptFeaturesEnabled else {
+            errorMessage = "Turn on prompts before creating one."
+            return
+        }
         // Only `editInboxItem` ever wants this set, and it sets it itself right
         // after calling this function — so any other route into the Composer
         // clears whatever a previous, possibly-abandoned inbox edit left behind,
@@ -2441,17 +2458,26 @@ final class AppState: ObservableObject {
     /// other would be more confusing than starting the new kind's field empty.
     func switchComposerKind(to kind: EditTarget.Kind) {
         guard let target = editor, target.kind != kind else { return }
+        // Changing kind creates a different item. If this sheet came from Inbox, the
+        // original suggestion must remain pending instead of following the new item
+        // into a save and being archived as approved.
+        let leavesInboxEdit = target.source == "inbox"
+        if leavesInboxEdit { pendingInboxEdit = nil }
+        let source = leavesInboxEdit ? nil : target.source
+        let flagReasons = leavesInboxEdit ? [] : target.flagReasons
+        let reviewAcknowledged = leavesInboxEdit ? false : target.reviewAcknowledged
+        errorMessage = nil
         switch kind {
         case .alias:
             editor = EditTarget(kind: .alias, mode: .create, name: target.name,
-                                command: "", flagReasons: target.flagReasons,
-                                reviewAcknowledged: target.reviewAcknowledged,
-                                originalName: "", source: target.source)
+                                command: "", flagReasons: flagReasons,
+                                reviewAcknowledged: reviewAcknowledged,
+                                originalName: "", source: source)
         case .prompt:
             editor = EditTarget(kind: .prompt, mode: .create, name: target.name,
-                                command: "", flagReasons: target.flagReasons,
-                                reviewAcknowledged: target.reviewAcknowledged,
-                                originalName: "", source: target.source)
+                                command: "", flagReasons: flagReasons,
+                                reviewAcknowledged: reviewAcknowledged,
+                                originalName: "", source: source)
         }
     }
 
@@ -2577,6 +2603,10 @@ final class AppState: ObservableObject {
 
     private func commitEditor(confirmed: Bool, now: Date = Date()) {
         guard let target = editor else { return }
+        guard target.kind != .prompt || settings.promptFeaturesEnabled else {
+            errorMessage = "Turn on prompts before saving."
+            return
+        }
         guard target.flagReasons.isEmpty || target.reviewAcknowledged else {
             errorMessage = "Review the full item before saving it."
             return
@@ -2661,6 +2691,10 @@ final class AppState: ObservableObject {
         }
         guard !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             errorMessage = "A prompt needs a body."
+            return
+        }
+        guard !description.contains("\n"), !description.contains("\r") else {
+            errorMessage = "A prompt description must fit on one line."
             return
         }
         // Case-insensitive collision against every OTHER prompt already on disk —
