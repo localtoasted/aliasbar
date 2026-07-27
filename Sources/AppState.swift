@@ -2306,8 +2306,8 @@ final class AppState: ObservableObject {
                 return
             }
             // The target app has to be frontmost before the keystroke is sent, so the
-            // popover closes and the activation-aware task below hands focus back and
-            // waits for AppKit to confirm that it actually took effect.
+            // popover closes and focus is handed back first, and the paste goes out a
+            // beat later once that has actually taken effect.
             //
             // Deliberately not `finish()`: "Keep it open" cannot apply here. A paste
             // exists only by surrendering focus, and summoning the window back after
@@ -2315,21 +2315,13 @@ final class AppState: ObservableObject {
             // exactly where they are about to keep typing. So paste modes always
             // close, and the Afterwards setting says so instead of pretending.
             onDismiss?()
+            PreviousApp.restore()
             // Recorded here, at the moment a paste is actually possible — it is what
             // lets a later `AXIsProcessTrusted() == false` be read as a *lost* grant
             // rather than one never given.
             settings.hasEverPasted = true
-            Task { @MainActor [weak self] in
-                guard let self else { return }
-                if await PreviousApp.restoreAndWaitForActivation() {
-                    _ = Typist.paste(payload)
-                } else {
-                    // Keep the user's action recoverable if macOS refuses to return
-                    // focus. Do not synthesize ⌘V into whichever app happens to be
-                    // active instead.
-                    PasteboardBroker.write(transient: payload, to: self.pasteboard)
-                    Diag.log("deliver: target app did not reactivate; copied without pasting")
-                }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                _ = Typist.paste(payload)
             }
         }
     }

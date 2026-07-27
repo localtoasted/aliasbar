@@ -159,27 +159,6 @@ enum PreviousApp {
         stored = nil
     }
 
-    /// Restores the remembered app and waits until AppKit reports it as active.
-    /// The short sleep is only a polling cadence; activation itself, not elapsed
-    /// time, is the readiness signal that permits a synthetic paste.
-    @MainActor
-    static func restoreAndWaitForActivation(maxPolls: Int = 100) async -> Bool {
-        guard !DesktopInteractionGuard.isActive else {
-            stored = nil
-            return false
-        }
-        guard let app = stored else { return false }
-        stored = nil
-        if app.isActive { return true }
-        guard app.activate(options: []) else { return false }
-
-        for _ in 0..<maxPolls {
-            if app.isActive { return true }
-            try? await Task.sleep(nanoseconds: 10_000_000)
-        }
-        return app.isActive
-    }
-
     static func forget() { stored = nil }
 }
 
