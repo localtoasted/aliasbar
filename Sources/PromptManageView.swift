@@ -26,10 +26,17 @@ struct PromptManageView: View {
         return ScrollViewReader { proxy in
             ScrollView {
                 if results.isEmpty {
-                    EmptyStateView(symbol: emptySymbol,
-                                   title: emptyTitle,
-                                   hint: emptyHint)
-                        .padding(.top, 40)
+                    VStack(spacing: 10) {
+                        EmptyStateView(symbol: emptySymbol,
+                                       title: emptyTitle,
+                                       hint: emptyHint)
+                            .padding(.top, 40)
+                        if showsEmptyLibraryHint {
+                            DismissibleInfoBanner(text: AppState.promptLibraryEmptyHint,
+                                                  onDismiss: state.dismissPromptLibraryHint)
+                                .padding(.horizontal, 8)
+                        }
+                    }
                 } else {
                     LazyVStack(spacing: 1) {
                         ForEach(Array(results.enumerated()), id: \.element.id) { index, shortcut in
@@ -64,16 +71,14 @@ struct PromptManageView: View {
         }
     }
 
-    /// The base hint, plus the shared ⌘I CTA appended only when there's truly
-    /// nothing in the library yet (never for a mere "nothing matches this search",
-    /// and never for Health — an empty Health list is a clean bill of health, not
-    /// an empty library).
     private var emptyHint: String {
-        let base = "⇥ shows your shell aliases instead."
-        guard state.query.isEmpty, state.promptBucket != .health, state.promptLibraryEmpty else {
-            return base
-        }
-        return "\(base)\n\(AppState.promptLibraryEmptyHint)"
+        "⇥ shows your shell aliases instead."
+    }
+
+    /// Setup guidance belongs beside the empty state, but it has its own close control
+    /// and disappears everywhere after that control is used.
+    private var showsEmptyLibraryHint: Bool {
+        state.query.isEmpty && state.promptBucket != .health && state.showsPromptLibraryHint
     }
 
     private func promptManageRow(_ shortcut: Shortcut, index: Int) -> some View {
@@ -541,5 +546,43 @@ struct InfoBanner: View {
         .padding(8)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(theme.surface, in: RoundedRectangle(cornerRadius: theme.cornerRadius))
+    }
+}
+
+/// Setup help with an explicit, durable exit. This is separate from `InfoBanner`
+/// because delivery and safety notices are part of the current task; the empty-library
+/// review CTA is not.
+struct DismissibleInfoBanner: View {
+    @Environment(\.theme) private var theme
+    let text: String
+    let onDismiss: () -> Void
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 7) {
+            Image(systemName: "info.circle.fill")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(theme.faint)
+                .padding(.top, 1)
+            Text(text)
+                .font(.system(size: 10.5))
+                .foregroundStyle(theme.faint)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 4)
+            Button(action: onDismiss) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 9, weight: .bold))
+                    .frame(width: 18, height: 18)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(theme.dim)
+            .accessibilityLabel("Dismiss library setup hint")
+            .help("Dismiss")
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(theme.surface, in: RoundedRectangle(cornerRadius: theme.cornerRadius + 1))
+        .overlay(RoundedRectangle(cornerRadius: theme.cornerRadius + 1)
+            .strokeBorder(theme.rule.opacity(0.45), lineWidth: 1))
     }
 }

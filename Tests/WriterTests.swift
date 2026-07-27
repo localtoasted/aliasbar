@@ -5031,6 +5031,7 @@ func testBoundaryNeverLeaksLocalOnlyKeys() {
     settings.showFunctions = false
     settings.showAliases = false
     settings.defaultLibrary = .prompts
+    settings.hasDismissedPromptLibraryHint = true
 
     let dir = sharedStoreDir()
     let url = URL(fileURLWithPath: "\(dir)/settings.json")
@@ -8285,6 +8286,21 @@ do {
 check("the shared empty-library hint always mentions ⌘I",
       AppState.promptLibraryEmptyHint.contains("⌘I"))
 
+do {
+    let (state, _, _, _) = freshInboxFixture()
+    state.prepareForShow()
+    check("empty prompt setup help starts visible before dismissal",
+          state.showsPromptLibraryHint)
+    state.dismissPromptLibraryHint()
+    check("dismissing prompt setup help hides it immediately",
+          !state.showsPromptLibraryHint)
+
+    let (settings, defaults) = freshTestSettings()
+    settings.hasDismissedPromptLibraryHint = true
+    check("prompt setup dismissal survives a new settings instance",
+          AppSettings(defaults: defaults).hasDismissedPromptLibraryHint)
+}
+
 // --- Inbox: pending rows, badge count, and file-level lifecycle ----------------
 
 func inboxAuditJSON(name: String = "weekly-recap") -> String {
@@ -9207,9 +9223,10 @@ do {
     settings.promptFeaturesEnabled = true
     state.prepareForShow()
     let before = state.mode
+    let beforeDialect = state.dialect
     _ = state.handleKey(keyEvent(keyCode: 48))
     check("with prompt features back on, ⇥ flips dialect and stays in the same view",
-          state.mode == before && state.dialect == .prompt)
+          state.mode == before && state.dialect != beforeDialect)
 }
 
 // --- edit-before-approve carries the inbox item's flags into the Composer ----
@@ -9584,12 +9601,12 @@ do {
 
 do {
     let (settings, defaults) = freshTestSettings()
-    check("Automatic is the migration and fresh-install default library",
-          settings.defaultLibrary == .automatic)
+    check("Prompts is the fresh-install default library",
+          settings.defaultLibrary == .prompts)
     check("Automatic preserves a prompt context guess",
-          settings.defaultLibrary.resolvedDialect(context: .prompt) == .prompt)
+          DefaultLibrary.automatic.resolvedDialect(context: .prompt) == .prompt)
     check("Automatic falls back to aliases without a context guess",
-          settings.defaultLibrary.resolvedDialect(context: nil) == .shell)
+          DefaultLibrary.automatic.resolvedDialect(context: nil) == .shell)
     settings.defaultLibrary = .prompts
     check("default library persists in UserDefaults",
           AppSettings(defaults: defaults).defaultLibrary == .prompts)
@@ -9601,6 +9618,12 @@ do {
     settings.defaultLibrary = .aliases
     state.prepareForShow()
     check("changing the default back is effective on the next open", state.dialect == .shell)
+
+    settings.defaultLibrary = .prompts
+    settings.promptFeaturesEnabled = false
+    state.prepareForShow()
+    check("a Prompts default still falls back to aliases while prompt features are off",
+          state.dialect == .shell)
 }
 
 // --- Plain New never reads clipboard; selected clips have explicit actions ---
@@ -10004,6 +10027,25 @@ check("library builder renders only its prompt-aware available kinds",
       combinedLibraryPanelSource.contains("ForEach(availableKinds)"))
 check("library builder does not render every kind while prompts are off",
       !combinedLibraryPanelSource.contains("ForEach(LibraryBuildKind.allCases)"))
+
+let rootViewSource = read(projectRoot.appendingPathComponent("Sources/Views.swift").path)
+let promptFindViewSource = read(
+    projectRoot.appendingPathComponent("Sources/PromptFindView.swift").path)
+let promptManageViewSource = read(
+    projectRoot.appendingPathComponent("Sources/PromptManageView.swift").path)
+check("the search field is laid out before the view controls",
+      rootViewSource.contains("VStack(spacing: 9) {\n            searchField\n            navigationBar"))
+check("the view controls show a contextual Tab library hint",
+      rootViewSource.contains("KeyHint(keys: \"⇥\", label:"))
+check("selection actions reserve stable row width instead of reflowing text",
+      rootViewSource.contains("struct StableRowActionHints")
+          && rootViewSource.contains(".frame(width: 196, height: 24, alignment: .trailing)")
+          && rootViewSource.contains(".opacity(visible ? 1 : 0)"))
+check("FIND's empty prompt setup notice has a dismiss control",
+      promptFindViewSource.contains("DismissibleInfoBanner(text: AppState.promptLibraryEmptyHint"))
+check("MANAGE's empty prompt setup notice shares the same dismissal policy",
+      promptManageViewSource.contains("state.showsPromptLibraryHint")
+          && promptManageViewSource.contains("onDismiss: state.dismissPromptLibraryHint"))
 
 // --- Clipboard pointer actions expose native or explicit accessibility actions -
 
