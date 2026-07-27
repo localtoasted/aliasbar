@@ -106,6 +106,9 @@ struct EditTarget: Identifiable {
     /// the sheet can show the same warning `approve` would have required
     /// acknowledging. Empty everywhere else.
     var flagReasons: [String] = []
+    /// Explicit full-review acknowledgement for an Inbox item. A flagged Composer
+    /// cannot save until this is true, matching direct Inbox approval.
+    var reviewAcknowledged = false
     /// The name as it was when editing began, so a rename can delete/replace the old
     /// entry (alias rename via `AliasWriter.Operation.rename`, or a prompt rename via
     /// write-new + `PromptStore.delete(old)`).
@@ -163,6 +166,7 @@ struct ComposerPrefill {
     /// the human saving it sees exactly what `approve` would have made them
     /// acknowledge. Empty everywhere else.
     var flagReasons: [String] = []
+    var reviewAcknowledged = false
 }
 
 /// What the Snippets sheet is currently doing — deliberately its own small type
@@ -1055,11 +1059,16 @@ final class AppState: ObservableObject {
         var rows: [InboxRow] = []
         for (url, review) in inboxReviews.sorted(by: { $0.key.lastPathComponent < $1.key.lastPathComponent }) {
             for index in review.items.indices where review.decisions[index] == nil {
+                if !settings.promptFeaturesEnabled && review.items[index].kind != .alias {
+                    continue
+                }
                 rows.append(.item(file: url, index: index))
             }
         }
-        for invalid in invalidInboxFiles.sorted(by: { $0.url.lastPathComponent < $1.url.lastPathComponent }) {
-            rows.append(.invalidFile(url: invalid.url, reason: invalid.reason))
+        if settings.promptFeaturesEnabled {
+            for invalid in invalidInboxFiles.sorted(by: { $0.url.lastPathComponent < $1.url.lastPathComponent }) {
+                rows.append(.invalidFile(url: invalid.url, reason: invalid.reason))
+            }
         }
         return rows
     }
@@ -1134,6 +1143,10 @@ final class AppState: ObservableObject {
               review.decisions[index] == nil
         else { return }
         let item = review.items[index]
+        guard settings.promptFeaturesEnabled || item.kind == .alias else {
+            errorMessage = "Turn on prompts to approve this item."
+            return
+        }
         let acknowledged = review.viewedInFull.contains(index)
         do {
             let result: PromptInbox.ApproveResult
@@ -1198,11 +1211,16 @@ final class AppState: ObservableObject {
     func editInboxItem(file: URL, index: Int) {
         guard let review = inboxReviews[file], review.items.indices.contains(index) else { return }
         let item = review.items[index]
+        guard settings.promptFeaturesEnabled || item.kind == .alias else {
+            errorMessage = "Turn on prompts to edit this item."
+            return
+        }
         let kind: EditTarget.Kind = item.kind == .prompt ? .prompt : .alias
         openComposer(prefill: ComposerPrefill(kind: kind, name: item.name,
                                               description: item.description ?? "",
                                               body: item.body, source: "inbox",
-                                              flagReasons: item.flags.map(\.detail)))
+                                              flagReasons: item.flags.map(\.detail),
+                                              reviewAcknowledged: review.viewedInFull.contains(index)))
         pendingInboxEdit = (file, index)
     }
 
@@ -1597,13 +1615,17 @@ final class AppState: ObservableObject {
         editor = nil
         snippetEditor = nil
 
-        // The saved library choice controls the initial deck and ranking boost. Context
-        // can still explain a matching app or a browser, but it never overrides an
-        // explicit preference.
+        // Automatic keeps the context-aware behavior older installs already had.
+        // A fixed choice wins, while a matching context chip may still explain it.
         let guess = ContextDetector.guess(for: PreviousApp.stored)
         if settings.promptFeaturesEnabled {
-            dialect = settings.defaultLibrary.dialect
-            contextChip = guess.dialect == nil || guess.dialect == dialect ? guess.chip : nil
+            if let fixed = settings.defaultLibrary.fixedDialect {
+                dialect = fixed
+                contextChip = guess.dialect == nil || guess.dialect == fixed ? guess.chip : nil
+            } else {
+                dialect = settings.defaultLibrary.resolvedDialect(context: guess.dialect)
+                contextChip = guess.chip
+            }
         } else {
             dialect = .shell
             contextChip = nil
@@ -1739,8 +1761,8 @@ final class AppState: ObservableObject {
                 // Shell dialect keeps its exact pre-existing alias-creation behavior;
                 // the prompt dialect gets the same courtesy for prompts.
                 if !query.isEmpty {
-                    openNewComposer(prefill: ComposerPrefill(kind: dialect == .prompt ? .prompt : .alias,
-                                                             name: query, source: "find-no-match"))
+                    openComposer(prefill: ComposerPrefill(kind: dialect == .prompt ? .prompt : .alias,
+                                                          name: query, source: "find-no-match"))
                 }
                 return true
             }
@@ -1839,7 +1861,7 @@ final class AppState: ObservableObject {
                 // A dead-end search is one keystroke from being a new alias's name, so
                 // Return on "no match" opens the editor with the name already filled in.
                 if !query.isEmpty {
-                    openNewComposer(prefill: ComposerPrefill(kind: .alias, name: query, source: "no-match"))
+                    openComposer(prefill: ComposerPrefill(kind: .alias, name: query, source: "no-match"))
                 }
                 return true
             }
@@ -1874,7 +1896,7 @@ final class AppState: ObservableObject {
         // "which kind is this session favoring" — and the Composer's own Kind control
         // stays switchable from there regardless of which one this opened on.
         case kVK_ANSI_N where command:
-            openNewComposer(prefill: ComposerPrefill(kind: dialect == .prompt ? .prompt : .alias))
+            openComposer(prefill: ComposerPrefill(kind: dialect == .prompt ? .prompt : .alias))
             return true
 
         case kVK_ANSI_E where command:
@@ -2129,22 +2151,7 @@ final class AppState: ObservableObject {
 
     // MARK: - Composer (PRE-267)
 
-    /// Opens a new-item Composer and checks the clipboard at that exact moment. The
-    /// caller is an explicit New or Create action. Launch, search, and view rendering
-    /// never call this path. A supplied body wins, so clipboard text cannot replace a
-    /// draft a caller already prepared.
-    func openNewComposer(prefill: ComposerPrefill) {
-        var resolved = prefill
-        if resolved.mode == .create,
-           resolved.body.isEmpty,
-           let copied = pasteboard.string(forType: .string),
-           let safe = Self.clipboardDraft(copied, for: resolved.kind) {
-            resolved.body = safe
-        }
-        openComposer(prefill: resolved)
-    }
-
-    /// Pure suitability policy for explicit clipboard prefills. The shared secret
+    /// Pure suitability policy for explicit selected-clip prefills. The shared secret
     /// classifier blocks credentials. Alias commands must fit the writer's one-line
     /// contract, while prompts may keep their original whitespace and line breaks.
     static func clipboardDraft(_ text: String, for kind: EditTarget.Kind) -> String? {
@@ -2166,6 +2173,26 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// Starts a new item from the clip currently selected inside AliasBar. Plain New
+    /// never reads the system clipboard; this action is the only clipboard-to-Composer
+    /// path, and its source is visible in the clipboard view before the user chooses it.
+    func createFromSelectedClip(kind: EditTarget.Kind) {
+        guard let clip = selectedClip else { return }
+        guard kind != .prompt || settings.promptFeaturesEnabled else {
+            errorMessage = "Turn on prompts to save this clip as a prompt."
+            return
+        }
+        guard let safe = Self.clipboardDraft(clip.content, for: kind) else {
+            errorMessage = kind == .alias
+                ? "This clip is not a safe one-line alias command."
+                : "This clip cannot be used as a prompt."
+            return
+        }
+        errorMessage = nil
+        openComposer(prefill: ComposerPrefill(kind: kind, body: safe,
+                                              source: "selected-clipboard-clip"))
+    }
+
     /// The Composer's one entry point. Every route that opens the sheet — ⌘N,
     /// Suggested's Create/Rename, `promoteToAlias`, a no-match Enter in either FIND
     /// dialect, ⌘E on a prompt row, and later the inbox's edit-before-approve —
@@ -2181,12 +2208,14 @@ final class AppState: ObservableObject {
         case .alias:
             editor = EditTarget(kind: .alias, mode: prefill.mode, name: prefill.name,
                                 command: prefill.body, flagReasons: prefill.flagReasons,
+                                reviewAcknowledged: prefill.reviewAcknowledged,
                                 originalName: prefill.originalName, source: prefill.source)
         case .prompt:
             editor = EditTarget(kind: .prompt, mode: prefill.mode, name: prefill.name,
                                 command: "", description: prefill.description, body: prefill.body,
                                 deliverToClaudeCode: prefill.deliverToClaudeCode,
                                 flagReasons: prefill.flagReasons,
+                                reviewAcknowledged: prefill.reviewAcknowledged,
                                 originalName: prefill.originalName, source: prefill.source)
         }
     }
@@ -2203,10 +2232,12 @@ final class AppState: ObservableObject {
         case .alias:
             editor = EditTarget(kind: .alias, mode: .create, name: target.name,
                                 command: "", flagReasons: target.flagReasons,
+                                reviewAcknowledged: target.reviewAcknowledged,
                                 originalName: "", source: target.source)
         case .prompt:
             editor = EditTarget(kind: .prompt, mode: .create, name: target.name,
                                 command: "", flagReasons: target.flagReasons,
+                                reviewAcknowledged: target.reviewAcknowledged,
                                 originalName: "", source: target.source)
         }
     }
@@ -2333,6 +2364,10 @@ final class AppState: ObservableObject {
 
     private func commitEditor(confirmed: Bool, now: Date = Date()) {
         guard let target = editor else { return }
+        guard target.flagReasons.isEmpty || target.reviewAcknowledged else {
+            errorMessage = "Review the full item before saving it."
+            return
+        }
         switch target.kind {
         case .alias: commitAliasEditor(target, confirmed: confirmed)
         case .prompt: commitPromptEditor(target, now: now)

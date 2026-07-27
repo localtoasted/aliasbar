@@ -323,9 +323,14 @@ struct SettingsView: View {
                                    label: { $0.label })
                 }
                 SettingsRow("Starts with", hint: "You can switch libraries with ⇥.") {
-                    ThemedSegments(selection: $settings.defaultLibrary,
-                                   options: DefaultLibrary.allCases,
-                                   label: { $0.label })
+                    Picker("Default library", selection: $settings.defaultLibrary) {
+                        ForEach(DefaultLibrary.allCases) { option in
+                            Text(option.label).tag(option)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .accessibilityLabel("Default library")
                 }
                 SettingsRow("Launch at login", hint: nil) {
                     ThemedToggle(isOn: $launchAtLogin, label: launchAtLogin ? "On" : "Off")

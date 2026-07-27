@@ -134,6 +134,13 @@ enum LibraryBuildKind: String, CaseIterable, Identifiable {
         case .alias: return "Aliases"
         }
     }
+
+    var inboxKind: PromptInbox.ItemKind {
+        switch self {
+        case .prompt: return .prompt
+        case .alias: return .alias
+        }
+    }
 }
 
 /// Where the user plans to paste the generated instructions. ChatGPT returns JSON for
@@ -148,6 +155,16 @@ enum LibraryBuildAssistant: String, CaseIterable, Identifiable {
         case .chatGPT: return "ChatGPT"
         case .codex: return "Codex"
         case .claudeCode: return "Claude Code"
+        }
+    }
+
+    /// Stable value written into the copied JSON. This is deliberately separate
+    /// from the Swift case name so the external schema stays readable.
+    var schemaValue: String {
+        switch self {
+        case .chatGPT: return "chatgpt"
+        case .codex: return "codex"
+        case .claudeCode: return "claude-code"
         }
     }
 }
@@ -208,7 +225,7 @@ enum LibraryBuilderPrompt {
 
     private static func rules(for kind: LibraryBuildKind) -> String {
         var lines = [
-            "1. Suggest no more than 12 items.",
+            "1. Suggest no more than 5 items.",
             "2. Suggest only new items supported by repeated behavior. Do not rename, update, or merge existing items.",
             "3. Skip anything that includes a password, token, private key, credential URL, or other secret.",
             "4. Use names made from letters, digits, hyphens, and underscores only.",
@@ -231,7 +248,6 @@ enum LibraryBuilderPrompt {
         case .prompt:
             item = """
             {
-              "kind": "prompt",
               "type": "new",
               "name": "short-name",
               "description": "one clear sentence",
@@ -241,10 +257,8 @@ enum LibraryBuilderPrompt {
         case .alias:
             item = """
             {
-              "kind": "alias",
               "type": "new",
               "name": "short-name",
-              "description": "what the command does",
               "command": "the complete one-line command"
             }
             """
@@ -252,18 +266,16 @@ enum LibraryBuilderPrompt {
 
         let schema = """
         {
+          "version": 1,
+          "source": "\(assistant.schemaValue)",
+          "kind": "\(kind.rawValue)",
           "items": [
         \(indent(item, by: 4))
           ]
         }
         """
 
-        switch assistant {
-        case .chatGPT:
-            return "Reply with exactly one JSON code block in this shape. Return {\"items\":[]} when no suggestion has enough evidence.\n\n\(schema)"
-        case .codex, .claudeCode:
-            return "Write only the JSON object below to a new file at ~/.aliasbar/inbox/library-build-\(kind.rawValue).json. Create the inbox directory if needed. If that filename exists, add a numeric suffix. Do not change any other file. Return {\"items\":[]} when no suggestion has enough evidence.\n\n\(schema)"
-        }
+        return "Reply with exactly one JSON code block in this shape. Do not write files or change AliasBar. Keep the four top-level fields exactly as shown. Return an empty items array when nothing has enough evidence.\n\n\(schema)"
     }
 
     private static func indent(_ text: String, by spaces: Int) -> String {

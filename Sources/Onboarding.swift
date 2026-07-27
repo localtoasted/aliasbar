@@ -53,6 +53,7 @@ struct OnboardingView: View {
     @State private var savingPreset = false
     @State private var newPresetName = ""
     @State private var presetNotice: String?
+    @State private var showsLibraryBuilder = false
 
     /// Runs the silent local scan once, when the window is built — never again for the
     /// life of this view — and seeds the found-treasure checkboxes from it.
@@ -278,9 +279,21 @@ struct OnboardingView: View {
                 }
             }
 
-            SettingsGroup("Build your library") {
+            DisclosureGroup(isExpanded: $showsLibraryBuilder) {
                 LibraryBuilderPanel()
+                    .padding(.top, 8)
+            } label: {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Build my library")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(theme.text)
+                    Text("Optional. Ask ChatGPT, Codex, or Claude Code for ideas.")
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(theme.faint)
+                }
             }
+            .tint(theme.accent)
+            .accessibilityHint("Shows optional library suggestions")
         }
     }
 

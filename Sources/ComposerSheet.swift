@@ -41,7 +41,7 @@ struct ComposerSheet: View {
                 }
 
                 if !target.flagReasons.isEmpty {
-                    inboxFlagBanner(target.flagReasons)
+                    inboxFlagBanner(binding)
                 }
 
                 switch target.kind {
@@ -84,6 +84,7 @@ struct ComposerSheet: View {
     }
 
     private func canSave(_ target: EditTarget) -> Bool {
+        guard target.flagReasons.isEmpty || target.reviewAcknowledged else { return false }
         switch target.kind {
         case .alias:
             return !target.name.isEmpty && !target.command.isEmpty
@@ -142,14 +143,19 @@ struct ComposerSheet: View {
 
     /// Edit and approve carries Inbox flags into both Composer kinds. The edit path
     /// must show the same warning as direct approval.
-    private func inboxFlagBanner(_ reasons: [String]) -> some View {
-        VStack(alignment: .leading, spacing: 3) {
+    private func inboxFlagBanner(_ binding: Binding<EditTarget>) -> some View {
+        let target = binding.wrappedValue
+        return VStack(alignment: .leading, spacing: 3) {
             Label("Review before saving", systemImage: "exclamationmark.triangle.fill")
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(.orange)
-            ForEach(reasons, id: \.self) { reason in
+            ForEach(target.flagReasons, id: \.self) { reason in
                 Text(reason).font(.system(size: 10.5)).foregroundStyle(.secondary)
             }
+            Toggle("I reviewed this \(target.kind.rawValue)", isOn: binding.reviewAcknowledged)
+                .toggleStyle(.checkbox)
+                .font(.system(size: 10.5, weight: .medium))
+                .padding(.top, 3)
         }
         .padding(8)
         .frame(maxWidth: .infinity, alignment: .leading)

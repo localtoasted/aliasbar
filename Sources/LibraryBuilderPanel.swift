@@ -13,18 +13,28 @@ struct LibraryBuilderPanel: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             SettingsRow("Build", hint: "Choose what you want suggestions for.") {
-                ThemedSegments(selection: $kind,
-                               options: LibraryBuildKind.allCases,
-                               label: { $0.label })
+                Picker("Suggestion type", selection: $kind) {
+                    ForEach(LibraryBuildKind.allCases) { option in
+                        Text(option.label).tag(option)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .accessibilityLabel("Suggestion type")
             }
             SettingsRow("Use", hint: "AliasBar copies instructions for this assistant.") {
-                ThemedSegments(selection: $assistant,
-                               options: LibraryBuildAssistant.allCases,
-                               label: { $0.label })
+                Picker("Assistant", selection: $assistant) {
+                    ForEach(LibraryBuildAssistant.allCases) { option in
+                        Text(option.label).tag(option)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .accessibilityLabel("Assistant")
             }
             HStack(spacing: 8) {
                 ThemedButton("Copy instructions") { copyInstructions() }
-                ThemedButton("Add copied response to Inbox") { importResponse() }
+                ThemedButton("Import copied JSON") { importResponse() }
                 Spacer(minLength: 0)
             }
             if let notice {
@@ -55,7 +65,10 @@ struct LibraryBuilderPanel: View {
         do {
             let result = try PromptInbox.importText(
                 copied,
-                to: URL(fileURLWithPath: AppPaths.inboxDirectory))
+                to: URL(fileURLWithPath: AppPaths.inboxDirectory),
+                builderPolicy: PromptInbox.BuilderImportPolicy(
+                    expectedKind: kind.inboxKind,
+                    expectedSource: assistant.schemaValue))
             let noun = result.itemCount == 1 ? "suggestion" : "suggestions"
             notice = "Added \(result.itemCount) \(noun) to Inbox. Review them in Manage."
             noticeIsWarning = false

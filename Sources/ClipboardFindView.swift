@@ -271,6 +271,18 @@ private struct ClipDetailPane: View {
                     state.performClipboardEnter()
                 }
 
+            HStack(spacing: 7) {
+                if state.settings.promptFeaturesEnabled {
+                    Button("Save as prompt") { state.createFromSelectedClip(kind: .prompt) }
+                        .buttonStyle(.bordered)
+                }
+                Button("Save as alias") { state.createFromSelectedClip(kind: .alias) }
+                    .buttonStyle(.bordered)
+                Spacer(minLength: 0)
+            }
+            .accessibilityElement(children: .contain)
+            .accessibilityLabel("Create from selected clip")
+
             if !actions.isEmpty {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("TRANSFORMS")

@@ -9106,6 +9106,8 @@ let chatGPTBuild = LibraryBuilderPrompt.generate(kind: .prompt, assistant: .chat
                                                  prompts: [builderPrompt],
                                                  shellEntries: [builderAlias])
 check("prompt builder names the prompt schema", chatGPTBuild.contains("\"kind\": \"prompt\""))
+check("prompt builder uses version 1 and records the selected assistant",
+      chatGPTBuild.contains("\"version\": 1") && chatGPTBuild.contains("\"source\": \"chatgpt\""))
 check("ChatGPT builder requests one JSON code block",
       chatGPTBuild.contains("Reply with exactly one JSON code block"))
 check("builder includes existing prompt names to prevent duplicates",
@@ -9121,8 +9123,13 @@ let codexAliasBuild = LibraryBuilderPrompt.generate(kind: .alias, assistant: .co
 check("alias builder names the alias schema", codexAliasBuild.contains("\"kind\": \"alias\""))
 check("alias builder asks for a one-line command field",
       codexAliasBuild.contains("\"command\": \"the complete one-line command\""))
-check("local agent builder sends output to the existing Inbox",
-      codexAliasBuild.contains("~/.aliasbar/inbox/library-build-alias.json"))
+check("every assistant returns copied JSON and never writes AliasBar files",
+      codexAliasBuild.contains("Reply with exactly one JSON code block")
+          && codexAliasBuild.contains("Do not write files")
+          && !codexAliasBuild.contains("~/.aliasbar"))
+check("alias builder schema omits a description that the strict path does not persist",
+      !codexAliasBuild.contains("\"description\""))
+check("builder caps suggestions at five", codexAliasBuild.contains("no more than 5 items"))
 check("builder includes existing alias names", codexAliasBuild.contains("- gs"))
 check("builder does not copy existing shell commands into its packet",
       !codexAliasBuild.contains(builderAlias.command))
@@ -9194,6 +9201,127 @@ do {
     }
 }
 
+// --- Build my library uses one strict versioned copy/import format ----------
+
+do {
+    caseIndex += 1
+    let inbox = URL(fileURLWithPath: "\(sandbox)/builder-alias-case\(caseIndex)/inbox")
+    let copied = """
+    ```json
+    {"version":1,"source":"codex","kind":"alias","items":[
+      {"type":"new","name":"gst","command":"git status --short"}
+    ]}
+    ```
+    """
+    let imported = try! PromptInbox.importText(
+        copied, to: inbox,
+        builderPolicy: .init(expectedKind: .alias, expectedSource: "codex"))
+    check("strict alias builder import writes one reviewed Inbox item", imported.itemCount == 1)
+    if case .ok(_, let items, let unknownTop) = PromptInbox.parseFile(at: imported.url) {
+        check("top-level builder kind normalizes into an alias item",
+              items.first?.kind == .alias && unknownTop.isEmpty)
+        check("strict alias item has no unused description field", items.first?.description == nil)
+        check("strict alias item still requires full command review",
+              items.first?.flags.contains { $0.reason == .shellCommandShape } == true)
+    } else {
+        check("strict alias builder output parses after import", false)
+    }
+}
+
+do {
+    caseIndex += 1
+    let inbox = URL(fileURLWithPath: "\(sandbox)/builder-prompt-case\(caseIndex)/inbox")
+    let copied = """
+    {"version":1,"source":"claude-code","kind":"prompt","items":[
+      {"type":"new","name":"release-note","description":"Draft a release note","body":"Write a release note for {{version}}."}
+    ]}
+    """
+    let imported = try! PromptInbox.importText(
+        copied, to: inbox,
+        builderPolicy: .init(expectedKind: .prompt, expectedSource: "claude-code"))
+    if case .ok(_, let items, _) = PromptInbox.parseFile(at: imported.url) {
+        check("the same strict flow imports prompt suggestions", items.first?.kind == .prompt)
+    } else {
+        check("strict prompt builder output parses after import", false)
+    }
+}
+
+func checkBuilderImportRejected(_ label: String, json: String,
+                                kind: PromptInbox.ItemKind = .alias,
+                                source: String = "codex") {
+    caseIndex += 1
+    let inbox = URL(fileURLWithPath: "\(sandbox)/builder-reject-case\(caseIndex)/inbox")
+    do {
+        _ = try PromptInbox.importText(
+            json, to: inbox,
+            builderPolicy: .init(expectedKind: kind, expectedSource: source))
+        check(label, false)
+    } catch {
+        check(label, true)
+    }
+    let written = (try? FileManager.default.contentsOfDirectory(at: inbox,
+                                                                 includingPropertiesForKeys: nil)) ?? []
+    check("\(label) leaves no Inbox or archive file", written.isEmpty)
+}
+
+checkBuilderImportRejected(
+    "strict import rejects a response from the wrong assistant",
+    json: """
+    {"version":1,"source":"chatgpt","kind":"alias","items":[
+      {"type":"new","name":"gst","command":"git status"}
+    ]}
+    """)
+checkBuilderImportRejected(
+    "strict import rejects a nonnumeric version",
+    json: """
+    {"version":true,"source":"codex","kind":"alias","items":[
+      {"type":"new","name":"gst","command":"git status"}
+    ]}
+    """)
+checkBuilderImportRejected(
+    "strict import rejects an unexpected library kind",
+    json: """
+    {"version":1,"source":"codex","kind":"prompt","items":[
+      {"type":"new","name":"status","description":"Check status","body":"Check status."}
+    ]}
+    """)
+checkBuilderImportRejected(
+    "strict import rejects mixed per-item kinds and extra fields",
+    json: """
+    {"version":1,"source":"codex","kind":"alias","items":[
+      {"kind":"prompt","type":"new","name":"status","command":"git status"}
+    ]}
+    """)
+checkBuilderImportRejected(
+    "strict import rejects update and merge shapes",
+    json: """
+    {"version":1,"source":"codex","kind":"alias","items":[
+      {"type":"update","name":"gst","command":"git status"}
+    ]}
+    """)
+let sixBuilderItems = (1...6).map {
+    "{\"type\":\"new\",\"name\":\"item\($0)\",\"command\":\"git status\"}"
+}.joined(separator: ",")
+checkBuilderImportRejected(
+    "strict import rejects more than five suggestions",
+    json: "{\"version\":1,\"source\":\"codex\",\"kind\":\"alias\",\"items\":[\(sixBuilderItems)]}")
+checkBuilderImportRejected(
+    "strict import rejects destructive alias commands",
+    json: """
+    {"version":1,"source":"codex","kind":"alias","items":[
+      {"type":"new","name":"cleanall","command":"rm -rf build"}
+    ]}
+    """)
+
+let builderSecret = "GITHUB_TOKEN=ghp_" + String(repeating: "A", count: 24)
+checkBuilderImportRejected(
+    "strict import rejects classified secrets before disk write",
+    json: """
+    {"version":1,"source":"codex","kind":"alias","items":[
+      {"type":"new","name":"showtoken","command":"echo \(builderSecret)"}
+    ]}
+    """)
+
 // --- Alias approval is one reviewed, guarded shell write --------------------
 
 do {
@@ -9253,7 +9381,12 @@ do {
 
 do {
     let (settings, defaults) = freshTestSettings()
-    check("Aliases is the initial default library", settings.defaultLibrary == .aliases)
+    check("Automatic is the migration and fresh-install default library",
+          settings.defaultLibrary == .automatic)
+    check("Automatic preserves a prompt context guess",
+          settings.defaultLibrary.resolvedDialect(context: .prompt) == .prompt)
+    check("Automatic falls back to aliases without a context guess",
+          settings.defaultLibrary.resolvedDialect(context: nil) == .shell)
     settings.defaultLibrary = .prompts
     check("default library persists in UserDefaults",
           AppSettings(defaults: defaults).defaultLibrary == .prompts)
@@ -9267,7 +9400,7 @@ do {
     check("changing the default back is effective on the next open", state.dialect == .shell)
 }
 
-// --- Clipboard drafts are read only from the explicit new-item action --------
+// --- Plain New never reads clipboard; selected clips have explicit actions ---
 
 final class ReadCountingPasteboard: PasteboardWriting {
     private(set) var changeCount = 0
@@ -9303,16 +9436,19 @@ do {
     state.pasteboard = pasteboard
     check("constructing AppState does not read clipboard content", pasteboard.readCount == 0)
 
-    state.openNewComposer(prefill: ComposerPrefill(kind: .alias))
-    check("the explicit New Alias action reads the clipboard once", pasteboard.readCount == 1)
-    check("a suitable one-line command prefills the alias command",
-          state.editor?.command == "git status --short")
+    state.openComposer(prefill: ComposerPrefill(kind: .alias))
+    check("plain New Alias does not read the system clipboard", pasteboard.readCount == 0)
+    check("plain New Alias starts with an empty command", state.editor?.command.isEmpty == true)
+
+    state.editor = nil
+    _ = state.handleKey(keyEvent(keyCode: 45, modifiers: .command)) // kVK_ANSI_N
+    check("Cmd-N does not read the system clipboard", pasteboard.readCount == 0)
 
     let supplied = ReadCountingPasteboard("clipboard must not win")
     state.pasteboard = supplied
-    state.openNewComposer(prefill: ComposerPrefill(kind: .prompt,
-                                                   body: "caller supplied draft"))
-    check("an explicit draft prevents any clipboard read", supplied.readCount == 0)
+    state.openComposer(prefill: ComposerPrefill(kind: .prompt,
+                                                body: "caller supplied draft"))
+    check("a caller-supplied draft never causes a clipboard read", supplied.readCount == 0)
     check("an explicit draft is never overwritten", state.editor?.body == "caller supplied draft")
 }
 
@@ -9322,8 +9458,9 @@ do {
     let secret = "GITHUB_TOKEN=ghp_" + String(repeating: "A", count: 24)
     let pasteboard = ReadCountingPasteboard(secret)
     state.pasteboard = pasteboard
-    state.openNewComposer(prefill: ComposerPrefill(kind: .prompt))
-    check("a classified secret never prefills a prompt", state.editor?.body.isEmpty == true)
+    state.openComposer(prefill: ComposerPrefill(kind: .prompt))
+    check("plain prompt creation ignores even a secret-shaped system clipboard",
+          pasteboard.readCount == 0 && state.editor?.body.isEmpty == true)
 
     check("multiline clipboard text is unsuitable for an alias",
           AppState.clipboardDraft("git status\nwhoami", for: .alias) == nil)
@@ -9332,13 +9469,51 @@ do {
           AppState.clipboardDraft(multilinePrompt, for: .prompt) == multilinePrompt)
 }
 
+do {
+    let (settings, _) = freshTestSettings()
+    settings.promptFeaturesEnabled = true
+    let state = AppState(store: EntryStore(), settings: settings)
+    let systemPasteboard = ReadCountingPasteboard("not the selected clip")
+    state.pasteboard = systemPasteboard
+
+    let clipPasteboard = FakePasteboard()
+    let monitor = ClipboardMonitor(pasteboard: clipPasteboard)
+    state.clipboardMonitor = monitor
+    clipPasteboard.simulateExternalCopy("Summarize this:\n{{text}}\n")
+    monitor.poll()
+    state.enterClipboard()
+    state.selection = 0
+    state.createFromSelectedClip(kind: .prompt)
+
+    check("Save as Prompt prefills from the selected AliasBar clip",
+          state.editor?.body == "Summarize this:\n{{text}}\n"
+              && state.editor?.source == "selected-clipboard-clip")
+    check("selected-clip creation never reads the current system clipboard",
+          systemPasteboard.readCount == 0)
+
+    state.editor = nil
+    clipPasteboard.simulateExternalCopy("git status --short")
+    monitor.poll()
+    state.selection = 0
+    state.createFromSelectedClip(kind: .alias)
+    check("Save as Alias prefills a safe selected command",
+          state.editor?.command == "git status --short")
+}
+
 let libraryPanelSource = read(projectRoot.appendingPathComponent("Sources/LibraryBuilderPanel.swift").path)
 check("Settings and onboarding share one library-builder control",
       read(projectRoot.appendingPathComponent("Sources/SettingsWindow.swift").path).contains("LibraryBuilderPanel()")
           && read(projectRoot.appendingPathComponent("Sources/Onboarding.swift").path).contains("LibraryBuilderPanel()"))
 check("the shared control exposes copy and review actions",
       libraryPanelSource.contains("Copy instructions")
-          && libraryPanelSource.contains("Add copied response to Inbox"))
+          && libraryPanelSource.contains("Import copied JSON"))
+check("new builder controls use native segmented Pickers",
+      libraryPanelSource.contains(".pickerStyle(.segmented)")
+          && !libraryPanelSource.contains("ThemedSegments"))
+let libraryOnboardingSource = read(projectRoot.appendingPathComponent("Sources/Onboarding.swift").path)
+check("onboarding keeps Build my library behind one optional disclosure",
+      libraryOnboardingSource.contains("DisclosureGroup(isExpanded: $showsLibraryBuilder)")
+          && libraryOnboardingSource.contains("Text(\"Build my library\")"))
 
 do {
     let (state, _, inboxDir, _) = freshInboxFixture()
@@ -9355,6 +9530,70 @@ do {
     state.flipManageDialect()
     check("the reduced prompt-side Manage view opens directly to Inbox",
           state.dialect == .prompt && state.promptBucket == .inbox)
+}
+
+do {
+    let (state, promptsDir, inboxDir, _) = freshInboxFixture()
+    let file = writeInboxFile("""
+    {"items":[
+      {"kind":"prompt","type":"new","name":"hidden-prompt","body":"Hidden body"},
+      {"kind":"alias","type":"new","name":"visible-alias","command":"git status"}
+    ]}
+    """, name: "mixed-features-off", in: inboxDir)
+    _ = writeInboxFile("not json", name: "invalid-hidden", in: inboxDir)
+    state.settings.promptFeaturesEnabled = false
+    state.prepareForShow()
+
+    check("prompts off exposes and counts only alias suggestions",
+          state.inboxPendingCount == 1 && state.inboxRows.count == 1)
+    if case .item(let reviewFile, let index) = state.inboxRows.first {
+        check("the one visible review row is the alias",
+              state.itemFor(file: reviewFile, index: index)?.kind == .alias)
+
+        state.approveInboxItem(file: reviewFile, index: 0)
+        check("prompts off cannot approve a hidden prompt",
+              !FileManager.default.fileExists(atPath: promptsDir.appendingPathComponent("hidden-prompt.md").path)
+                  && state.errorMessage?.contains("Turn on prompts") == true)
+        state.editor = nil
+        state.editInboxItem(file: reviewFile, index: 0)
+        check("prompts off cannot edit a hidden prompt into the Composer", state.editor == nil)
+    } else {
+        check("the reduced Inbox has one alias row", false)
+    }
+    _ = file
+}
+
+do {
+    let (state, _, inboxDir, _) = freshInboxFixture()
+    let file = writeInboxFile("""
+    {"items":[
+      {"kind":"alias","type":"new","name":"reviewed-alias","command":"git status --short"}
+    ]}
+    """, name: "alias-edit-review", in: inboxDir)
+    state.prepareForShow()
+    guard case .item(let rowFile, let index) = state.inboxRows.first else {
+        check("generated alias has a review row", false)
+        fatalError("unreachable")
+    }
+    state.editInboxItem(file: rowFile, index: index)
+    check("Edit and approve starts unacknowledged for a flagged alias",
+          state.editor?.flagReasons.isEmpty == false
+              && state.editor?.reviewAcknowledged == false)
+
+    state.commitEditor()
+    check("Composer Save cannot bypass full review",
+          state.editor != nil
+              && !read(ZshrcParser.path).contains("alias reviewed-alias=")
+              && FileManager.default.fileExists(atPath: file.path))
+
+    var reviewed = state.editor!
+    reviewed.reviewAcknowledged = true
+    state.editor = reviewed
+    state.commitEditor()
+    check("Composer Save succeeds after the explicit full-review acknowledgement",
+          state.editor == nil && read(ZshrcParser.path).contains("alias reviewed-alias='git status --short'"))
+    check("the reviewed Inbox file completes only after the successful save",
+          !FileManager.default.fileExists(atPath: file.path))
 }
 
 // ---------------------------------------------------------------------------

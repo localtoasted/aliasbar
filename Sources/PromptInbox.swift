@@ -1,4 +1,5 @@
 import Foundation
+import CoreFoundation
 
 /// `~/.aliasbar/inbox/*.json` — proposals produced by `AuditPrompt` (or written by hand)
 /// for a human to accept or reject one item at a time before anything reaches the real
@@ -130,11 +131,13 @@ enum PromptInbox {
         return .ok(files)
     }
 
-    /// Every field name a top-level inbox object is allowed to have. Anything else is
-    /// tolerated and reported, the same as an unrecognized item field.
+    /// Every field name an inbox item is allowed to have. Anything else is tolerated
+    /// in the legacy audit format and reported to the reviewer. Builder imports use a
+    /// separate exact schema below.
     private static let knownItemKeys: Set<String> = [
         "kind", "type", "name", "description", "body", "command", "replaces", "merges",
     ]
+    private static let knownTopLevelKeys: Set<String> = ["items", "version", "source", "kind"]
 
     static func parseFile(at url: URL) -> FileOutcome {
         guard let data = try? Data(contentsOf: url) else {
@@ -160,10 +163,16 @@ enum PromptInbox {
             return .invalid(url: url, reason: "\"items\" must be an array")
         }
 
+        let envelopeKind = (top["kind"] as? String).flatMap(ItemKind.init(rawValue:))
         var items: [Item] = []
         for (index, rawItem) in itemsArray.enumerated() {
-            guard let dict = rawItem as? [String: Any] else {
+            guard var dict = rawItem as? [String: Any] else {
                 return .invalid(url: url, reason: "item \(index) is not an object")
+            }
+            // Builder JSON keeps the kind once at the top. Legacy audit JSON keeps it
+            // on each item (or omits it for a prompt). Normalize both into Item.
+            if dict["kind"] == nil, let envelopeKind {
+                dict["kind"] = envelopeKind.rawValue
             }
             switch parseItem(dict, sourceFile: url) {
             case .success(let item):
@@ -173,7 +182,7 @@ enum PromptInbox {
             }
         }
 
-        let unknownTopLevel = top.keys.filter { $0 != "items" }.sorted()
+        let unknownTopLevel = top.keys.filter { !knownTopLevelKeys.contains($0) }.sorted()
         return .ok(url: url, items: items, unknownTopLevelFields: unknownTopLevel)
     }
 
@@ -279,7 +288,7 @@ enum PromptInbox {
         var errorDescription: String? {
             switch self {
             case .flaggedRequiresAcknowledgement(let name):
-                return "\"\(name)\" was flagged for review and needs acknowledgedFlags: true before it can be approved."
+                return "Review \"\(name)\" in full before approving it."
             case .nameCollision(let name):
                 return "A prompt named \"\(name)\" already exists. This looked like a new prompt, not an update — propose it as an update instead."
             case .aliasNameCollision(let name):
@@ -460,12 +469,21 @@ enum PromptInbox {
         let itemCount: Int
     }
 
+    /// The exact builder selection that produced the copied instructions. Import
+    /// checks both values, so JSON copied from another tab cannot quietly land in the
+    /// wrong review flow.
+    struct BuilderImportPolicy: Equatable {
+        let expectedKind: ItemKind
+        let expectedSource: String
+    }
+
     enum ImportError: LocalizedError {
         case emptyClipboard
         case tooLarge
         case extraText
         case invalid(String)
         case noItems
+        case sensitiveContent(String)
         case writeFailed(String)
 
         var errorDescription: String? {
@@ -480,6 +498,8 @@ enum PromptInbox {
                 return "The copied response is not an AliasBar suggestion file: \(reason)."
             case .noItems:
                 return "The response contains no suggestions."
+            case .sensitiveContent(let reason):
+                return "The response contains sensitive content and was not saved: \(reason)."
             case .writeFailed(let reason):
                 return "AliasBar could not add the response to Inbox: \(reason)."
             }
@@ -496,23 +516,185 @@ enum PromptInbox {
             throw ImportError.tooLarge
         }
 
-        let filename = "library-build-\(subsecondTimestamp(Date()))-\(UUID().uuidString.lowercased()).json"
-        let destination = inboxDirectory.appendingPathComponent(filename)
         let data = Data(json.utf8)
+        let destination = importDestination(in: inboxDirectory)
 
         switch parse(data: data, url: destination) {
         case .invalid(_, let reason):
             throw ImportError.invalid(reason)
         case .ok(_, let items, _):
             guard !items.isEmpty else { throw ImportError.noItems }
-            do {
-                try FileManager.default.createDirectory(at: inboxDirectory,
-                                                        withIntermediateDirectories: true)
-                try data.write(to: destination, options: .atomic)
-                return ImportResult(url: destination, itemCount: items.count)
-            } catch {
-                throw ImportError.writeFailed(error.localizedDescription)
+            if let sensitive = items.lazy
+                .flatMap(\.flags)
+                .first(where: { $0.reason == .sensitiveContent }) {
+                throw ImportError.sensitiveContent(sensitive.detail)
             }
+            return try writeImport(data, itemCount: items.count,
+                                   to: destination, inboxDirectory: inboxDirectory)
+        }
+    }
+
+    /// Strict copy/import path for Build my library. All supported assistants return
+    /// this same versioned envelope. It permits only new items of the selected kind,
+    /// caps the response at five, rejects risky alias commands, and runs the secret
+    /// classifier before any directory or file is created.
+    @discardableResult
+    static func importText(_ text: String,
+                           to inboxDirectory: URL,
+                           builderPolicy policy: BuilderImportPolicy) throws -> ImportResult {
+        let json = try normalizedJSON(from: text)
+        guard json.utf8.count <= SensitiveContentClassifier.Thresholds.maximumInputBytes else {
+            throw ImportError.tooLarge
+        }
+        let data = Data(json.utf8)
+        let destination = importDestination(in: inboxDirectory)
+
+        let raw: Any
+        do {
+            raw = try JSONSerialization.jsonObject(with: data)
+        } catch {
+            throw ImportError.invalid("not valid JSON")
+        }
+        guard let top = raw as? [String: Any] else {
+            throw ImportError.invalid("top-level JSON value must be an object")
+        }
+
+        let requiredTop: Set<String> = ["version", "source", "kind", "items"]
+        guard Set(top.keys) == requiredTop else {
+            throw ImportError.invalid(exactFieldsMessage(actual: Set(top.keys), expected: requiredTop,
+                                                         location: "top level"))
+        }
+        guard let version = top["version"] as? NSNumber,
+              CFGetTypeID(version) != CFBooleanGetTypeID(),
+              version.intValue == 1, version.doubleValue == 1 else {
+            throw ImportError.invalid("\"version\" must be 1")
+        }
+        guard let source = top["source"] as? String, source == policy.expectedSource else {
+            throw ImportError.invalid("\"source\" must be \"\(policy.expectedSource)\"")
+        }
+        guard let kindRaw = top["kind"] as? String,
+              kindRaw == policy.expectedKind.rawValue else {
+            throw ImportError.invalid("\"kind\" must be \"\(policy.expectedKind.rawValue)\"")
+        }
+        guard let rawItems = top["items"] as? [Any] else {
+            throw ImportError.invalid("\"items\" must be an array")
+        }
+        guard !rawItems.isEmpty else { throw ImportError.noItems }
+        guard rawItems.count <= 5 else {
+            throw ImportError.invalid("\"items\" may contain no more than 5 suggestions")
+        }
+
+        let promptKeys: Set<String> = ["type", "name", "description", "body"]
+        let aliasKeys: Set<String> = ["type", "name", "command"]
+        let expectedKeys = policy.expectedKind == .prompt ? promptKeys : aliasKeys
+
+        for (index, rawItem) in rawItems.enumerated() {
+            guard let item = rawItem as? [String: Any] else {
+                throw ImportError.invalid("item \(index) is not an object")
+            }
+            guard Set(item.keys) == expectedKeys else {
+                throw ImportError.invalid(exactFieldsMessage(actual: Set(item.keys), expected: expectedKeys,
+                                                             location: "item \(index)"))
+            }
+            guard item["type"] as? String == "new" else {
+                throw ImportError.invalid("item \(index): \"type\" must be \"new\"")
+            }
+            guard let name = item["name"] as? String, PromptStore.isValidName(name) else {
+                throw ImportError.invalid("item \(index): \"name\" must use letters, digits, hyphens, and underscores only")
+            }
+
+            let inspectedText: String
+            switch policy.expectedKind {
+            case .prompt:
+                guard let description = item["description"] as? String,
+                      !description.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                      !description.contains("\n"), !description.contains("\r") else {
+                    throw ImportError.invalid("item \(index): \"description\" must be one line")
+                }
+                guard let body = item["body"] as? String,
+                      !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    throw ImportError.invalid("item \(index): \"body\" must not be empty")
+                }
+                inspectedText = [name, description, body].joined(separator: "\n")
+
+            case .alias:
+                guard let command = item["command"] as? String else {
+                    throw ImportError.invalid("item \(index): \"command\" must be a string")
+                }
+                do {
+                    try AliasWriter.validate(name: name, command: command)
+                } catch {
+                    throw ImportError.invalid("item \(index): \(error.localizedDescription)")
+                }
+                if let reason = builderAliasSafetyRejection(command) {
+                    throw ImportError.invalid("item \(index): \(reason)")
+                }
+                inspectedText = [name, command].joined(separator: "\n")
+            }
+
+            if let reason = SensitiveContentClassifier.quarantineReason(in: inspectedText) {
+                throw ImportError.sensitiveContent(reason.description)
+            }
+        }
+
+        // Run the normal parser too. This keeps the imported file and the later Inbox
+        // scan on one interpretation of names, bodies, and flags.
+        switch parse(data: data, url: destination) {
+        case .invalid(_, let reason):
+            throw ImportError.invalid(reason)
+        case .ok(_, let items, _):
+            guard items.count == rawItems.count else {
+                throw ImportError.invalid("the item count changed during validation")
+            }
+            return try writeImport(data, itemCount: items.count,
+                                   to: destination, inboxDirectory: inboxDirectory)
+        }
+    }
+
+    private static func exactFieldsMessage(actual: Set<String>, expected: Set<String>,
+                                           location: String) -> String {
+        let missing = expected.subtracting(actual).sorted()
+        let extra = actual.subtracting(expected).sorted()
+        var parts: [String] = []
+        if !missing.isEmpty { parts.append("missing \(missing.joined(separator: ", "))") }
+        if !extra.isEmpty { parts.append("unexpected \(extra.joined(separator: ", "))") }
+        return "\(location) fields must match the schema (\(parts.joined(separator: "; ")))"
+    }
+
+    private static func builderAliasSafetyRejection(_ command: String) -> String? {
+        let destructive = #"(?i)\b(sudo|rm|rmdir|mkfs|diskutil|dd|shutdown|reboot|halt|poweroff)\b"#
+        if command.range(of: destructive, options: .regularExpression) != nil {
+            return "destructive or privileged commands are not accepted"
+        }
+        let recursivePermissions = #"(?i)\b(chmod|chown)\b[^\n]*(?:\s-R\b|\s--recursive\b)"#
+        if command.range(of: recursivePermissions, options: .regularExpression) != nil {
+            return "recursive permission changes are not accepted"
+        }
+        let destructiveGit = #"(?i)\bgit\s+(reset\s+--hard|clean(?:\s|$))"#
+        if command.range(of: destructiveGit, options: .regularExpression) != nil {
+            return "destructive Git commands are not accepted"
+        }
+        let downloadedShell = #"(?i)\b(curl|wget)\b[^\n|]*\|\s*(?:sudo\s+)?(?:sh|bash|zsh)\b"#
+        if command.range(of: downloadedShell, options: .regularExpression) != nil {
+            return "downloaded scripts cannot be piped into a shell"
+        }
+        return nil
+    }
+
+    private static func importDestination(in inboxDirectory: URL) -> URL {
+        let filename = "library-build-\(subsecondTimestamp(Date()))-\(UUID().uuidString.lowercased()).json"
+        return inboxDirectory.appendingPathComponent(filename)
+    }
+
+    private static func writeImport(_ data: Data, itemCount: Int, to destination: URL,
+                                    inboxDirectory: URL) throws -> ImportResult {
+        do {
+            try FileManager.default.createDirectory(at: inboxDirectory,
+                                                    withIntermediateDirectories: true)
+            try data.write(to: destination, options: .atomic)
+            return ImportResult(url: destination, itemCount: itemCount)
+        } catch {
+            throw ImportError.writeFailed(error.localizedDescription)
         }
     }
 

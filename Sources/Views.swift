@@ -758,7 +758,7 @@ struct FindView: View {
                                                ? settings.hotkey.displayString
                                                : nil,
                                            create: {
-                                               state.openNewComposer(prefill: ComposerPrefill(kind: .alias))
+                                               state.openComposer(prefill: ComposerPrefill(kind: .alias))
                                            })
                     }
                 } else {
@@ -767,7 +767,7 @@ struct FindView: View {
                     // instead, prefilled with the query as the name.
                     NoMatchView(query: state.query, isPrompt: state.dialect == .prompt,
                                 create: {
-                                    state.openNewComposer(prefill: ComposerPrefill(
+                                    state.openComposer(prefill: ComposerPrefill(
                                         kind: state.dialect == .prompt ? .prompt : .alias,
                                         name: state.query, source: "find-no-match"))
                                 })
@@ -1321,7 +1321,7 @@ struct ManageView: View {
                 Spacer()
                 if settings.promptFeaturesEnabled {
                     newButton("New prompt") {
-                        state.openNewComposer(prefill: ComposerPrefill(kind: .prompt))
+                        state.openComposer(prefill: ComposerPrefill(kind: .prompt))
                     }
                 }
                 dialectFlipHint
@@ -1331,7 +1331,7 @@ struct ManageView: View {
                 }
                 Spacer()
                 newButton("New alias") {
-                    state.openNewComposer(prefill: ComposerPrefill(kind: .alias))
+                    state.openComposer(prefill: ComposerPrefill(kind: .alias))
                 }
                 if state.canOpenPromptManage {
                     dialectFlipHint

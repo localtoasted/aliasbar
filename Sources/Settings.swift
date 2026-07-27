@@ -81,22 +81,28 @@ enum ViewMode: String, CaseIterable, Identifiable {
 }
 
 enum DefaultLibrary: String, CaseIterable, Identifiable {
-    case aliases, prompts
+    case automatic, aliases, prompts
 
     var id: String { rawValue }
 
     var label: String {
         switch self {
+        case .automatic: return "Automatic"
         case .aliases: return "Aliases"
         case .prompts: return "Prompts"
         }
     }
 
-    var dialect: Dialect {
+    var fixedDialect: Dialect? {
         switch self {
+        case .automatic: return nil
         case .aliases: return .shell
         case .prompts: return .prompt
         }
+    }
+
+    func resolvedDialect(context: Dialect?) -> Dialect {
+        fixedDialect ?? context ?? .shell
     }
 }
 
@@ -601,7 +607,10 @@ final class AppSettings: ObservableObject {
         enterAction = decode(Key.enterAction, EnterAction.pasteName)
         afterAction = decode(Key.afterAction, AfterAction.close)
         defaultView = decode(Key.defaultView, ViewMode.find)
-        defaultLibrary = decode(Key.defaultLibrary, DefaultLibrary.aliases)
+        // The key did not exist before the library preference shipped. Automatic is
+        // therefore both the fresh-install default and the migration for older users,
+        // preserving the context-aware behavior they already had.
+        defaultLibrary = decode(Key.defaultLibrary, DefaultLibrary.automatic)
         searchScope = decode(Key.searchScope, SearchScope.everything)
         sortOrder = decode(Key.sortOrder, SortOrder.usage)
         // A look stored by an older build, or by a build with a different set of fields,
