@@ -12,8 +12,8 @@ Mac users who keep useful shell commands and AI prompts but do not want to hunt 
 
 - One shortcut opens the library.
 - Search covers aliases and prompts.
-- Return names and performs one clear action.
-- Copy and paste always show visible confirmation.
+- Return performs one clear action.
+- Copy shows confirmation. Paste returns to the target app.
 - Content stays local unless the user explicitly exports or shares it.
 
 ## Product model
@@ -31,17 +31,17 @@ Board is a different view of the same library. It is not a separate content syst
 - Board navigation that skips nonmatching results while search is active.
 - Find selections that stay in view as the user moves through results.
 - Contextual shortcut hints near the controls they affect.
-- A setting for the default Find scope.
-- New prompt and alias editors that can start with clipboard text after an explicit create action.
-- Starter library instructions for prompts and aliases in onboarding and Settings.
+- Automatic, Aliases, and Prompts choices for the opening library.
+- Save as Prompt and Save as Alias actions on the selected clipboard clip.
+- Starter suggestions in onboarding and Settings for ChatGPT, Codex, and Claude Code.
+- A versioned five-item import with secret checks and item-by-item review.
 - Plain user interface copy with em dashes and filler removed.
 
 ## Strong next candidates
 
-- Small `{{variable}}` fill ins for prompts.
 - Pins, followed by usage and recency as ranking tie breakers.
-- A portable, versioned import file with item by item review.
-- One action to save selected clipboard text as a prompt or alias.
+- More precise copy messages that name the action and item.
+- Real Retina README captures with aliases and prompts given equal space.
 
 ## Keep out
 
