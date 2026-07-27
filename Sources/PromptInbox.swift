@@ -231,13 +231,13 @@ enum PromptInbox {
         var errorDescription: String? {
             switch self {
             case .flaggedRequiresAcknowledgement(let name):
-                return "\"\(name)\" was flagged for review and needs acknowledgedFlags: true before it can be approved."
+                return "\"\(name)\" is flagged. Review it in full before approving."
             case .nameCollision(let name):
-                return "A prompt named \"\(name)\" already exists. This looked like a new prompt, not an update — propose it as an update instead."
+                return "A prompt named \"\(name)\" already exists. Submit this as an update."
             case .updateTargetMissing(let name):
-                return "\"\(name)\" doesn't match any existing prompt, so there's nothing to update."
+                return "No existing prompt matches \"\(name)\". Choose a prompt to update."
             case .mergeSourceMissing(let name):
-                return "\"\(name)\" doesn't match any existing prompt, so it can't be merged away."
+                return "No existing prompt matches \"\(name)\". Choose a prompt to merge."
             case .underlying(let message):
                 return message
             }

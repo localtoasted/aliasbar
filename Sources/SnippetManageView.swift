@@ -12,6 +12,7 @@ struct SnippetManageView: View {
     @ObservedObject var state: AppState
     @ObservedObject var settings: AppSettings
     @Environment(\.theme) private var theme
+    @Environment(\.motion) private var motion
 
     var body: some View {
         HStack(spacing: 0) {
@@ -50,7 +51,7 @@ struct SnippetManageView: View {
                 }
                 .onChange(of: state.selection) { _ in
                     guard let selected = state.selectedSnippet else { return }
-                    withAnimation(.easeOut(duration: 0.12)) { proxy.scrollTo(selected.id, anchor: .center) }
+                    withAnimation(motion.selectionScroll) { proxy.scrollTo(selected.id, anchor: .center) }
                 }
             }
         }
@@ -128,9 +129,8 @@ struct SnippetManageView: View {
                     metaRow("Holes", holesSummary(snippet.template))
                     metaRow("Edited", Self.editedDateFormatter.string(from: snippet.modifiedAt))
 
-                    InfoBanner(text: "Only expands while inline expansion is on in Settings "
-                               + "→ Expansion, and never inside a password or other secure "
-                               + "field — that's excluded automatically, always.")
+                    InfoBanner(text: "Turn on inline expansion in Settings > Expansion. "
+                               + "AliasBar skips password and secure fields.")
 
                     actionButton("Delete", "trash", prominent: false) {
                         state.deleteSnippet(snippet)

@@ -445,7 +445,7 @@ func runPromote(_ args: [String]) {
     } else {
         let suggestion = AliasNameSuggester.suggest(for: command, takenNames: takenNames)
         guard !suggestion.isEmpty else {
-            fail(.nothingToDo, "couldn't suggest a name for \"\(command)\" — pass --name")
+            fail(.nothingToDo, "couldn't suggest a name for \"\(command)\". Pass --name")
         }
         name = suggestion
     }

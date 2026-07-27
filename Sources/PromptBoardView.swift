@@ -32,15 +32,14 @@ struct PromptBoardView: View {
                 ScrollView {
                     LazyVGrid(columns: columns, spacing: 6) {
                         ForEach(Array(prompts.enumerated()), id: \.element.name) { index, prompt in
+                            let dimmed = !state.boardPromptMatches(prompt)
                             PromptCard(prompt: prompt,
                                        selected: state.selection == index,
-                                       dimmed: !state.boardPromptMatches(prompt),
+                                       dimmed: dimmed,
                                        usage: state.promptUsage(for: prompt.name),
                                        density: settings.boardDensity,
-                                       action: {
-                                           state.selection = index
-                                           state.performBoardPrompt(prompt)
-                                       })
+                                       action: { state.activateBoardPrompt(at: index) })
+                                .disabled(dimmed)
                         }
                     }
                     .padding(10)
@@ -54,9 +53,8 @@ struct PromptBoardView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }
 
-    /// Fixed-height footer, matching the shell deck's own `readout` exactly — same
-    /// reasoning: the selection's detail lives here so nothing in the grid moves as the
-    /// selection travels.
+    /// Fixed-height action readout, matching the shell deck. The selection's detail and
+    /// shortcuts live here so nothing in the grid moves as the selection travels.
     private var readout: some View {
         VStack(alignment: .leading, spacing: 3) {
             if let prompt = state.selectedPrompt {
@@ -75,6 +73,13 @@ struct PromptBoardView: View {
                             .font(.system(size: 9.5, design: .monospaced))
                             .foregroundStyle(theme.faint)
                     }
+                    SelectedActionHints(
+                        primaryKeys: "⏎",
+                        primaryLabel: settings.enterAction.needsAccessibility
+                            ? "paste prompt"
+                            : "copy prompt",
+                        secondaryKeys: "⇥",
+                        secondaryLabel: "aliases")
                 }
                 Text(PromptGist.line(for: prompt))
                     .font(.system(size: 10.5))

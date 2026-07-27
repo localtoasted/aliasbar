@@ -49,6 +49,9 @@ final class PaletteController: NSObject, NSWindowDelegate {
     /// it. The delegate uses this to reset transient state, exactly as `popoverDidClose`
     /// did.
     var onClose: () -> Void = {}
+    /// Called synchronously when a close starts. Delayed state work must be invalidated
+    /// before the short fade, not after its completion callback.
+    var onWillClose: () -> Void = {}
 
     init(content: NSViewController) {
         self.content = content
@@ -79,6 +82,7 @@ final class PaletteController: NSObject, NSWindowDelegate {
     }
 
     func close() {
+        onWillClose()
         guard let panel, animates, panel.isVisible else {
             panel?.orderOut(nil)
             onClose()

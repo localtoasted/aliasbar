@@ -267,7 +267,7 @@ enum PromptStore {
             case .invalidName(let name):
                 return "\"\(name)\" isn't a usable prompt name. Use letters, digits, - and _ with no spaces."
             case .caseCollision(let requested, let existing):
-                return "A prompt named \"\(existing)\" already exists. \"\(requested)\" can't be saved alongside it — names can't differ only by case."
+                return "A prompt named \"\(existing)\" already exists. Prompt names can't differ only by case, so \"\(requested)\" can't be saved."
             case .backupFailed(let why):
                 return "Couldn't write a backup, so nothing was changed: \(why)"
             case .writeFailed(let why):

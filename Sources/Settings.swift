@@ -17,8 +17,8 @@ enum EnterAction: String, CaseIterable, Identifiable {
         switch self {
         case .copyName: return "Copy the alias name"
         case .copyCommand: return "Copy the full command"
-        case .pasteName: return "Type the alias name into the app behind"
-        case .pasteCommand: return "Type the full command into the app behind"
+        case .pasteName: return "Paste the alias name into the previous app"
+        case .pasteCommand: return "Paste the full command into the previous app"
         }
     }
 
@@ -26,8 +26,8 @@ enum EnterAction: String, CaseIterable, Identifiable {
         switch self {
         case .copyName: return "copy name"
         case .copyCommand: return "copy command"
-        case .pasteName: return "type name"
-        case .pasteCommand: return "type command"
+        case .pasteName: return "paste name"
+        case .pasteCommand: return "paste command"
         }
     }
 

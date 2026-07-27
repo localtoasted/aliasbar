@@ -276,7 +276,7 @@ final class ExpansionMonitor: ObservableObject {
 
     private func handle(type: CGEventType, event: CGEvent) {
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
-            Diag.log("expansion: tap disabled by the system (\(type.rawValue)) — failing closed")
+            Diag.log("expansion: tap disabled by the system (\(type.rawValue)); failing closed")
             failClosed()
             return
         }

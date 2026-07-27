@@ -264,7 +264,7 @@ struct OnboardingView: View {
             SettingsGroup("Choose what AliasBar uses") {
                 SettingsRow("Usage ranking",
                             hint: "Turn off to keep your file order.") {
-                    ThemedToggle(isOn: historyRankingBinding, label: "Rank by how often you actually use things")
+                    ThemedToggle(isOn: historyRankingBinding, label: "Rank by how often you use things")
                 }
                 SettingsRow("Prompts",
                             hint: scan.claudeCodeDetected
@@ -533,7 +533,7 @@ struct OnboardingView: View {
                     }
                     .accessibilityLabel(axPrompted
                                         ? "Show the macOS Accessibility permission prompt again"
-                                        : "Allow typing by showing the macOS Accessibility permission prompt")
+                                        : "Allow pasting by showing the macOS Accessibility permission prompt")
                     Text("Until then, Enter copies instead.")
                         .font(.system(size: 10.5))
                         .foregroundStyle(theme.faint)

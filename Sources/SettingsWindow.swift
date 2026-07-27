@@ -1026,8 +1026,8 @@ struct PermissionNotice: View {
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(granted ? .green : .orange)
             Text(granted
-                 ? "Accessibility granted. AliasBar can type into other apps."
-                 : "Typing into another app needs Accessibility. Until it's granted, AliasBar copies instead.")
+                 ? "Accessibility granted. AliasBar can paste into other apps."
+                 : "Pasting into another app needs Accessibility. Until then, AliasBar copies.")
                 .font(.system(size: 10.5))
                 .foregroundStyle(theme.dim)
                 .fixedSize(horizontal: false, vertical: true)

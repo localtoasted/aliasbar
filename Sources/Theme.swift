@@ -108,8 +108,8 @@ enum WindowLayout {
     /// changed the window's height by a point when you switched typeface would be exactly
     /// the thing this was supposed to stop.
     static let headerHeight: CGFloat = 93
-    /// The area between the header rule and the footer rule. Header and footer are fixed
-    /// by their own content, so fixing this fixes the window.
+    /// The fixed area below the header. Every view scrolls inside this height, so search
+    /// results and view changes never resize the window.
     /// Sized so the whole window still clears the Dock at the 20%-from-top position on a
     /// 1280 × 800 display, the smallest ground worth designing for.
     static let bodyHeight: CGFloat = 420
@@ -145,6 +145,8 @@ enum Motion {
     /// Hover and press want to feel like contact rather than like animation.
     static let hover = Animation.easeOut(duration: 0.09)
     static let press = Animation.easeOut(duration: 0.06)
+    /// Selection following is spatial movement, so Reduced Motion applies instantly.
+    static let selectionScroll = Animation.easeOut(duration: 0.12)
     /// Rows arrive in sequence rather than all at once, capped so a long list does not
     /// turn the reveal into a wait.
     static func stagger(_ index: Int) -> Animation {
@@ -168,6 +170,9 @@ struct MotionPlan {
     /// Fades survive "Reduced": a cross-fade carries the same information as a slide and
     /// costs nothing to watch.
     var fades: Bool { level != .none }
+    /// Scrolling a selected row into view moves the whole viewport. Reduced and None
+    /// both keep the follow behavior but remove the animated travel.
+    var selectionScroll: Animation? { movesThings ? Motion.selectionScroll : nil }
 
     /// The animation to use, or nil for "apply it instantly".
     func callAsFunction(_ base: Animation) -> Animation? {

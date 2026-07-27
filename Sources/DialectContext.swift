@@ -79,7 +79,7 @@ enum ContextDetector {
             return Guess(dialect: .prompt, chip: "over \(name) → prompt first")
         }
         if let name = browsers[bundleID] {
-            return Guess(dialect: nil, chip: "\(name) — can't see the tab · ⇥ flips")
+            return Guess(dialect: nil, chip: "\(name) · tab hidden · ⇥ switches")
         }
         return Guess(dialect: nil, chip: nil)
     }
