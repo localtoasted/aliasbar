@@ -176,9 +176,16 @@ enum AliasWriter {
         var result: [(String, String)] = []
         // A line an earlier statement already consumed is part of that statement's
         // value. It looks like a definition and is not one.
+        //
+        // Walked over the WHOLE file, not the block, and this is the whole point: a
+        // quoted value can open above the begin marker and close below it, so a walk
+        // starting at `begin + 1` is missing the context that decides these lines.
+        // `ZshrcParser.parseText` walks [0, count) — if this walked a narrower region the
+        // two would answer differently about the same line, and the menu would offer an
+        // alias the writer cannot find. See `rangeOfAlias` for what that cost.
         let nested = ShellStatementLexer.linesInsideCompletedSpans(of: lines,
-                                                                  from: begin + 1,
-                                                                  upTo: end)
+                                                                  from: 0,
+                                                                  upTo: lines.count)
         for i in (begin + 1)..<end {
             guard !nested.contains(i) else { continue }
             let line = lines[i].trimmingCharacters(in: .whitespaces)
@@ -827,13 +834,22 @@ enum AliasWriter {
                                      begin: Int,
                                      end: Int) throws -> ClosedRange<Int>? {
         guard end > begin + 1 else { return nil }
-        // Computed once for the whole block rather than per candidate: the alternative
-        // re-lexes from the begin marker for every `alias `-prefixed line, which is
-        // quadratic in the block's size. A rename asks twice (source and destination),
-        // which is two linear passes over a block, not a scan on the summon path.
+        // Computed once for the whole file rather than per candidate: the alternative
+        // re-lexes for every `alias `-prefixed line, which is quadratic. A rename asks
+        // twice (source and destination), which is two linear passes, not a scan on the
+        // summon path.
+        //
+        // [0, count) and NOT [begin + 1, end), matching `ZshrcParser.parseText` and
+        // `managedAliases` exactly. The narrower walk was a real bug: a quoted value that
+        // opens above the begin marker and closes below it is invisible to a walk that
+        // starts inside the block, so this function returned nil for an alias the menu
+        // was showing — and `.delete` reads nil as "already absent" and reports success
+        // having removed nothing, where the pre-refactor code refused with
+        // malformedMarkers. Any two of these three walks disagreeing puts the menu and
+        // the writer into different worlds, so all three read the same region.
         let nested = ShellStatementLexer.linesInsideCompletedSpans(of: lines,
-                                                                  from: begin + 1,
-                                                                  upTo: end)
+                                                                  from: 0,
+                                                                  upTo: lines.count)
         for i in (begin + 1)..<end {
             // Value bytes belonging to a statement that started earlier. Matching one
             // here is what let an edit land *inside* another alias's quoted value.

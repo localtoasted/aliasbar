@@ -11922,6 +11922,107 @@ do {
 }
 
 // ---------------------------------------------------------------------------
+print("\n52. The menu and the writer never disagree about what is a definition")
+// ---------------------------------------------------------------------------
+// `parseText` decides what the app LISTS; `managedAliases` and `rangeOfAlias` decide what
+// the app can EDIT. All three now ask `linesInsideCompletedSpans` over the same region —
+// the whole file — and that is load-bearing, not tidiness.
+//
+// While the writer walked only [begin + 1, end) it could not see a quoted value that
+// opened above the begin marker, so it disagreed with the menu about lines inside that
+// value. The consequence was the worst sentence this app can produce: `rangeOfAlias`
+// returned nil for a name the menu was showing, `.delete` reads nil as "already absent",
+// and `apply` wrote a backup, committed, and reported success having removed nothing. The
+// user is told "Deleted eI" and eI is still there — forever, however many times they try.
+// Rename on the same name threw renameSourceMissing, which accuses another process of
+// editing the file when nothing did. Before PRE-288's fix the same call refused honestly
+// with malformedMarkers, so this was a regression, not a pre-existing wart.
+//
+// The fixture is shell-legal — `zsh -n` accepts it and zsh really does define eI — which
+// is why no other gate caught this.
+
+do {
+    let path = scratch("""
+    alias pA='x'
+    alias eA=$(: 'a
+    \(ManagedBlock.begin)
+    \(ManagedBlock.notice)
+    b')
+    alias eI=$(: 'a
+    closeI'
+    \(ManagedBlock.end)
+    )
+
+    """)
+
+    check("the fixture is a file zsh itself accepts", zshAccepts(path))
+
+    let text = read(path)
+    // What the menu shows as MANAGED — the rows that get Edit and Delete buttons — as
+    // opposed to `pre288Parsed`, which is every name in the file managed or not.
+    let listedManaged = Set(
+        ZshrcParser.parseText(text, sourceFile: path).filter(\.managed).map(\.name)
+    )
+    let editable = Set(pre288Managed(text))
+
+    // The invariant, stated as the general rule rather than as this fixture's answer:
+    // anything the menu offers an Edit/Delete button for, the writer must be able to find.
+    check("every name the menu lists as managed is a name the writer can find",
+          editable.isSuperset(of: listedManaged),
+          "listedManaged=\(listedManaged.sorted()) editable=\(editable.sorted())")
+    check("and specifically both see the alias nested under the straddling value",
+          editable.contains("eI"), "\(editable.sorted())")
+
+    // Either really delete it, or refuse. Never report success having done nothing.
+    let before = read(path)
+    let failure = pre288Apply(.delete(name: "eI"), path)
+    let after = read(path)
+    let removed = !after.contains("alias eI=")
+    check("delete either removes the definition or refuses — never a silent false success",
+          removed || failure != nil,
+          "removed=\(removed) error=\(String(describing: failure))")
+    check("and when it refuses, the file is left exactly as it was",
+          failure == nil || after == before, after)
+
+    // The rename diagnosis must describe what is actually wrong. renameSourceMissing here
+    // would tell the user something else edited their shell config, which is a lie.
+    let renameFailure = pre288Apply(.rename(from: "eI", to: "spook", command: "echo boo"), path)
+    if case .some(AliasWriter.WriteError.renameSourceMissing) = renameFailure {
+        check("rename does not blame a phantom concurrent edit for an unterminated value",
+              false, "got renameSourceMissing for a name that is present")
+    } else {
+        check("rename does not blame a phantom concurrent edit for an unterminated value",
+              true)
+    }
+    check("...and zsh still parses the file afterwards", zshAccepts(path))
+}
+
+do {
+    // The ordinary case has to keep working: a straddling value above the block must not
+    // make the block's own well-formed aliases unfindable.
+    let path = scratch("""
+    alias outer='first
+    last'
+    \(ManagedBlock.begin)
+    \(ManagedBlock.notice)
+    alias keep='echo keep'
+    alias drop='echo drop'
+    \(ManagedBlock.end)
+
+    """)
+    check("both ordinary managed aliases are visible under a whole-file walk",
+          pre288Managed(read(path)).sorted() == ["drop", "keep"], "\(pre288Managed(read(path)))")
+    check("deleting one of them really deletes it",
+          pre288Apply(.delete(name: "drop"), path) == nil)
+    let after = read(path)
+    check("...the other survives untouched",
+          after.contains("alias keep='echo keep'") && !after.contains("alias drop="), after)
+    check("...the value that straddles the marker is untouched",
+          after.contains("alias outer='first\nlast'"), after)
+    check("...and zsh parses the result", zshAccepts(path))
+}
+
+// ---------------------------------------------------------------------------
 print("\n" + String(repeating: "-", count: 60))
 print("\(passes) passed, \(failures) failed")
 exit(failures == 0 ? 0 : 1)
