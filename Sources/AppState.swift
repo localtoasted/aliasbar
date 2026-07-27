@@ -207,17 +207,19 @@ enum BoardMoveDirection {
 /// Pure grid navigation for BOARD while a search is active. The cards keep their
 /// positions, but the keyboard cursor only lands on cards that match the query.
 enum BoardNavigator {
+    static let noSelection = -1
+
     static func destination(from selection: Int,
                             moving direction: BoardMoveDirection,
                             columns: Int,
                             itemCount: Int,
                             matchingIndices: [Int]) -> Int {
-        guard itemCount > 0 else { return 0 }
+        guard itemCount > 0 else { return noSelection }
         let columns = max(1, columns)
         let eligible = matchingIndices
             .filter { (0..<itemCount).contains($0) }
             .sorted()
-        guard !eligible.isEmpty else { return min(max(selection, 0), itemCount - 1) }
+        guard !eligible.isEmpty else { return noSelection }
         guard eligible.count > 1 else { return eligible[0] }
 
         let current = min(max(selection, 0), itemCount - 1)
@@ -270,8 +272,12 @@ enum BoardNavigator {
 /// to know exactly what is on screen in order to move a selection through it. Splitting
 /// that across a view and a controller is how off-by-one selection bugs happen.
 final class AppState: ObservableObject {
-    @Published var mode: ViewMode
-    @Published var query = ""
+    @Published var mode: ViewMode {
+        didSet { normalizeSelectionAfterSurfaceChange() }
+    }
+    @Published var query = "" {
+        didSet { resetSelectionForQuery() }
+    }
     /// Whichever list a source is currently navigating — shell/prompt rows, history
     /// commands, or clipboard clips, depending on `findSource`/`mode`. Resetting the
     /// clipboard source's action highlight here, in one place, is what keeps every
@@ -280,7 +286,9 @@ final class AppState: ObservableObject {
     @Published var selection = 0 {
         didSet { if findSource == .clipboard { clipActionSelection = nil } }
     }
-    @Published var bucket: Bucket = .all
+    @Published var bucket: Bucket = .all {
+        didSet { normalizeSelectionAfterSurfaceChange() }
+    }
     /// MANAGE's prompt-dialect counterpart to `bucket` — which of Library/Delivery/
     /// Health the sidebar has selected. Independent of `bucket` on purpose: flipping
     /// dialect and flipping back should not have quietly moved the shell sidebar's
@@ -295,7 +303,9 @@ final class AppState: ObservableObject {
     /// grid for `.shell`, the prompt card wall for `.prompt` — so opening on "the deck
     /// matching the guess" and flipping decks with the same ⇥ FIND already uses falls
     /// out of sharing one field rather than needing a second one kept in sync with it.
-    @Published var dialect: Dialect = .shell
+    @Published var dialect: Dialect = .shell {
+        didSet { normalizeSelectionAfterSurfaceChange() }
+    }
     /// The inference copy the title bar shows, or nil when the guess has nothing worth
     /// saying (an unrecognized app). Frozen at the guess made when the popover opened —
     /// it describes where you came from, not where ⇥ has since taken you.
@@ -380,6 +390,10 @@ final class AppState: ObservableObject {
 
     private var toastWorkItem: DispatchWorkItem?
     private var copyFeedbackDismissWorkItem: DispatchWorkItem?
+    /// Invalidates a delayed close whenever the current presentation changes. Merely
+    /// cancelling a work item is not enough if it has already been dequeued on the main
+    /// queue; the captured generation is the final guard against a stale focus restore.
+    private var presentationGeneration: UInt = 0
 
     /// Keeps the success state visible long enough to register before Close-after-copy
     /// dismisses the palette. A new summon cancels the pending close.
@@ -518,7 +532,6 @@ final class AppState: ObservableObject {
         guard settings.promptFeaturesEnabled else { return }
         guard (mode == .find && findSource == .aliases) || mode == .board else { return }
         dialect = dialect == .shell ? .prompt : .shell
-        selection = 0
     }
 
     /// ⇥ in MANAGE: swap between the shell bucket sidebar (All/Functions/.../
@@ -533,7 +546,6 @@ final class AppState: ObservableObject {
         guard settings.promptFeaturesEnabled else { return }
         guard mode == .manage else { return }
         dialect = dialect == .shell ? .prompt : .shell
-        selection = 0
     }
 
     /// FIND's Enter/⌘⏎, for a shortcut that might be either kind. A shell shortcut is
@@ -1277,6 +1289,9 @@ final class AppState: ObservableObject {
     /// cache here is what makes every one of those true without a conditional at each
     /// of their call sites.
     private func loadPromptCache() {
+        defer {
+            if mode == .board { normalizeSelectionAfterSurfaceChange() }
+        }
         guard settings.promptFeaturesEnabled else {
             promptCache = []
             promptUsageCache = [:]
@@ -1524,10 +1539,45 @@ final class AppState: ObservableObject {
     }
 
     /// Query edits reset every list to its first row. BOARD keeps nonmatches in place,
-    /// so its first selectable row is the first lit card instead.
+    /// so its first selectable row is the first lit card instead. A search with no
+    /// matches has no actionable selection; it must never leave a dim card armed.
     func resetSelectionForQuery() {
         guard mode == .board else { selection = 0; return }
-        selection = boardMatchingIndices.first ?? 0
+        selection = boardMatchingIndices.first ?? BoardNavigator.noSelection
+    }
+
+    /// Keeps BOARD's keyboard target aligned with the deck currently on screen after
+    /// a view, bucket, or dialect transition. Query edits deliberately use the same
+    /// first-match rule through `resetSelectionForQuery`.
+    private func normalizeSelectionAfterSurfaceChange() {
+        guard mode == .board else { selection = 0; return }
+        selection = boardMatchingIndices.first ?? BoardNavigator.noSelection
+    }
+
+    /// Mouse activation goes through the same match gate as Enter. The view also
+    /// disables dim cards, but the state guard is the authority and keeps programmatic
+    /// callers from acting on a card hidden by the current search.
+    func activateBoardEntry(at index: Int) {
+        guard mode == .board, dialect == .shell else { return }
+        let entries = boardEntries
+        guard entries.indices.contains(index), boardMatches(entries[index]) else {
+            normalizeSelectionAfterSurfaceChange()
+            return
+        }
+        selection = index
+        perform(settings.enterAction, on: entries[index])
+    }
+
+    /// Prompt-deck counterpart to `activateBoardEntry(at:)`.
+    func activateBoardPrompt(at index: Int) {
+        guard mode == .board, dialect == .prompt else { return }
+        let prompts = boardPrompts
+        guard prompts.indices.contains(index), boardPromptMatches(prompts[index]) else {
+            normalizeSelectionAfterSurfaceChange()
+            return
+        }
+        selection = index
+        performBoardPrompt(prompts[index])
     }
 
     /// A prompt card's usage badge, from the same cache FIND's union pool reads.
@@ -1625,7 +1675,12 @@ final class AppState: ObservableObject {
     /// shell grid sitting underneath a screen that's actually showing prompt cards.
     /// `selectedPrompt` is that deck's own counterpart.
     var selectedEntry: RankedEntry? {
-        if mode == .board && dialect == .prompt { return nil }
+        if mode == .board {
+            guard dialect == .shell else { return nil }
+            let list = boardEntries
+            guard list.indices.contains(selection), boardMatches(list[selection]) else { return nil }
+            return list[selection]
+        }
         let list = activeList
         guard list.indices.contains(selection) else { return nil }
         return list[selection]
@@ -1638,7 +1693,7 @@ final class AppState: ObservableObject {
     var selectedPrompt: Prompt? {
         guard mode == .board, dialect == .prompt else { return nil }
         let list = boardPrompts
-        guard list.indices.contains(selection) else { return nil }
+        guard list.indices.contains(selection), boardPromptMatches(list[selection]) else { return nil }
         return list[selection]
     }
 
@@ -1646,6 +1701,18 @@ final class AppState: ObservableObject {
     /// edit or a reload keeps the highlight on the same alias rather than on whatever
     /// slid into that row.
     private func restoreSelection(to id: String?) {
+        if mode == .board {
+            let entries = boardEntries
+            if dialect == .shell,
+               let id,
+               let index = entries.firstIndex(where: { $0.id == id }),
+               boardMatches(entries[index]) {
+                selection = index
+            } else {
+                normalizeSelectionAfterSurfaceChange()
+            }
+            return
+        }
         guard let id else { clampSelection(); return }
         if let index = activeList.firstIndex(where: { $0.id == id }) {
             selection = index
@@ -1656,10 +1723,30 @@ final class AppState: ObservableObject {
 
     // MARK: - Lifecycle
 
-    /// Called every time the popover opens.
-    func prepareForShow() {
+    /// Cancels delayed work tied to the presentation that is going away. The app
+    /// delegate calls this before every AppKit close path, including click-away and
+    /// Settings, so an old copy toast cannot later close a newer window or restore
+    /// focus over it.
+    func presentationWillClose() {
+        invalidatePendingCopyDismissal()
+    }
+
+    /// Opens Settings through one state-owned route so its close cannot leave delayed
+    /// copy feedback alive behind the Settings window.
+    func requestOpenSettings() {
+        presentationWillClose()
+        onOpenSettings?()
+    }
+
+    private func invalidatePendingCopyDismissal() {
+        presentationGeneration &+= 1
         copyFeedbackDismissWorkItem?.cancel()
         copyFeedbackDismissWorkItem = nil
+    }
+
+    /// Called every time the popover opens.
+    func prepareForShow() {
+        invalidatePendingCopyDismissal()
         store.reload()
         errorMessage = store.loadError
         mode = settings.defaultView
@@ -1690,6 +1777,7 @@ final class AppState: ObservableObject {
         refreshSuggestions()
         refreshSnippetCache()
         refreshInbox()
+        normalizeSelectionAfterSurfaceChange()
 
         if let hint = pendingPromptHint {
             pendingPromptHint = nil
@@ -1700,6 +1788,12 @@ final class AppState: ObservableObject {
     }
 
     func clampSelection() {
+        if mode == .board {
+            if !boardMatchingIndices.contains(selection) {
+                normalizeSelectionAfterSurfaceChange()
+            }
+            return
+        }
         let count = navigableCount
         if count == 0 { selection = 0 }
         else if selection >= count { selection = count - 1 }
@@ -1772,7 +1866,6 @@ final class AppState: ObservableObject {
             // there still means leave, exactly as it always has.
             if bucket != .all && mode != .manage {
                 bucket = .all
-                selection = 0
                 return true
             }
             dismiss(restoringFocus: true)
@@ -1980,7 +2073,7 @@ final class AppState: ObservableObject {
             return true
 
         case kVK_ANSI_Comma where command:
-            onOpenSettings?()
+            requestOpenSettings()
             return true
 
         // ⌘I anywhere in the palette: copies the audit prompt. ⌥⌘I picks the
@@ -2037,7 +2130,7 @@ final class AppState: ObservableObject {
 
     func moveBoard(_ direction: BoardMoveDirection) {
         let count = dialect == .prompt ? boardPrompts.count : boardEntries.count
-        guard count > 0 else { selection = 0; return }
+        guard count > 0 else { selection = BoardNavigator.noSelection; return }
 
         let trimmedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedQuery.isEmpty else {
@@ -2057,11 +2150,12 @@ final class AppState: ObservableObject {
                                                matchingIndices: boardMatchingIndices)
     }
 
-    private func switchTo(_ newMode: ViewMode) {
-        mode = newMode
+    func switchTo(_ newMode: ViewMode) {
         // History is a state of FIND, so leaving FIND leaves it.
         historyMode = false
-        selection = 0
+        // Set the surface last. `historyMode = false` resets selection as part of the
+        // source transition; BOARD then gets the final word and chooses a lit card.
+        mode = newMode
     }
 
     /// Columns for whichever deck BOARD is showing. The prompt deck's cards are wider
@@ -2096,7 +2190,6 @@ final class AppState: ObservableObject {
         let all = Bucket.allCases
         guard let idx = all.firstIndex(of: bucket) else { return }
         bucket = all[(idx + delta + all.count) % all.count]
-        selection = 0
     }
 
     private func cycleView(backwards: Bool) {
@@ -2191,9 +2284,10 @@ final class AppState: ObservableObject {
 
     private func finishAfterCopyFeedback() {
         guard settings.afterAction == .close else { return }
-        copyFeedbackDismissWorkItem?.cancel()
+        invalidatePendingCopyDismissal()
+        let generation = presentationGeneration
         let work = DispatchWorkItem { [weak self] in
-            guard let self else { return }
+            guard let self, self.presentationGeneration == generation else { return }
             self.copyFeedbackDismissWorkItem = nil
             self.dismiss(restoringFocus: true)
         }
@@ -2203,8 +2297,7 @@ final class AppState: ObservableObject {
     }
 
     func dismiss(restoringFocus: Bool) {
-        copyFeedbackDismissWorkItem?.cancel()
-        copyFeedbackDismissWorkItem = nil
+        invalidatePendingCopyDismissal()
         onDismiss?()
         if restoringFocus { PreviousApp.restore() }
     }

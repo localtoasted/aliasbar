@@ -12,6 +12,7 @@ struct SnippetManageView: View {
     @ObservedObject var state: AppState
     @ObservedObject var settings: AppSettings
     @Environment(\.theme) private var theme
+    @Environment(\.motion) private var motion
 
     var body: some View {
         HStack(spacing: 0) {
@@ -50,7 +51,7 @@ struct SnippetManageView: View {
                 }
                 .onChange(of: state.selection) { _ in
                     guard let selected = state.selectedSnippet else { return }
-                    withAnimation(.easeOut(duration: 0.12)) { proxy.scrollTo(selected.id, anchor: .center) }
+                    withAnimation(motion.selectionScroll) { proxy.scrollTo(selected.id, anchor: .center) }
                 }
             }
         }

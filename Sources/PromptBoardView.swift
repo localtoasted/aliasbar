@@ -32,15 +32,14 @@ struct PromptBoardView: View {
                 ScrollView {
                     LazyVGrid(columns: columns, spacing: 6) {
                         ForEach(Array(prompts.enumerated()), id: \.element.name) { index, prompt in
+                            let dimmed = !state.boardPromptMatches(prompt)
                             PromptCard(prompt: prompt,
                                        selected: state.selection == index,
-                                       dimmed: !state.boardPromptMatches(prompt),
+                                       dimmed: dimmed,
                                        usage: state.promptUsage(for: prompt.name),
                                        density: settings.boardDensity,
-                                       action: {
-                                           state.selection = index
-                                           state.performBoardPrompt(prompt)
-                                       })
+                                       action: { state.activateBoardPrompt(at: index) })
+                                .disabled(dimmed)
                         }
                     }
                     .padding(10)

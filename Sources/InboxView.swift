@@ -13,6 +13,7 @@ struct InboxView: View {
     @ObservedObject var state: AppState
     @ObservedObject var settings: AppSettings
     @Environment(\.theme) private var theme
+    @Environment(\.motion) private var motion
 
     var body: some View {
         HStack(spacing: 0) {
@@ -45,7 +46,7 @@ struct InboxView: View {
             }
             .onChange(of: state.selection) { _ in
                 guard let selected = state.selectedInboxRow else { return }
-                withAnimation(.easeOut(duration: 0.12)) { proxy.scrollTo(selected.id, anchor: .center) }
+                withAnimation(motion.selectionScroll) { proxy.scrollTo(selected.id, anchor: .center) }
             }
         }
         .frame(width: 224)

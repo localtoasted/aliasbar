@@ -231,7 +231,7 @@ enum PromptInbox {
         var errorDescription: String? {
             switch self {
             case .flaggedRequiresAcknowledgement(let name):
-                return "\"\(name)\" was flagged for review and needs acknowledgedFlags: true before it can be approved."
+                return "\"\(name)\" is flagged. Review it in full before approving."
             case .nameCollision(let name):
                 return "A prompt named \"\(name)\" already exists. Submit this as an update."
             case .updateTargetMissing(let name):

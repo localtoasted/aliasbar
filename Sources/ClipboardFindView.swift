@@ -125,7 +125,7 @@ struct ClipboardFindView: View {
             }
             .onChange(of: state.selection) { _ in
                 guard let selected = state.selectedClip else { return }
-                withAnimation(.easeOut(duration: 0.12)) {
+                withAnimation(motion.selectionScroll) {
                     proxy.scrollTo(selected.id, anchor: .center)
                 }
             }

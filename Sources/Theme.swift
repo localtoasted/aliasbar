@@ -145,6 +145,8 @@ enum Motion {
     /// Hover and press want to feel like contact rather than like animation.
     static let hover = Animation.easeOut(duration: 0.09)
     static let press = Animation.easeOut(duration: 0.06)
+    /// Selection following is spatial movement, so Reduced Motion applies instantly.
+    static let selectionScroll = Animation.easeOut(duration: 0.12)
     /// Rows arrive in sequence rather than all at once, capped so a long list does not
     /// turn the reveal into a wait.
     static func stagger(_ index: Int) -> Animation {
@@ -168,6 +170,9 @@ struct MotionPlan {
     /// Fades survive "Reduced": a cross-fade carries the same information as a slide and
     /// costs nothing to watch.
     var fades: Bool { level != .none }
+    /// Scrolling a selected row into view moves the whole viewport. Reduced and None
+    /// both keep the follow behavior but remove the animated travel.
+    var selectionScroll: Animation? { movesThings ? Motion.selectionScroll : nil }
 
     /// The animation to use, or nil for "apply it instantly".
     func callAsFunction(_ base: Animation) -> Animation? {

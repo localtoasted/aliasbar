@@ -232,7 +232,7 @@ struct RootView: View {
                     .layoutPriority(-1)
                     .help(ZshrcParser.path)
 
-                Button { state.onOpenSettings?() } label: {
+                Button { state.requestOpenSettings() } label: {
                     Image(systemName: "gearshape.fill")
                         .font(.system(size: 11, weight: .semibold))
                 }
@@ -251,7 +251,6 @@ struct RootView: View {
                     .font(.system(size: 15.5, design: theme.bodyDesign))
                     .foregroundStyle(theme.text)
                     .focused($searchFocused)
-                    .onChange(of: state.query) { _ in state.resetSelectionForQuery() }
                 if !state.query.isEmpty {
                     Text("\(state.searchMatchCount)")
                         .font(.system(size: 10, weight: .semibold, design: .monospaced))
@@ -302,7 +301,7 @@ struct RootView: View {
                     .strokeBorder(active ? theme.accent.opacity(0.4) : .clear, lineWidth: 1)
             )
             .contentShape(Rectangle())
-            .live { state.mode = mode; state.selection = 0 }
+            .live { state.switchTo(mode) }
             .help("\(mode.label). Press ⌘\(mode == .find ? "1" : mode == .board ? "2" : "3").")
     }
 
@@ -671,7 +670,7 @@ struct FindView: View {
                     }
                     .onChange(of: state.selection) { _ in
                         guard let selected = state.selectedHistory else { return }
-                        withAnimation(.easeOut(duration: 0.12)) {
+                        withAnimation(motion.selectionScroll) {
                             proxy.scrollTo(selected.id, anchor: .center)
                         }
                     }
@@ -790,7 +789,7 @@ struct FindView: View {
             }
             .onChange(of: state.selection) { _ in
                 guard let selected = state.selectedShortcut else { return }
-                withAnimation(.easeOut(duration: 0.12)) {
+                withAnimation(motion.selectionScroll) {
                     proxy.scrollTo(selected.id, anchor: .center)
                 }
             }
@@ -1138,14 +1137,13 @@ struct BoardView: View {
                 ScrollView {
                     LazyVGrid(columns: columns, spacing: 6) {
                         ForEach(Array(entries.enumerated()), id: \.element.id) { index, entry in
+                            let dimmed = !state.boardMatches(entry)
                             Keycap(entry: entry,
                                    selected: state.selection == index,
-                                   dimmed: !state.boardMatches(entry),
+                                   dimmed: dimmed,
                                    density: settings.boardDensity,
-                                   action: {
-                                       state.selection = index
-                                       state.perform(settings.enterAction, on: entry)
-                                   })
+                                   action: { state.activateBoardEntry(at: index) })
+                                .disabled(dimmed)
                         }
                     }
                     .padding(10)
@@ -1183,8 +1181,8 @@ struct BoardView: View {
                     }
                     SelectedActionHints(primaryKeys: "⏎",
                                         primaryLabel: settings.enterAction.short,
-                                        secondaryKeys: settings.promptFeaturesEnabled ? "⇥" : nil,
-                                        secondaryLabel: settings.promptFeaturesEnabled ? "prompts" : nil)
+                                        secondaryKeys: "⌘⏎",
+                                        secondaryLabel: settings.enterAction.secondary.short)
                 }
                 CommandText(command: entry.entry.command, lineLimit: 1, size: 11)
             } else {
@@ -1264,6 +1262,7 @@ struct ManageView: View {
     @ObservedObject var state: AppState
     @ObservedObject var settings: AppSettings
     @Environment(\.theme) private var theme
+    @Environment(\.motion) private var motion
 
     var body: some View {
         HStack(spacing: 0) {
@@ -1434,7 +1433,7 @@ struct ManageView: View {
             }
             .onChange(of: state.selection) { _ in
                 guard let entry = state.selectedEntry else { return }
-                withAnimation(.easeOut(duration: 0.12)) { proxy.scrollTo(entry.id, anchor: .center) }
+                withAnimation(motion.selectionScroll) { proxy.scrollTo(entry.id, anchor: .center) }
             }
         }
         .frame(width: 224)

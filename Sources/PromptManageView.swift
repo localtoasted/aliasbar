@@ -9,6 +9,7 @@ struct PromptManageView: View {
     @ObservedObject var state: AppState
     @ObservedObject var settings: AppSettings
     @Environment(\.theme) private var theme
+    @Environment(\.motion) private var motion
 
     var body: some View {
         HStack(spacing: 0) {
@@ -41,7 +42,7 @@ struct PromptManageView: View {
             }
             .onChange(of: state.selection) { _ in
                 guard let selected = state.selectedPromptManageShortcut else { return }
-                withAnimation(.easeOut(duration: 0.12)) { proxy.scrollTo(selected.id, anchor: .center) }
+                withAnimation(motion.selectionScroll) { proxy.scrollTo(selected.id, anchor: .center) }
             }
         }
         .frame(width: 224)
@@ -367,6 +368,7 @@ struct SuggestedManageView: View {
     @ObservedObject var state: AppState
     @ObservedObject var settings: AppSettings
     @Environment(\.theme) private var theme
+    @Environment(\.motion) private var motion
 
     var body: some View {
         HStack(spacing: 0) {
@@ -407,7 +409,7 @@ struct SuggestedManageView: View {
             }
             .onChange(of: state.selection) { _ in
                 guard let selected = state.selectedSuggestion else { return }
-                withAnimation(.easeOut(duration: 0.12)) { proxy.scrollTo(selected.id, anchor: .center) }
+                withAnimation(motion.selectionScroll) { proxy.scrollTo(selected.id, anchor: .center) }
             }
         }
         .frame(width: 224)

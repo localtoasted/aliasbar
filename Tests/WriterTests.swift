@@ -2369,17 +2369,21 @@ check("full motion moves things", fullPlan.movesThings)
 check("full motion fades", fullPlan.fades)
 check("full motion staggers", fullPlan.stagger(3) != nil)
 check("full motion returns an animation", fullPlan(Motion.standard) != nil)
+check("full motion animates selection-following scroll", fullPlan.selectionScroll != nil)
 
 let reducedPlan = MotionPlan.resolve(.reduced, reduceMotion: false)
 check("reduced motion moves nothing", !reducedPlan.movesThings)
 check("reduced motion still fades", reducedPlan.fades)
 check("reduced motion still animates", reducedPlan(Motion.standard) != nil)
+check("reduced motion follows selection without animated travel",
+      reducedPlan.selectionScroll == nil)
 
 let nonePlan = MotionPlan.resolve(.none, reduceMotion: false)
 check("no motion moves nothing", !nonePlan.movesThings)
 check("no motion does not fade", !nonePlan.fades)
 check("no motion returns no animation", nonePlan(Motion.standard) == nil)
 check("no motion does not stagger", nonePlan.stagger(0) == nil)
+check("no motion follows selection without animated travel", nonePlan.selectionScroll == nil)
 
 // The system setting is an accessibility setting, not a preference: it can only take
 // motion away, never give it back.
@@ -2387,6 +2391,8 @@ check("the system setting overrides a full preference",
       !MotionPlan.resolve(.full, reduceMotion: true).movesThings)
 check("the system setting leaves fades alone",
       MotionPlan.resolve(.full, reduceMotion: true).fades)
+check("the system setting removes selection-scroll travel",
+      MotionPlan.resolve(.full, reduceMotion: true).selectionScroll == nil)
 check("the system setting cannot revive motion the user turned off",
       MotionPlan.resolve(.none, reduceMotion: true)(Motion.standard) == nil)
 check("neither source can be overridden by the other into more motion",
@@ -5963,13 +5969,14 @@ let boardFlipDialectBefore = boardState.dialect
 boardState.flipDialect()
 check("BOARD's ⇥ flips the deck (dialect toggles)", boardState.dialect != boardFlipDialectBefore)
 check("BOARD's ⇥ preserves the query", boardState.query == "gs")
-check("BOARD's ⇥ resets the selection", boardState.selection == 0)
+check("BOARD's ⇥ leaves no actionable selection when the new deck has no match",
+      boardState.selection == BoardNavigator.noSelection)
 
 boardState.selection = 1
 boardState.flipDialect()
 check("flipping a second time restores the original deck",
       boardState.dialect == boardFlipDialectBefore)
-check("flipping resets the selection even when it wasn't already 0", boardState.selection == 0)
+check("flipping back selects the shell deck's first live match", boardState.selection == 0)
 
 // --- Enter on a card: the interim copy-raw-body-and-close action ------------------
 
@@ -6013,6 +6020,61 @@ check("BOARD search wraps horizontal movement among lit cards only",
 check("BOARD search leaves a sole lit card selected in every direction",
       BoardNavigator.destination(from: 7, moving: .down, columns: 3,
                                  itemCount: 10, matchingIndices: [4]) == 4)
+check("BOARD search exposes no selection when there are no lit cards",
+      BoardNavigator.destination(from: 4, moving: .right, columns: 3,
+                                 itemCount: 10, matchingIndices: [])
+          == BoardNavigator.noSelection)
+check("an empty BOARD exposes no selection",
+      BoardNavigator.destination(from: 0, moving: .down, columns: 3,
+                                 itemCount: 0, matchingIndices: [])
+          == BoardNavigator.noSelection)
+
+// --- No-match safety: dim cards cannot be selected or activated --------------
+
+boardSettings.enterAction = .copyName
+boardSettings.afterAction = .stayOpen
+let dimmedBoardPasteboard = FakePasteboard()
+boardState.pasteboard = dimmedBoardPasteboard
+
+boardState.dialect = .shell
+boardState.query = "nothing-can-match-this"
+check("a zero-match shell Board has no actionable selection",
+      boardState.selection == BoardNavigator.noSelection && boardState.selectedEntry == nil)
+boardState.selection = 0 // Stand in for a stale or programmatic highlight.
+check("a dim shell card cannot resolve through selectedEntry", boardState.selectedEntry == nil)
+boardState.activateBoardEntry(at: 0)
+check("click activation ignores a dim shell card",
+      dimmedBoardPasteboard.string(forType: .string) == nil)
+boardState.moveBoard(.right)
+check("keyboard movement cannot arm a dim shell card",
+      boardState.selection == BoardNavigator.noSelection)
+
+boardState.dialect = .prompt
+check("a zero-match prompt Board has no actionable selection",
+      boardState.selection == BoardNavigator.noSelection && boardState.selectedPrompt == nil)
+boardState.selection = 0 // Same stale-highlight check for the prompt deck.
+boardState.activateBoardPrompt(at: 0)
+check("click activation ignores a dim prompt card",
+      dimmedBoardPasteboard.string(forType: .string) == nil)
+
+boardState.query = "alpha"
+check("a new prompt match becomes the only actionable selection",
+      boardState.selection == boardState.boardPrompts.firstIndex(where: { $0.name == "alpha" }))
+boardState.dialect = .shell
+check("a dialect transition with no shell match clears the action target",
+      boardState.selection == BoardNavigator.noSelection && boardState.selectedEntry == nil)
+boardState.switchTo(.find)
+boardState.switchTo(.board)
+check("returning to Board with no match does not arm its first dim card",
+      boardState.selection == BoardNavigator.noSelection && boardState.selectedEntry == nil)
+boardState.query = "gs"
+check("changing the query selects the first live shell match", boardState.selection == 0)
+boardState.bucket = .functions
+check("a bucket transition that removes every match clears the action target",
+      boardState.selection == BoardNavigator.noSelection && boardState.selectedEntry == nil)
+boardState.bucket = .all
+check("returning to a bucket with a match restores a live target", boardState.selection == 0)
+
 print("\n38. AuditPrompt: ⌘I audit prompt generator (PRE-265)")
 
 let emptyLibraryPrompt = AuditPrompt.generate(library: [], ending: .localAgent)
@@ -6046,8 +6108,10 @@ check("instructions tell the agent never to re-suggest what exists",
       libraryPrompt.contains("Never re-suggest"))
 check("instructions mention proposing updates when usage drifted",
       libraryPrompt.contains("propose an update"))
-check("instructions mention merging near-duplicates",
-      libraryPrompt.lowercased().contains("merge them"))
+check("instructions only merge prompts that do the same job",
+      libraryPrompt.contains("Merge prompts only when they do the same job"))
+check("instructions keep prompts with different purposes separate",
+      libraryPrompt.contains("Keep prompts with distinct purposes separate"))
 check("instructions make clear nothing is applied automatically",
       libraryPrompt.contains("does not apply the whole list at once"))
 
@@ -6713,6 +6777,41 @@ do {
     state.performFind(copyOnly, secondary: false)
     _ = fake
     check("copy-mode honors afterAction == .stayOpen (no dismiss)", !dismissed)
+}
+
+// A delayed Close-after-copy belongs to one presentation. Any other close or a new
+// presentation must invalidate it before it can restore focus over the next window.
+do {
+    let (state, _) = freshPre260State(enterAction: .copyName, afterAction: .close)
+    var dismissCount = 0
+    state.onDismiss = { dismissCount += 1 }
+    state.performFind(shortcut(named: "copyonlyprompt", in: state), secondary: false)
+    state.presentationWillClose()
+    RunLoop.current.run(until: Date().addingTimeInterval(AppState.copyFeedbackDismissDelay + 0.08))
+    check("an external close cancels the pending copy dismissal", dismissCount == 0)
+}
+
+do {
+    let (state, _) = freshPre260State(enterAction: .copyName, afterAction: .close)
+    var dismissCount = 0
+    var settingsOpenCount = 0
+    state.onDismiss = { dismissCount += 1 }
+    state.onOpenSettings = { settingsOpenCount += 1 }
+    state.performFind(shortcut(named: "copyonlyprompt", in: state), secondary: false)
+    state.requestOpenSettings()
+    RunLoop.current.run(until: Date().addingTimeInterval(AppState.copyFeedbackDismissDelay + 0.08))
+    check("Settings opens through the state-owned cancellation route", settingsOpenCount == 1)
+    check("opening Settings cancels the pending copy dismissal", dismissCount == 0)
+}
+
+do {
+    let (state, _) = freshPre260State(enterAction: .copyName, afterAction: .close)
+    var dismissCount = 0
+    state.onDismiss = { dismissCount += 1 }
+    state.performFind(shortcut(named: "copyonlyprompt", in: state), secondary: false)
+    state.prepareForShow()
+    RunLoop.current.run(until: Date().addingTimeInterval(AppState.copyFeedbackDismissDelay + 0.08))
+    check("a new presentation cannot inherit an old copy dismissal", dismissCount == 0)
 }
 
 // ⌘⏎ on a slotted prompt: always a raw, slots-intact copy — never opens FillInSheet,
@@ -8229,7 +8328,9 @@ do {
 
     state.approveInboxItem(file: flagged.file, index: flagged.index)
     check("approveInboxItem refuses a flagged item that hasn't been viewed",
-          state.errorMessage?.contains("acknowledgedFlags") == true || state.errorMessage != nil)
+          state.errorMessage?.contains("Review it in full before approving") == true)
+    check("flagged review errors never expose an internal API parameter",
+          state.errorMessage?.contains("acknowledgedFlags") == false)
     check("the refused approval left the item's file still in the live inbox",
           FileManager.default.fileExists(atPath: flagged.file.path))
 
@@ -9121,8 +9222,10 @@ print("\n44. Interaction feedback, contextual hints, and Find scrolling")
 
 let interactionViewsSource = read(projectRoot.appendingPathComponent("Sources/Views.swift").path)
 let clipboardFindSource = read(projectRoot.appendingPathComponent("Sources/ClipboardFindView.swift").path)
+let promptBoardSource = read(projectRoot.appendingPathComponent("Sources/PromptBoardView.swift").path)
 check("interaction view sources are readable",
-      interactionViewsSource != "<unreadable>" && clipboardFindSource != "<unreadable>")
+      interactionViewsSource != "<unreadable>" && clipboardFindSource != "<unreadable>"
+          && promptBoardSource != "<unreadable>")
 check("history rows own scroll targets",
       interactionViewsSource.contains(".id(command.id)")
           && interactionViewsSource.contains("guard let selected = state.selectedHistory"))
@@ -9137,6 +9240,12 @@ check("the all-purpose footer is gone",
 check("shortcuts live with selected actions",
       interactionViewsSource.contains("struct SelectedActionHints")
           && interactionViewsSource.contains("primaryKeys: \"⏎\""))
+check("shell Board shows both Enter actions beside the selected alias",
+      interactionViewsSource.contains("secondaryKeys: \"⌘⏎\"")
+          && interactionViewsSource.contains("secondaryLabel: settings.enterAction.secondary.short"))
+check("both Board decks disable dim cards at the view boundary",
+      interactionViewsSource.contains(".disabled(dimmed)")
+          && promptBoardSource.contains(".disabled(dimmed)"))
 check("copy feedback has a visible success icon and an accessibility label",
       interactionViewsSource.contains("checkmark.circle.fill")
           && interactionViewsSource.contains(".accessibilityLabel(\"Status: ")

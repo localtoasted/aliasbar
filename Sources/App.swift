@@ -172,6 +172,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         let hosting = NSHostingController(rootView: root)
         hosting.sizingOptions = [.preferredContentSize]
         let controller = PaletteController(content: hosting)
+        controller.onWillClose = { [weak self] in self?.state.presentationWillClose() }
         controller.onClose = { [weak self] in self?.state.editor = nil }
         return controller
     }
@@ -204,6 +205,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     /// Closes both, deliberately. If the style changed while something was open, only
     /// asking the current style to close would strand the other one on screen.
     private func closeUI() {
+        state.presentationWillClose()
         popover?.performClose(nil)
         palette?.close()
     }
@@ -397,6 +399,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     func popoverDidClose(_ notification: Notification) {
         state.editor = nil
+    }
+
+    func popoverWillClose(_ notification: Notification) {
+        state.presentationWillClose()
     }
 
     // MARK: Keyboard

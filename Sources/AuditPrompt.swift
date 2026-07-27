@@ -70,7 +70,7 @@ enum AuditPrompt {
     prompts with different names but the same job.
     2. If a prompt no longer fits how it is used, propose an update. Include the existing \
     name in "replaces" and provide the full new body.
-    3. If existing prompts overlap, merge them into one prompt.
+    3. Merge prompts only when they do the same job. Keep prompts with distinct purposes separate.
     4. Return strict JSON that matches this schema. Include no prose or markdown unless \
     the output instructions request a code block.
 
