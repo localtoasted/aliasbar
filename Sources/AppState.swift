@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 import Carbon.HIToolbox
 
 /// Sidebar buckets in MANAGE's shell dialect.
@@ -426,10 +427,28 @@ final class AppState: ObservableObject {
     /// it can only ever be shown once no matter how it was queued.
     private var pendingPromptHint: String?
 
+    /// Keeps the child-object subscriptions below alive for the life of the state.
+    private var childObservers: [AnyCancellable] = []
+
     init(store: EntryStore, settings: AppSettings) {
         self.store = store
         self.settings = settings
         self.mode = settings.defaultView
+        observeChildren()
+    }
+
+    /// Views read `store.ranked`, `store.conflicts` and `settings.enterAction` straight
+    /// off these children, but SwiftUI only observes the `AppState` they were handed —
+    /// a child's own `objectWillChange` stops at the child. Without this forwarding a
+    /// reload only redraws because the same code path happens to write `toast` or
+    /// `errorMessage` on the way past, which is a coincidence, not a mechanism: the one
+    /// path that reloads silently leaves the list showing entries that no longer exist.
+    private func observeChildren() {
+        let forward: () -> Void = { [weak self] in self?.objectWillChange.send() }
+        childObservers = [
+            store.objectWillChange.sink { _ in forward() },
+            settings.objectWillChange.sink { _ in forward() },
+        ]
     }
 
     // MARK: - Derived content
