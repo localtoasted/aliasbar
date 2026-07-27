@@ -618,16 +618,14 @@ struct OnboardingView: View {
     }
 
     private func chooseFile() {
-        Task { @MainActor [settings] in
-            let panel = NSOpenPanel()
-            panel.canChooseFiles = true
-            panel.canChooseDirectories = false
-            panel.allowsMultipleSelection = false
-            panel.showsHiddenFiles = true
-            panel.directoryURL = URL(fileURLWithPath: NSHomeDirectory())
-            if let url = await AsyncFilePanel.begin(panel) {
-                settings.rcPathOverride = url.path
-            }
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.showsHiddenFiles = true
+        panel.directoryURL = URL(fileURLWithPath: NSHomeDirectory())
+        if panel.runModal() == .OK, let url = panel.url {
+            settings.rcPathOverride = url.path
         }
     }
 
