@@ -9,6 +9,7 @@ enum Diag {
     static let path = NSHomeDirectory() + "/Library/Logs/AliasBar-diag.log"
 
     static func log(_ message: String) {
+        guard !DesktopInteractionGuard.isActive else { return }
         let stamp = ISO8601DateFormatter().string(from: Date())
         let line = "[\(stamp)] \(message)\n"
         if let handle = FileHandle(forWritingAtPath: path) {
