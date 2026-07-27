@@ -415,4 +415,87 @@ final class ShellStatementLexerTests: XCTestCase {
         XCTAssertEqual(state.frames.first?.kind, .root)
         XCTAssertFalse(state.continues)
     }
+
+    // MARK: Span ownership — which lines belong to a statement that started earlier
+    //
+    // `linesInsideCompletedSpans` is what all three name-locating sites consult before
+    // treating a line as a definition (PRE-288). Section 51 of Tests/WriterTests.swift
+    // and `AliasWriterNestedDefinitionTests` pin the behavior users see; these pin the
+    // decisions the helper makes on its own, including the two it makes by *declining*
+    // to answer, which no end-to-end test can distinguish from a lexer that got the
+    // span right.
+
+    private func insideSpans(_ lines: [String],
+                             from start: Int = 0,
+                             upTo end: Int? = nil) -> [Int] {
+        ShellStatementLexer.linesInsideCompletedSpans(of: lines,
+                                                     from: start,
+                                                     upTo: end ?? lines.count).sorted()
+    }
+
+    func testTheLineThatOpensASpanIsNotInsideIt() {
+        // Only the interior is owned. The opener is still a definition, which is what
+        // keeps the enclosing alias editable.
+        XCTAssertEqual(insideSpans(["alias outer='first", "alias ghost=inner", "last'"]),
+                       [1, 2])
+    }
+
+    func testOneLineStatementsOwnNothing() {
+        XCTAssertEqual(insideSpans(["alias a='x'", "alias b='y'", "# c", ""]), [])
+    }
+
+    func testAStatementAfterASpanStartsAFreshOne() {
+        XCTAssertEqual(insideSpans(["alias outer='first", "last'", "alias next='x'"]), [1])
+    }
+
+    func testBackslashContinuationsAndHeredocBodiesAreOwnedToo() {
+        XCTAssertEqual(insideSpans(["alias twoline=1 \\", "alias ghost=inner", "alias b='y'"]),
+                       [1])
+        XCTAssertEqual(insideSpans(["cat <<'EOF'", "alias ghost=inner", "EOF", "alias b='y'"]),
+                       [1, 2])
+    }
+
+    func testCaseDoesNotCarryASpanAcrossItsArms() {
+        // The boundary of PRE-288: an `alias` in a `case` arm body is a real conditional
+        // definition, so nothing here may be reported as owned.
+        XCTAssertEqual(insideSpans(["case $TERM in", "xterm*)", "alias a='x'", ";;", "esac"]),
+                       [])
+    }
+
+    func testAnUnterminatedSpanOwnsNothing() {
+        // The fail-safe. Refusing to answer leaves those lines classified exactly as
+        // they were before this helper existed, so a lexer that wrongly believes a quote
+        // is open costs protection rather than hiding every alias underneath it.
+        XCTAssertEqual(insideSpans(["alias broken='first", "alias ghost=inner"]), [])
+    }
+
+    func testAnUnrecognizedHeredocDelimiterDoesNotPoisonTheLinesAfterIt() {
+        // `unsupportedHeredocDelimiter` is never cleared, so its span can never end. The
+        // walk resumes past it instead of surrendering the rest of the file.
+        XCTAssertEqual(insideSpans(["cat <<$'EOF'",
+                                    "alias outer='first",
+                                    "alias ghost=inner",
+                                    "last'",
+                                    "alias plain='x'"]),
+                       [2, 3])
+    }
+
+    func testTheWalkStaysInsideTheRegionItWasGiven() {
+        // The writer asks only about the managed block, so a span opened before `start`
+        // or closed after `end` must not reach in.
+        let lines = ["alias before='open", "closed'", "alias outer='first",
+                     "alias ghost=inner", "last'", "alias after='x'"]
+        XCTAssertEqual(insideSpans(lines, from: 2, upTo: 5), [3, 4])
+        // A span that would only close outside the region is unterminated as far as this
+        // region is concerned, so it owns nothing.
+        XCTAssertEqual(insideSpans(lines, from: 2, upTo: 4), [])
+    }
+
+    func testDegenerateRegionsAreEmptyRatherThanATrap() {
+        let lines = ["alias outer='first", "alias ghost=inner", "last'"]
+        XCTAssertEqual(insideSpans([]), [])
+        XCTAssertEqual(insideSpans(lines, from: 2, upTo: 2), [])
+        XCTAssertEqual(insideSpans(lines, from: 3, upTo: 1), [])
+        XCTAssertEqual(insideSpans(lines, from: -5, upTo: 99), [1, 2])
+    }
 }

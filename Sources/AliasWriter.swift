@@ -1252,28 +1252,34 @@ internal enum ShellStatementLexer {
     /// Ignoring such a span costs nothing instead: the lines under it stay classified
     /// exactly the way they were before this function existed.
     ///
-    /// Cost is linear in the region for every file that is not already broken. Resuming
-    /// after an unterminated span is what can repeat work, since the resumed walk reads
-    /// to `end` again — so a region needs *many* lines that each independently open a
-    /// construct nothing ever closes before that is measurable, and such a file does not
-    /// start a shell. The one shape that could plausibly occur more than once in a real
-    /// rc file, an unrecognized heredoc delimiter, is cut off the moment it is seen.
+    /// Reading is bounded to twice the region: one pass answers a region with nothing
+    /// unterminated in it, and the slack pays for resuming after one span that is. Both
+    /// halves are needed, because resuming means reading to `end` a second time, and a
+    /// region with hundreds of unterminated spans would otherwise turn a menu open into
+    /// a hang — `scan` carries a frame per unclosed construct, so a file of nothing but
+    /// `x=$(` costs more than quadratic all by itself. Running out is the same answer an
+    /// unterminated span already gets: stop, and let the rest of the region keep the
+    /// classification it had before this function existed. No real rc file comes close
+    /// to the budget; one so broken that it does would not start a shell either.
     static func linesInsideCompletedSpans(of lines: [String],
                                           from start: Int,
                                           upTo end: Int) -> Set<Int> {
         var inside: Set<Int> = []
         let limit = min(end, lines.count)
         var i = max(start, 0)
-        while i < limit {
+        var budget = 2 * max(limit - i, 0)
+        while i < limit, budget > 0 {
+            budget -= 1
             var state = scan(lines[i], from: LexState())
             var last = i
             // `heredocStateInvalid` and `unsupportedHeredocDelimiter` are each set once
             // and never cleared, so either one already decides this span: it cannot
             // complete however many lines follow. Stopping here reaches the identical
             // answer without reading the rest of the region.
-            while state.continues, last + 1 < limit,
+            while state.continues, last + 1 < limit, budget > 0,
                   !state.heredocStateInvalid, !state.unsupportedHeredocDelimiter {
                 last += 1
+                budget -= 1
                 state = scan(lines[last], from: state)
             }
             // `continues` already implies `hasUnconsumedHeredoc`, and the second check is
