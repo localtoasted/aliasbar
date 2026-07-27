@@ -35,31 +35,10 @@ struct SettingsView: View {
 
     private var theme: Theme { settings.theme(systemIsDark: settings.systemIsDark) }
 
-    // MARK: Appearance editing
-
-    /// Edits the working copy in place. Every knob writes through this, so none of them
-    /// has to know that a preset was ever involved.
-    private func binding<T>(_ path: WritableKeyPath<Appearance, T>) -> Binding<T> {
-        Binding(
-            get: { settings.appearance[keyPath: path] },
-            set: { settings.appearance[keyPath: path] = $0 }
-        )
-    }
-
     /// True when the working copy no longer matches any preset — the state where "Save
     /// as…" is the only thing keeping the user's changes.
     private var isEditedCopy: Bool {
         !settings.allPresets.contains(settings.appearance)
-    }
-
-    private var suggestedPresetName: String {
-        let base = settings.appearance.isBuiltIn
-            ? "\(settings.appearance.name) mine"
-            : settings.appearance.name
-        let taken = Set(settings.allPresets.map(\.name))
-        if !taken.contains(base) { return base }
-        for n in 2...99 where !taken.contains("\(base) \(n)") { return "\(base) \(n)" }
-        return base
     }
 
     private func savePreset() {
@@ -395,7 +374,9 @@ struct SettingsView: View {
                     ThemedButton(savingPreset ? "Cancel" : "Save as…") {
                         savingPreset.toggle()
                         renaming = false
-                        newPresetName = suggestedPresetName
+                        newPresetName = AppearancePresetNaming.suggestedName(
+                            for: settings.appearance,
+                            among: settings.allPresets)
                     }
                     if !settings.appearance.isBuiltIn && !savingPreset {
                         ThemedButton(renaming ? "Cancel" : "Rename") {
@@ -433,15 +414,7 @@ struct SettingsView: View {
             }
 
             SettingsGroup("Colour") {
-                SettingsRow("Background",
-                            hint: "Sets the main background color.") {
-                    ColourWell(colour: binding(\.ground))
-                }
-                SettingsRow("Accent", hint: nil) { ColourWell(colour: binding(\.accent)) }
-                SettingsRow("Alias colour", hint: nil) { ColourWell(colour: binding(\.aliasTint)) }
-                SettingsRow("Function colour", hint: nil) {
-                    ColourWell(colour: binding(\.functionTint))
-                }
+                AppearanceColourRows(appearance: $settings.appearance)
                 SettingsRow("Match macOS appearance",
                             hint: settings.appearance.darkGround == nil
                                 ? "This preset has one appearance."
@@ -457,36 +430,10 @@ struct SettingsView: View {
             }
 
             SettingsGroup("Type and shape") {
-                SettingsRow("Interface", hint: nil) {
-                    ThemedSegments(selection: binding(\.uiFont),
-                                   options: FontChoice.allCases,
-                                   label: { $0.label })
-                }
-                SettingsRow("Item names", hint: "Uses system fonts.") {
-                    ThemedSegments(selection: binding(\.nameFont),
-                                   options: FontChoice.allCases,
-                                   label: { $0.label })
-                }
-                SettingsRow("Corner radius", hint: nil) {
-                    HStack(spacing: 8) {
-                        Slider(value: binding(\.cornerRadius), in: 0...14, step: 1)
-                            .frame(width: 160)
-                        Text("\(Int(settings.appearance.cornerRadius))")
-                            .font(.system(size: 12, design: .monospaced))
-                            .foregroundStyle(theme.dim)
-                            .frame(width: 20, alignment: .trailing)
-                    }
-                }
-                SettingsRow("Translucency", hint: "At 0%, the window is opaque.") {
-                    HStack(spacing: 8) {
-                        Slider(value: binding(\.translucency), in: 0...1)
-                            .frame(width: 160)
-                        Text("\(Int(settings.appearance.translucency * 100))%")
-                            .font(.system(size: 12, design: .monospaced))
-                            .foregroundStyle(theme.dim)
-                            .frame(width: 36, alignment: .trailing)
-                    }
-                }
+                AppearanceTypeAndShapeRows(appearance: $settings.appearance,
+                                           nameFontTitle: "Item names",
+                                           nameFontHint: "Uses system fonts.",
+                                           translucencyHint: "At 0%, the window is opaque.")
             }
 
             SettingsGroup("Motion") {
@@ -1075,60 +1022,6 @@ struct PermissionNotice: View {
         .padding(9)
         .background((granted ? Color.green : Color.orange).opacity(0.10),
                     in: RoundedRectangle(cornerRadius: theme.cornerRadius))
-    }
-}
-
-/// A colour, editable, shown as the hex the user can copy out.
-///
-/// The hex field is not decoration. Colours arrive from other places — a brand guide, a
-/// terminal theme, a screenshot someone eyedropped — and typing six characters is faster
-/// than steering a colour wheel to a value you already know.
-struct ColourWell: View {
-    @Environment(\.theme) private var theme
-    @Binding var colour: HexColor
-    @State private var typed: String = ""
-    @FocusState private var editing: Bool
-
-    var body: some View {
-        HStack(spacing: 8) {
-            ColorPicker("", selection: Binding(
-                get: { colour.color },
-                set: { newValue in
-                    if let converted = NSColor(newValue).usingColorSpace(.sRGB) {
-                        colour = HexColor(red: Double(converted.redComponent),
-                                          green: Double(converted.greenComponent),
-                                          blue: Double(converted.blueComponent))
-                    }
-                }
-            ), supportsOpacity: false)
-            .labelsHidden()
-            .frame(width: 44)
-
-            TextField("#000000", text: $typed)
-                .textFieldStyle(.plain)
-                .font(.system(size: 12, design: .monospaced))
-                .foregroundStyle(theme.text)
-                .focused($editing)
-                .frame(width: 76)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 5)
-                .background(theme.surface, in: RoundedRectangle(cornerRadius: theme.cornerRadius))
-                .overlay(RoundedRectangle(cornerRadius: theme.cornerRadius)
-                    .strokeBorder(theme.rule.opacity(0.6), lineWidth: 1))
-                .onSubmit { commit() }
-                .onChange(of: editing) { focused in if !focused { commit() } }
-                .onAppear { typed = colour.hex }
-                // While the field has focus the user is mid-typing and half a hex string
-                // is not a colour; only mirror the well back into it when they are done.
-                .onChange(of: colour) { new in if !editing { typed = new.hex } }
-        }
-    }
-
-    private func commit() {
-        if let parsed = HexColor(hex: typed) {
-            colour = parsed
-        }
-        typed = colour.hex
     }
 }
 

@@ -695,61 +695,17 @@ struct OnboardingView: View {
         }
     }
 
-    /// Edits the working copy in place — the same write-through binding the settings
-    /// window uses, against the same store, so "Customise" here *is* the token editor
-    /// and not a copy of it.
-    private func binding<T>(_ path: WritableKeyPath<Appearance, T>) -> Binding<T> {
-        Binding(
-            get: { settings.appearance[keyPath: path] },
-            set: { settings.appearance[keyPath: path] = $0 }
-        )
-    }
-
     private var inlineTokenEditor: some View {
         VStack(alignment: .leading, spacing: 16) {
             SettingsGroup("Colour") {
-                SettingsRow("Background",
-                            hint: "Sets the main background color.") {
-                    ColourWell(colour: binding(\.ground))
-                }
-                SettingsRow("Accent", hint: nil) { ColourWell(colour: binding(\.accent)) }
-                SettingsRow("Alias colour", hint: nil) { ColourWell(colour: binding(\.aliasTint)) }
-                SettingsRow("Function colour", hint: nil) {
-                    ColourWell(colour: binding(\.functionTint))
-                }
+                AppearanceColourRows(appearance: $settings.appearance)
             }
 
             SettingsGroup("Type and shape") {
-                SettingsRow("Interface", hint: nil) {
-                    ThemedSegments(selection: binding(\.uiFont),
-                                   options: FontChoice.allCases,
-                                   label: { $0.label })
-                }
-                SettingsRow("Alias names", hint: nil) {
-                    ThemedSegments(selection: binding(\.nameFont),
-                                   options: FontChoice.allCases,
-                                   label: { $0.label })
-                }
-                SettingsRow("Corner radius", hint: nil) {
-                    HStack(spacing: 8) {
-                        Slider(value: binding(\.cornerRadius), in: 0...14, step: 1)
-                            .frame(width: 160)
-                        Text("\(Int(settings.appearance.cornerRadius))")
-                            .font(.system(size: 12, design: .monospaced))
-                            .foregroundStyle(theme.dim)
-                            .frame(width: 20, alignment: .trailing)
-                    }
-                }
-                SettingsRow("Translucency", hint: nil) {
-                    HStack(spacing: 8) {
-                        Slider(value: binding(\.translucency), in: 0...1)
-                            .frame(width: 160)
-                        Text("\(Int(settings.appearance.translucency * 100))%")
-                            .font(.system(size: 12, design: .monospaced))
-                            .foregroundStyle(theme.dim)
-                            .frame(width: 36, alignment: .trailing)
-                    }
-                }
+                AppearanceTypeAndShapeRows(appearance: $settings.appearance,
+                                           nameFontTitle: "Alias names",
+                                           nameFontHint: nil,
+                                           translucencyHint: nil)
             }
 
             SettingsGroup("Save preset") {
@@ -774,7 +730,9 @@ struct OnboardingView: View {
                     } else {
                         ThemedButton("Save as a preset…") {
                             savingPreset = true
-                            newPresetName = suggestedPresetName
+                            newPresetName = AppearancePresetNaming.suggestedName(
+                                for: settings.appearance,
+                                among: settings.allPresets)
                         }
                         .accessibilityLabel("Save appearance as a preset")
                         Text("Saved presets appear here and in Settings.")
@@ -787,16 +745,6 @@ struct OnboardingView: View {
                 }
             }
         }
-    }
-
-    private var suggestedPresetName: String {
-        let base = settings.appearance.isBuiltIn
-            ? "\(settings.appearance.name) mine"
-            : settings.appearance.name
-        let taken = Set(settings.allPresets.map(\.name))
-        if !taken.contains(base) { return base }
-        for n in 2...99 where !taken.contains("\(base) \(n)") { return "\(base) \(n)" }
-        return base
     }
 
     private func savePreset() {
