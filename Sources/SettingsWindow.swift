@@ -28,7 +28,9 @@ struct SettingsView: View {
     @State private var savingPreset = false
     @State private var renaming = false
     @State private var newPresetName = ""
-    @State private var transferNotice: String?
+    // Carries its own tone: reading the tone back out of the wording meant a reworded
+    // notice quietly turned into a warning.
+    @State private var transferNotice: (text: String, tone: NoticeText.Tone)?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private var theme: Theme { settings.theme(systemIsDark: settings.systemIsDark) }
@@ -117,12 +119,12 @@ struct SettingsView: View {
     private func importFromClipboard() {
         guard let text = NSPasteboard.general.string(forType: .string),
               let imported = PresetTransfer.importing(text, id: UUID().uuidString) else {
-            transferNotice = "The clipboard does not hold an AliasBar look."
+            transferNotice = ("The clipboard does not hold an AliasBar look.", .warning)
             return
         }
         settings.savedPresets.append(imported)
         settings.appearance = imported
-        transferNotice = "Added “\(imported.name)”."
+        transferNotice = ("Added “\(imported.name)”.", .info)
     }
 
     enum SettingsSection: String, CaseIterable, Identifiable {
@@ -421,13 +423,12 @@ struct SettingsView: View {
                     Spacer(minLength: 0)
                     ThemedButton("Copy") {
                         PasteboardBroker.write(transient: PresetTransfer.export(settings.appearance))
-                        transferNotice = "Preset copied."
+                        transferNotice = ("Preset copied.", .info)
                     }
                     ThemedButton("Paste") { importFromClipboard() }
                 }
                 if let transferNotice {
-                    NoticeText(transferNotice, tone: transferNotice.hasPrefix("Copied")
-                               || transferNotice.hasPrefix("Added") ? .info : .warning)
+                    NoticeText(transferNotice.text, tone: transferNotice.tone)
                 }
             }
 

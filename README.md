@@ -60,6 +60,9 @@ Manage shows duplicate aliases, which definition wins, and where to fix it.
 - Pasting into another app requires Accessibility. Copying does not.
 - AliasBar backs up your shell config before changing its own block.
 - AliasBar uses the network only to check for and download updates. Automatic checks can be turned off.
+- Syncing clipboard history is off by default. It writes clip text to your sync file, and that folder may sync through another service.
+- Inline expansion pastes through the system clipboard. Your text sits there for about half a second, where other clipboard tools can read it.
+- Local builds from `./build.sh` are signed with a local identity and turn off library validation, which Sparkle needs without an Apple Team ID. Official releases keep it on.
 
 ## Install
 
