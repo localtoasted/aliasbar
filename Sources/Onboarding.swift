@@ -29,7 +29,7 @@ struct OnboardingView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var step: OnboardingStep = .found
 
-    // Step 0: found — the silent scan, run once when the window is built, and the
+    // Step 0: found — the silent scan, completed before the window is built, and the
     // three opt-in decisions its screen presents alongside the counts.
     @State private var scan: OnboardingScanResult
     @State private var decisions: OnboardingDecisions
@@ -55,16 +55,14 @@ struct OnboardingView: View {
     @State private var presetNotice: String?
     @State private var showsLibraryBuilder = false
 
-    /// Runs the silent local scan once, when the window is built — never again for the
-    /// life of this view — and seeds the found-treasure checkboxes from it.
-    init(settings: AppSettings, onDone: @escaping () -> Void) {
+    /// Receives the silent local scan performed off the main actor by AppDelegate and
+    /// seeds the found-treasure checkboxes from it. View construction itself never
+    /// parses the rc file or history.
+    init(settings: AppSettings, scan: OnboardingScanResult, onDone: @escaping () -> Void) {
         self.settings = settings
         self.onDone = onDone
-        let result = OnboardingScanner.scan(rcPath: AppPaths.rcPath,
-                                            historyPath: AppPaths.historyPath,
-                                            claudeDirectoryPath: AppPaths.claudeDirectory)
-        _scan = State(initialValue: result)
-        _decisions = State(initialValue: .defaults(for: result))
+        _scan = State(initialValue: scan)
+        _decisions = State(initialValue: .defaults(for: scan))
     }
 
     private static var stepCount: Int { OnboardingStep.allCases.count }
@@ -620,14 +618,16 @@ struct OnboardingView: View {
     }
 
     private func chooseFile() {
-        let panel = NSOpenPanel()
-        panel.canChooseFiles = true
-        panel.canChooseDirectories = false
-        panel.allowsMultipleSelection = false
-        panel.showsHiddenFiles = true
-        panel.directoryURL = URL(fileURLWithPath: NSHomeDirectory())
-        if panel.runModal() == .OK, let url = panel.url {
-            settings.rcPathOverride = url.path
+        Task { @MainActor [settings] in
+            let panel = NSOpenPanel()
+            panel.canChooseFiles = true
+            panel.canChooseDirectories = false
+            panel.allowsMultipleSelection = false
+            panel.showsHiddenFiles = true
+            panel.directoryURL = URL(fileURLWithPath: NSHomeDirectory())
+            if let url = await AsyncFilePanel.begin(panel) {
+                settings.rcPathOverride = url.path
+            }
         }
     }
 

@@ -4,6 +4,7 @@ import Combine
 
 // MARK: - App delegate
 
+@preconcurrency @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private var statusItem: NSStatusItem!
     /// Both surfaces are built lazily and independently. A view controller belongs to
@@ -76,7 +77,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
         NotificationCenter.default.addObserver(
             forName: .aliasBarHotkeyFired, object: nil, queue: .main
-        ) { [weak self] _ in self?.summon() }
+        ) { [weak self] _ in
+            Task { @MainActor in self?.summon() }
+        }
 
         // A look with a second ground follows macOS between light and dark. The window is
         // usually closed when the user flips the system setting, so this cannot wait to be
@@ -86,7 +89,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             forName: Notification.Name("AppleInterfaceThemeChangedNotification"),
             object: nil, queue: .main
         ) { [weak self] _ in
-            self?.settings.systemIsDark = AppSettings.readSystemIsDark()
+            Task { @MainActor in
+                self?.settings.systemIsDark = AppSettings.readSystemIsDark()
+            }
         }
 
         // Worth recording every launch. The app is ad-hoc signed, so every rebuild gets a
@@ -96,34 +101,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         Diag.log("accessibility trusted=\(Typist.isTrusted) "
                  + "enterAction=\(settings.enterAction.rawValue)")
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
-            self?.reportPlacement()
-        }
-
         // Opens itself so a screenshot harness does not have to synthesise a keystroke,
         // which needs Accessibility permission and cannot run over SSH. "history" lands in
         // the history palette; "settings" opens the settings window instead, which is
         // otherwise only reachable by clicking.
-        // First run, or a harness asking to pose the flow. The delay exists so the
-        // status item settles first and the window does not fight the launch.
-        if !settings.onboardingComplete
-            || ProcessInfo.processInfo.environment["ALIASBAR_ONBOARDING"] == "1" {
+        // First run, or a harness asking to pose the flow. Presentation waits for the
+        // status item's actual window/frame readiness below so the window does not
+        // fight an incompletely-laid-out launch.
+        let shouldShowOnboarding = !settings.onboardingComplete
+            || ProcessInfo.processInfo.environment["ALIASBAR_ONBOARDING"] == "1"
+        if shouldShowOnboarding {
             Diag.log("first run: scheduling onboarding")
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-                self?.openOnboarding()
-            }
         }
 
         let openOnLaunch = ProcessInfo.processInfo.environment["ALIASBAR_OPEN_ON_LAUNCH"]
-        if openOnLaunch == "1" || openOnLaunch == "history" || openOnLaunch == "settings" {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            _ = await self.waitForStatusItemReadiness()
+
+            // Preserve the old 0.4s/0.5s ordering when a screenshot harness asks for
+            // a surface on the first run: the requested surface opens first, then
+            // onboarding becomes the frontmost window. Readiness, rather than wall
+            // clock timing, now decides when either action is safe.
+            if openOnLaunch == "1" || openOnLaunch == "history" || openOnLaunch == "settings" {
                 if openOnLaunch == "settings" {
-                    self?.openSettings()
-                    return
+                    self.openSettings()
+                } else {
+                    self.summon()
+                    if openOnLaunch == "history" { self.state.enterHistory() }
                 }
-                self?.summon()
-                if openOnLaunch == "history" { self?.state.enterHistory() }
             }
+
+            if shouldShowOnboarding {
+                await Task.yield()
+                await self.openOnboarding()
+            }
+
+            await self.reportPlacement()
         }
     }
 
@@ -290,46 +304,52 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     private static let positionKey = "NSStatusItem Preferred Position AliasBarStatusItem"
 
-    /// A newly created status item is not positioned until AppKit gets a run loop turn,
-    /// so every measurement has to wait before it means anything. Removing this await
-    /// makes every fresh item read as {{0,-42}} and produces a false diagnosis.
-    private func settle() async {
-        try? await Task.sleep(nanoseconds: 600_000_000)
+    /// A newly-created status item is not measurable until AppKit has attached and
+    /// positioned its window. Wait for that fact, not for an amount of time that only
+    /// happens to be long enough on the machine where it was chosen.
+    @discardableResult
+    private func waitForStatusItemReadiness(maxYields: Int = 240) async -> Bool {
+        for _ in 0..<maxYields {
+            if let frame = statusItem.button?.window?.frame,
+               frame.width >= 1, frame.height >= 1 {
+                return true
+            }
+            await Task.yield()
+        }
+        Diag.log("status item did not become measurable before the readiness bound")
+        return false
     }
 
-    private func reportPlacement() {
-        Task { @MainActor in
-            await settle()
-            guard placementIsBad().bad else {
-                Diag.log("OK placement looks good")
+    private func reportPlacement() async {
+        guard placementIsBad().bad else {
+            Diag.log("OK placement looks good")
+            return
+        }
+
+        // Rescue: macOS honours a persisted preferred position per autosave name.
+        // Nudging it can pull the item out of the notch band.
+        for position in [CGFloat(0), 200, 400, 800, 1600] {
+            UserDefaults.standard.set(position, forKey: Self.positionKey)
+            rebuildStatusItem()
+            _ = await waitForStatusItemReadiness()
+            if !placementIsBad().bad {
+                Diag.log("OK rescue succeeded at preferred position \(position)")
                 return
             }
-
-            // Rescue: macOS honours a persisted preferred position per autosave name.
-            // Nudging it can pull the item out of the notch band.
-            for position in [CGFloat(0), 200, 400, 800, 1600] {
-                UserDefaults.standard.set(position, forKey: Self.positionKey)
-                rebuildStatusItem()
-                await settle()
-                if !placementIsBad().bad {
-                    Diag.log("OK rescue succeeded at preferred position \(position)")
-                    return
-                }
-            }
-
-            UserDefaults.standard.removeObject(forKey: Self.positionKey)
-            rebuildStatusItem()
-            await settle()
-
-            let result = placementIsBad()
-            Diag.log("FAIL placement unrecoverable offscreen=\(result.offscreen) "
-                     + "underNotch=\(result.underNotch) hidden=\(result.hidden)")
-            warnNotPlaced(reason: result.underNotch
-                ? "AliasBar's icon landed underneath the camera notch, where macOS cannot draw it."
-                : result.hidden
-                ? "macOS is hiding AliasBar's icon."
-                : "AliasBar's icon was pushed off the edge of the menu bar.")
         }
+
+        UserDefaults.standard.removeObject(forKey: Self.positionKey)
+        rebuildStatusItem()
+        _ = await waitForStatusItemReadiness()
+
+        let result = placementIsBad()
+        Diag.log("FAIL placement unrecoverable offscreen=\(result.offscreen) "
+                 + "underNotch=\(result.underNotch) hidden=\(result.hidden)")
+        warnNotPlaced(reason: result.underNotch
+            ? "AliasBar's icon landed underneath the camera notch, where macOS cannot draw it."
+            : result.hidden
+            ? "macOS is hiding AliasBar's icon."
+            : "AliasBar's icon was pushed off the edge of the menu bar.")
     }
 
     private func rebuildStatusItem() {
@@ -445,19 +465,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         // window goes away, not polled while it is open.
         NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification,
                                                object: window, queue: .main) { [weak self] _ in
-            self?.registerHotkey()
+            Task { @MainActor in self?.registerHotkey() }
         }
     }
 
     // MARK: First run
 
-    private func openOnboarding() {
+    private func openOnboarding() async {
         if let window = onboardingWindow {
             NSApp.activate(ignoringOtherApps: true)
             window.makeKeyAndOrderFront(nil)
             return
         }
-        let hosting = NSHostingController(rootView: OnboardingView(settings: settings) { [weak self] in
+
+        // The scan parses the rc file and the complete shell history. Keep that disk
+        // work off the actor that owns AppKit, then construct the view from its value.
+        let rcPath = AppPaths.rcPath
+        let historyPath = AppPaths.historyPath
+        let claudeDirectoryPath = AppPaths.claudeDirectory
+        let scan = await Task.detached(priority: .userInitiated) {
+            OnboardingScanner.scan(rcPath: rcPath,
+                                   historyPath: historyPath,
+                                   claudeDirectoryPath: claudeDirectoryPath)
+        }.value
+
+        let hosting = NSHostingController(rootView: OnboardingView(settings: settings, scan: scan) { [weak self] in
             self?.onboardingWindow?.close()
         })
         let window = NSWindow(contentViewController: hosting)
@@ -478,11 +510,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         // later, or the traffic light. There is no path that shows the flow twice.
         NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification,
                                                object: window, queue: .main) { [weak self] _ in
-            self?.settings.onboardingComplete = true
-            // A rebind made in the flow takes effect the same way one made in the
-            // settings window does.
-            self?.registerHotkey()
-            self?.onboardingWindow = nil
+            Task { @MainActor in
+                self?.settings.onboardingComplete = true
+                // A rebind made in the flow takes effect the same way one made in the
+                // settings window does.
+                self?.registerHotkey()
+                self?.onboardingWindow = nil
+            }
         }
     }
 }
@@ -490,6 +524,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 // MARK: - Entry point
 
 @main
+@MainActor
 enum AliasBarMain {
     // NSApplication.delegate is weak, so the delegate has to be owned somewhere durable.
     static let delegate = AppDelegate()

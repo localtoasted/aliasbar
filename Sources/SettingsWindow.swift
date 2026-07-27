@@ -748,24 +748,28 @@ struct SettingsView: View {
     }
 
     private func chooseNewSyncFile() {
-        let panel = NSSavePanel()
-        panel.allowedContentTypes = [.json]
-        panel.nameFieldStringValue = "aliasbar-sync.json"
-        panel.directoryURL = URL(fileURLWithPath: NSHomeDirectory())
-        if panel.runModal() == .OK, let url = panel.url {
-            settings.syncFileURL = url
+        Task { @MainActor [settings] in
+            let panel = NSSavePanel()
+            panel.allowedContentTypes = [.json]
+            panel.nameFieldStringValue = "aliasbar-sync.json"
+            panel.directoryURL = URL(fileURLWithPath: NSHomeDirectory())
+            if let url = await AsyncFilePanel.begin(panel) {
+                settings.syncFileURL = url
+            }
         }
     }
 
     private func chooseExistingSyncFile() {
-        let panel = NSOpenPanel()
-        panel.canChooseFiles = true
-        panel.canChooseDirectories = false
-        panel.allowsMultipleSelection = false
-        panel.allowedContentTypes = [.json]
-        panel.directoryURL = URL(fileURLWithPath: NSHomeDirectory())
-        if panel.runModal() == .OK, let url = panel.url {
-            settings.syncFileURL = url
+        Task { @MainActor [settings] in
+            let panel = NSOpenPanel()
+            panel.canChooseFiles = true
+            panel.canChooseDirectories = false
+            panel.allowsMultipleSelection = false
+            panel.allowedContentTypes = [.json]
+            panel.directoryURL = URL(fileURLWithPath: NSHomeDirectory())
+            if let url = await AsyncFilePanel.begin(panel) {
+                settings.syncFileURL = url
+            }
         }
     }
 
@@ -830,14 +834,16 @@ struct SettingsView: View {
     ]
 
     private func chooseFile() {
-        let panel = NSOpenPanel()
-        panel.canChooseFiles = true
-        panel.canChooseDirectories = false
-        panel.allowsMultipleSelection = false
-        panel.showsHiddenFiles = true
-        panel.directoryURL = URL(fileURLWithPath: NSHomeDirectory())
-        if panel.runModal() == .OK, let url = panel.url {
-            settings.rcPathOverride = url.path
+        Task { @MainActor [settings] in
+            let panel = NSOpenPanel()
+            panel.canChooseFiles = true
+            panel.canChooseDirectories = false
+            panel.allowsMultipleSelection = false
+            panel.showsHiddenFiles = true
+            panel.directoryURL = URL(fileURLWithPath: NSHomeDirectory())
+            if let url = await AsyncFilePanel.begin(panel) {
+                settings.rcPathOverride = url.path
+            }
         }
     }
 }
