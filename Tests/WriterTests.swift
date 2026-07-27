@@ -2135,6 +2135,114 @@ checkExactSpanDelete(
     removes: ["alias doomed=", "here payload"],
     survives: ["alias hereStringKeeper='31'"])
 
+// ---------------------------------------------------------------------------
+print("\n26a. PRE-287 writer characterization: successful rewrites are byte-exact")
+
+// The decomposition below is allowed to move the lexer and mutation planner, but not
+// to normalize, reorder, or regenerate anything. These full-file goldens pin the
+// successful output paths that the older safety suite mostly checked with contains().
+let goldenCreate = scratch("# anchor")
+_ = try! AliasWriter.apply(.upsert(name: "fresh", command: "echo fresh", comment: nil),
+                           path: goldenCreate, allEntries: [])
+let goldenCreateExpected = """
+# anchor
+
+\(ManagedBlock.begin)
+\(ManagedBlock.notice)
+alias fresh='echo fresh'
+\(ManagedBlock.end)
+
+"""
+check("creating a managed block has byte-exact output",
+      read(goldenCreate) == goldenCreateExpected,
+      "got [\(read(goldenCreate))]")
+
+let goldenExisting = scratch("""
+# before
+\(ManagedBlock.begin)
+\(ManagedBlock.notice)
+# hand-kept note
+alias replace='old'
+export KEEP=1
+\(ManagedBlock.end)
+# after
+""")
+_ = try! AliasWriter.apply(.upsert(name: "replace", command: "echo new", comment: nil),
+                           path: goldenExisting, allEntries: [])
+_ = try! AliasWriter.apply(.upsert(name: "added", command: "printf added", comment: nil),
+                           path: goldenExisting, allEntries: [])
+_ = try! AliasWriter.apply(.delete(name: "missing"), path: goldenExisting, allEntries: [])
+let goldenExistingExpected = """
+# before
+\(ManagedBlock.begin)
+\(ManagedBlock.notice)
+# hand-kept note
+alias replace='echo new'
+export KEEP=1
+alias added='printf added'
+\(ManagedBlock.end)
+# after
+
+"""
+check("replace, append, and absent-delete preserve the full file byte-exact",
+      read(goldenExisting) == goldenExistingExpected,
+      "got [\(read(goldenExisting))]")
+
+// Existing coverage exercised source-before-destination. This reverses them and pins
+// the distinct higher-index-first branch in AliasWriter's collision transaction.
+let goldenReverseRename = scratch("""
+# before
+\(ManagedBlock.begin)
+\(ManagedBlock.notice)
+alias destination='old destination'
+export KEEP=1
+alias source='old source'
+\(ManagedBlock.end)
+# after
+""")
+_ = try! AliasWriter.apply(
+    .rename(from: "source", to: "destination", command: "echo merged"),
+    path: goldenReverseRename,
+    allEntries: [])
+let goldenReverseRenameExpected = """
+# before
+\(ManagedBlock.begin)
+\(ManagedBlock.notice)
+alias destination='echo merged'
+export KEEP=1
+\(ManagedBlock.end)
+# after
+
+"""
+check("reverse-order rename collision has byte-exact output",
+      read(goldenReverseRename) == goldenReverseRenameExpected,
+      "got [\(read(goldenReverseRename))]")
+
+// A comment inside $(...) ends only its physical line. A ')' in that comment must not
+// close the substitution and leave the following line behind as executable input.
+let goldenNestedComment = scratch("""
+\(ManagedBlock.begin)
+alias doomed="echo $(printf one
+# a commented ) is not the substitution terminator
+printf two
+)"
+alias keeper='yes'
+\(ManagedBlock.end)
+""")
+_ = try! AliasWriter.apply(.delete(name: "doomed"),
+                           path: goldenNestedComment,
+                           allEntries: [],
+                           confirmedCollateral: true)
+let goldenNestedCommentExpected = """
+\(ManagedBlock.begin)
+alias keeper='yes'
+\(ManagedBlock.end)
+
+"""
+check("nested command-substitution comments stay inside the removed span",
+      read(goldenNestedComment) == goldenNestedCommentExpected,
+      "got [\(read(goldenNestedComment))]")
+
 
 // ===========================================================================
 // HISTORY
@@ -10394,6 +10502,61 @@ check("prompt-off builder choices contain Aliases only",
       LibraryBuildKind.available(promptFeaturesEnabled: false) == [.alias])
 check("prompt-on builder choices include prompts and aliases",
       LibraryBuildKind.available(promptFeaturesEnabled: true) == LibraryBuildKind.allCases)
+
+// ---------------------------------------------------------------------------
+print("\n47. PRE-287 keyboard characterization: priority is behavior")
+
+do {
+    let (state, _, _, _, _, _, _) = freshManageFixture()
+    state.prepareForShow()
+    state.mode = .find
+    state.findSource = .aliases
+    state.bucket = .all
+    var dismissCount = 0
+    state.onDismiss = { dismissCount += 1 }
+
+    // Sheets own the keyboard before global navigation. An arrow is deliberately
+    // returned to SwiftUI while a field is active, and Esc closes only that sheet.
+    state.editor = .create(name: "draft")
+    let selectionBeforeEditorArrow = state.selection
+    check("Composer returns arrow keys to its fields",
+          !state.handleKey(keyEvent(keyCode: UInt16(kVK_DownArrow)))
+              && state.selection == selectionBeforeEditorArrow)
+    check("Composer Esc is consumed before global dismissal",
+          state.handleKey(keyEvent(keyCode: UInt16(kVK_Escape)))
+              && state.editor == nil && dismissCount == 0)
+
+    let prompt = Prompt(name: "slots", frontmatter: nil, body: "Hello {{name}}")
+    let shortcut = Shortcut(prompt: prompt)
+    state.fillIn = AppState.PromptFillTarget(
+        shortcut: shortcut,
+        fill: SlotFillState(slots: shortcut.slots))
+    check("Fill-in Esc is consumed before global dismissal",
+          state.handleKey(keyEvent(keyCode: UInt16(kVK_Escape)))
+              && state.fillIn == nil && dismissCount == 0)
+
+    state.snippetEditor = .create()
+    check("Snippet editor returns ordinary keys to its fields",
+          !state.handleKey(keyEvent(keyCode: UInt16(kVK_ANSI_A))))
+    check("Snippet editor Esc is consumed before global dismissal",
+          state.handleKey(keyEvent(keyCode: UInt16(kVK_Escape)))
+              && state.snippetEditor == nil && dismissCount == 0)
+
+    // Outside a sheet, Esc unwinds source, then bucket, then presentation in exactly
+    // that order. This pins the precedence while handleKey is split into helpers.
+    state.findSource = .clipboard
+    state.bucket = .conflicts
+    check("first Esc leaves the alternate Find source only",
+          state.handleKey(keyEvent(keyCode: UInt16(kVK_Escape)))
+              && state.findSource == .aliases && state.bucket == .conflicts
+              && dismissCount == 0)
+    check("second Esc clears the Find bucket only",
+          state.handleKey(keyEvent(keyCode: UInt16(kVK_Escape)))
+              && state.bucket == .all && dismissCount == 0)
+    check("third Esc dismisses the presentation",
+          state.handleKey(keyEvent(keyCode: UInt16(kVK_Escape)))
+              && dismissCount == 1)
+}
 
 // ---------------------------------------------------------------------------
 print("\n" + String(repeating: "-", count: 60))
