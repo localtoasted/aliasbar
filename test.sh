@@ -6,6 +6,10 @@ set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILD_DIR="${PROJECT_DIR}/.build/tests"
+SWIFT_CONCURRENCY_FLAGS=(
+    -warn-concurrency
+    -strict-concurrency=targeted
+)
 mkdir -p "${BUILD_DIR}"
 
 # The tests call real delivery paths. Never let a trusted developer machine turn a
@@ -17,7 +21,7 @@ export ALIASBAR_TEST_MODE=1
 cp "${PROJECT_DIR}/Tests/WriterTests.swift" "${BUILD_DIR}/main.swift"
 
 # Prove the reusable seam compiles without any app-owned source.
-swiftc -parse-as-library -emit-module \
+swiftc "${SWIFT_CONCURRENCY_FLAGS[@]}" -parse-as-library -emit-module \
     -module-name AliasBarCore \
     -target "$(uname -m)-apple-macos13.0" \
     "${PROJECT_DIR}/Sources/Model.swift" \
@@ -36,7 +40,7 @@ swiftc -parse-as-library -emit-module \
     "${PROJECT_DIR}/Sources/SuggestionEngine.swift" \
     -emit-module-path "${BUILD_DIR}/AliasBarCore.swiftmodule"
 
-swiftc -target "$(uname -m)-apple-macos13.0" \
+swiftc "${SWIFT_CONCURRENCY_FLAGS[@]}" -target "$(uname -m)-apple-macos13.0" \
     "${PROJECT_DIR}/Sources/Model.swift" \
     "${PROJECT_DIR}/Sources/AppPaths.swift" \
     "${PROJECT_DIR}/Sources/ContentHash.swift" \
@@ -90,7 +94,7 @@ echo "Building ab CLI"
 
 CLI_BUILD_DIR="${PROJECT_DIR}/.build/cli-tests"
 mkdir -p "${CLI_BUILD_DIR}"
-swiftc -target "$(uname -m)-apple-macos13.0" \
+swiftc "${SWIFT_CONCURRENCY_FLAGS[@]}" -target "$(uname -m)-apple-macos13.0" \
     "${PROJECT_DIR}/Sources/Model.swift" \
     "${PROJECT_DIR}/Sources/AliasWriter.swift" \
     "${PROJECT_DIR}"/Sources/CLI/*.swift \

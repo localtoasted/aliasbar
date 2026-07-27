@@ -9,6 +9,7 @@ import SwiftUI
 /// stripe through a 3,000-line class. The surrounding state it acts on (the prompt
 /// library cache, the shell store, the toast channel, the Composer) still belongs to
 /// `AppState` and is reached through `app`.
+@preconcurrency @MainActor
 final class InboxState: ObservableObject {
     /// The state that owns this. `unowned` rather than `weak` because `AppState`
     /// holds this object for its entire life, so it can never be the one that goes

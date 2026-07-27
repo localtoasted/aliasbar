@@ -42,6 +42,7 @@ final class PalettePanel: NSPanel {
 // MARK: - Controller
 
 /// Owns the palette window and decides where it opens.
+@preconcurrency @MainActor
 final class PaletteController: NSObject, NSWindowDelegate {
     private var panel: PalettePanel?
     private let content: NSViewController
@@ -94,9 +95,11 @@ final class PaletteController: NSObject, NSWindowDelegate {
             context.duration = 0.09
             panel.animator().alphaValue = 0
         } completionHandler: { [weak self] in
-            panel.orderOut(nil)
-            panel.alphaValue = 1
-            self?.onClose()
+            Task { @MainActor in
+                panel.orderOut(nil)
+                panel.alphaValue = 1
+                self?.onClose()
+            }
         }
     }
 

@@ -66,10 +66,14 @@ CLI_CORE_SOURCES=(
     "${PROJECT_DIR}/Sources/AliasWriter.swift"
 )
 CLI_SOURCES=("${PROJECT_DIR}"/Sources/CLI/*.swift)
+SWIFT_CONCURRENCY_FLAGS=(
+    -warn-concurrency
+    -strict-concurrency=targeted
+)
 
 build_arch() {
     local arch="$1" out="$2"
-    swiftc -O -target "${arch}-apple-macos13.0" \
+    swiftc -O "${SWIFT_CONCURRENCY_FLAGS[@]}" -target "${arch}-apple-macos13.0" \
         "${CLI_CORE_SOURCES[@]}" "${CLI_SOURCES[@]}" \
         -o "${out}"
 }

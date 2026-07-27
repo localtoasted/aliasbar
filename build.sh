@@ -11,6 +11,10 @@ APP_BUNDLE="${BUILD_DIR}/${APP_NAME}.app"
 INSTALL_DIR="${HOME}/Applications"
 INSTALL_PATH="${INSTALL_DIR}/${APP_NAME}.app"
 INSTALL=false
+SWIFT_CONCURRENCY_FLAGS=(
+    -warn-concurrency
+    -strict-concurrency=targeted
+)
 
 usage() {
     cat <<EOF
@@ -71,7 +75,7 @@ if [ ${#SOURCES[@]} -eq 0 ]; then
     echo "No sources found in ${PROJECT_DIR}/Sources" >&2
     exit 1
 fi
-swiftc -O -target "${ARCH}-apple-macos13.0" \
+swiftc -O "${SWIFT_CONCURRENCY_FLAGS[@]}" -target "${ARCH}-apple-macos13.0" \
     -F "${SPARKLE_DIR}" \
     "${SOURCES[@]}" \
     -framework Sparkle \
@@ -87,7 +91,7 @@ if [ ${#CLI_SOURCES[@]} -eq 0 ]; then
     echo "No sources found in ${PROJECT_DIR}/Sources/CLI" >&2
     exit 1
 fi
-swiftc -O -target "${ARCH}-apple-macos13.0" \
+swiftc -O "${SWIFT_CONCURRENCY_FLAGS[@]}" -target "${ARCH}-apple-macos13.0" \
     "${PROJECT_DIR}/Sources/Model.swift" \
     "${PROJECT_DIR}/Sources/AliasWriter.swift" \
     "${CLI_SOURCES[@]}" \

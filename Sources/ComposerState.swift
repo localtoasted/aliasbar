@@ -7,6 +7,7 @@ import SwiftUI
 /// together. Committing an edit still lives on `AppState` alongside the shell
 /// writer and the prompt store it drives — this object owns opening and checking,
 /// not saving — so `editor` is reached from there through a forwarding accessor.
+@preconcurrency @MainActor
 final class ComposerState: ObservableObject {
     /// The state that owns this. `unowned` rather than `weak` because `AppState`
     /// holds this object for its entire life, so it can never be the one that goes

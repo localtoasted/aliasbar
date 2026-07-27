@@ -2,6 +2,7 @@ import SwiftUI
 
 // MARK: - Store
 
+@preconcurrency @MainActor
 final class EntryStore: ObservableObject {
     @Published private(set) var ranked: [RankedEntry] = []
     @Published private(set) var conflicts: [Conflict] = []
@@ -16,7 +17,11 @@ final class EntryStore: ObservableObject {
     /// is scanned once per launch rather than on every popover open.
     private var usageLoaded = false
 
-    init(settings: AppSettings = .shared) {
+    convenience init() {
+        self.init(settings: .shared)
+    }
+
+    init(settings: AppSettings) {
         self.settings = settings
         reload()
     }

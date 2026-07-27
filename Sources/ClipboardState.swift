@@ -7,6 +7,7 @@ import SwiftUI
 /// because it is independent of the rest — the selection index, the live query and
 /// the delivery pipeline all still live on `AppState`, reached through `app`. The
 /// only thing that moved is ownership of the clipboard's own state.
+@preconcurrency @MainActor
 final class ClipboardState: ObservableObject {
     /// The state that owns this. `unowned` rather than `weak` because `AppState`
     /// holds this object for its entire life, so it can never be the one that goes
@@ -243,7 +244,7 @@ final class ClipboardState: ObservableObject {
             if Thread.isMainThread {
                 finish()
             } else {
-                DispatchQueue.main.async(execute: finish)
+                Task { @MainActor in finish() }
             }
         }
         if clipboardImageOCRRequestID == requestID {

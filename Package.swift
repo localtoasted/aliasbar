@@ -20,6 +20,10 @@ import PackageDescription
 //     `swift build --scratch-path .build/spm` avoids that if it becomes annoying.
 //   - The test target needs XCTest, which ships with Xcode. Command Line Tools alone
 //     are enough for build.sh and test.sh but not for `swift test`.
+let concurrencySwiftSettings: [SwiftSetting] = [
+    .unsafeFlags(["-warn-concurrency", "-strict-concurrency=targeted"]),
+]
+
 let package = Package(
     name: "AliasBar",
     platforms: [.macOS(.v13)],
@@ -45,12 +49,14 @@ let package = Package(
                 "SharedDocument.swift",
                 "SnippetCore.swift",
                 "SuggestionEngine.swift",
-            ]
+            ],
+            swiftSettings: concurrencySwiftSettings
         ),
         .testTarget(
             name: "AliasBarCoreTests",
             dependencies: ["AliasBarCore"],
-            path: "Tests/AliasBarCoreTests"
+            path: "Tests/AliasBarCoreTests",
+            swiftSettings: concurrencySwiftSettings
         ),
     ]
 )

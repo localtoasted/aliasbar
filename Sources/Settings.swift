@@ -256,6 +256,7 @@ struct HotkeyCombo: Equatable {
 /// UserDefaults-backed settings. A single shared instance because the popover, the
 /// settings window, and the parser all need to agree, and there is no scenario where
 /// two differing copies would be correct.
+@preconcurrency @MainActor
 final class AppSettings: ObservableObject {
     static let shared = AppSettings()
 
@@ -633,7 +634,11 @@ final class AppSettings: ObservableObject {
     /// `AppSettings` unentangled from the process-wide singleton — `.shared` can only
     /// ever be constructed once, which a sync feature with real merge/seed/reload
     /// state machines needs to exercise far more than once per test run.
-    init(defaults: UserDefaults = AppSettings.store) {
+    convenience init() {
+        self.init(defaults: Self.store)
+    }
+
+    init(defaults: UserDefaults) {
         self.defaults = defaults
         // Reads a stored raw value, falling back when the key is absent or holds a
         // value from an older build. Free-standing rather than a method because `self`
