@@ -31,8 +31,8 @@ struct InboxView: View {
             ScrollView {
                 if rows.isEmpty {
                     EmptyStateView(symbol: "tray",
-                                   title: "No prompts to review",
-                                   hint: AppState.promptLibraryEmptyHint)
+                                   title: "No suggestions to review",
+                                   hint: "Build suggestions in Settings, then import the copied JSON.")
                         .padding(.top, 40)
                 } else {
                     LazyVStack(spacing: 1) {
@@ -67,6 +67,10 @@ struct InboxView: View {
 
     private func itemRow(_ item: PromptInbox.Item, selected: Bool, index: Int) -> some View {
         HStack(spacing: 6) {
+            Image(systemName: item.kind == .prompt ? "text.book.closed" : "at")
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(theme.faint)
+                .frame(width: 11)
             TypeBadge(type: item.type)
             Text(item.name)
                 .font(.system(size: 13, weight: .medium, design: theme.nameDesign))
@@ -160,7 +164,7 @@ private struct ItemDetail: View {
                     Button {
                         state.markInboxItemViewed(file: file, index: index)
                     } label: {
-                        Label("I reviewed this prompt", systemImage: "checkmark.seal")
+                        Label("I reviewed this \(item.kind.label)", systemImage: "checkmark.seal")
                             .font(.system(size: 11.5, weight: .semibold))
                     }
                     .buttonStyle(.plain)
@@ -185,6 +189,7 @@ private struct ItemDetail: View {
 
     private var header: some View {
         HStack(spacing: 7) {
+            InboxKindBadge(kind: item.kind)
             TypeBadge(type: item.type)
             Text(item.name)
                 .font(.system(size: 17, weight: .semibold, design: theme.nameDesign))
@@ -350,6 +355,22 @@ private struct ItemDetail: View {
         .buttonStyle(.plain)
         .disabled(!enabled)
         .opacity(enabled ? 1 : 0.4)
+    }
+}
+
+private struct InboxKindBadge: View {
+    @Environment(\.theme) private var theme
+    let kind: PromptInbox.ItemKind
+
+    var body: some View {
+        Label(kind == .prompt ? "PROMPT" : "ALIAS",
+              systemImage: kind == .prompt ? "text.book.closed" : "at")
+            .font(.system(size: 8, weight: .bold))
+            .kerning(0.35)
+            .foregroundStyle(theme.dim)
+            .padding(.horizontal, 5)
+            .padding(.vertical, 2)
+            .background(theme.surface, in: RoundedRectangle(cornerRadius: 4))
     }
 }
 

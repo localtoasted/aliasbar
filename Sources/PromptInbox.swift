@@ -1,4 +1,5 @@
 import Foundation
+import CoreFoundation
 
 /// `~/.aliasbar/inbox/*.json` — proposals produced by `AuditPrompt` (or written by hand)
 /// for a human to accept or reject one item at a time before anything reaches the real
@@ -14,6 +15,17 @@ import Foundation
 enum PromptInbox {
 
     // MARK: - Item
+
+    enum ItemKind: String, Equatable {
+        case prompt, alias
+
+        var label: String {
+            switch self {
+            case .prompt: return "prompt"
+            case .alias: return "alias"
+            }
+        }
+    }
 
     enum ItemType: String, Equatable {
         case new, update, merge
@@ -47,6 +59,9 @@ enum PromptInbox {
         /// never locates or mutates an item inside its file; a file only ever leaves
         /// the live inbox as a whole, via `markDone`/`discardFile`.
         let sourceFile: URL
+        /// Missing from older inbox files means `.prompt`, which keeps the original
+        /// prompt-only schema compatible with the mixed library Inbox.
+        let kind: ItemKind
         let type: ItemType
         let name: String
         let description: String?
@@ -116,11 +131,13 @@ enum PromptInbox {
         return .ok(files)
     }
 
-    /// Every field name a top-level inbox object is allowed to have. Anything else is
-    /// tolerated and reported, the same as an unrecognized item field.
+    /// Every field name an inbox item is allowed to have. Anything else is tolerated
+    /// in the legacy audit format and reported to the reviewer. Builder imports use a
+    /// separate exact schema below.
     private static let knownItemKeys: Set<String> = [
-        "type", "name", "description", "body", "replaces", "merges",
+        "kind", "type", "name", "description", "body", "command", "replaces", "merges",
     ]
+    private static let knownTopLevelKeys: Set<String> = ["items", "version", "source", "kind"]
 
     static func parseFile(at url: URL) -> FileOutcome {
         guard let data = try? Data(contentsOf: url) else {
@@ -146,10 +163,16 @@ enum PromptInbox {
             return .invalid(url: url, reason: "\"items\" must be an array")
         }
 
+        let envelopeKind = (top["kind"] as? String).flatMap(ItemKind.init(rawValue:))
         var items: [Item] = []
         for (index, rawItem) in itemsArray.enumerated() {
-            guard let dict = rawItem as? [String: Any] else {
+            guard var dict = rawItem as? [String: Any] else {
                 return .invalid(url: url, reason: "item \(index) is not an object")
+            }
+            // Builder JSON keeps the kind once at the top. Legacy audit JSON keeps it
+            // on each item (or omits it for a prompt). Normalize both into Item.
+            if dict["kind"] == nil, let envelopeKind {
+                dict["kind"] = envelopeKind.rawValue
             }
             switch parseItem(dict, sourceFile: url) {
             case .success(let item):
@@ -159,7 +182,7 @@ enum PromptInbox {
             }
         }
 
-        let unknownTopLevel = top.keys.filter { $0 != "items" }.sorted()
+        let unknownTopLevel = top.keys.filter { !knownTopLevelKeys.contains($0) }.sorted()
         return .ok(url: url, items: items, unknownTopLevelFields: unknownTopLevel)
     }
 
@@ -170,14 +193,46 @@ enum PromptInbox {
     }
 
     private static func parseItem(_ dict: [String: Any], sourceFile: URL) -> Result<Item, ItemShapeError> {
+        let kind: ItemKind
+        if let rawKind = dict["kind"] {
+            guard let string = rawKind as? String, let parsed = ItemKind(rawValue: string) else {
+                return .failure(ItemShapeError(reason: "\"kind\" must be \"prompt\" or \"alias\""))
+            }
+            kind = parsed
+        } else {
+            kind = .prompt
+        }
+
         guard let typeRaw = dict["type"] as? String, let type = ItemType(rawValue: typeRaw) else {
             return .failure(ItemShapeError(reason: "\"type\" must be one of \"new\", \"update\", \"merge\""))
         }
-        guard let name = dict["name"] as? String, PromptStore.isValidName(name) else {
-            return .failure(ItemShapeError(reason: "\"name\" must be a valid prompt name (letters, digits, - and _)"))
+        guard let name = dict["name"] as? String else {
+            return .failure(ItemShapeError(reason: "\"name\" must be a string"))
         }
-        guard let body = dict["body"] as? String else {
-            return .failure(ItemShapeError(reason: "\"body\" must be a string"))
+
+        let body: String
+        switch kind {
+        case .prompt:
+            guard PromptStore.isValidName(name) else {
+                return .failure(ItemShapeError(reason: "\"name\" must use letters, digits, hyphens, and underscores only"))
+            }
+            guard let value = dict["body"] as? String else {
+                return .failure(ItemShapeError(reason: "\"body\" must be a string"))
+            }
+            body = value
+        case .alias:
+            guard type == .new else {
+                return .failure(ItemShapeError(reason: "alias suggestions support type \"new\" only"))
+            }
+            guard let command = dict["command"] as? String else {
+                return .failure(ItemShapeError(reason: "\"command\" must be a string"))
+            }
+            do {
+                try AliasWriter.validate(name: name, command: command)
+            } catch {
+                return .failure(ItemShapeError(reason: error.localizedDescription))
+            }
+            body = command
         }
 
         var description: String?
@@ -213,9 +268,9 @@ enum PromptInbox {
         }
 
         let unknown = dict.keys.filter { !knownItemKeys.contains($0) }.sorted()
-        let flags = InboxFlagging.flags(name: name, description: description, body: body)
-        return .success(Item(sourceFile: sourceFile, type: type, name: name, description: description,
-                             body: body, replaces: replaces, merges: merges,
+        let flags = InboxFlagging.flags(kind: kind, name: name, description: description, body: body)
+        return .success(Item(sourceFile: sourceFile, kind: kind, type: type, name: name,
+                             description: description, body: body, replaces: replaces, merges: merges,
                              unknownFields: unknown, flags: flags))
     }
 
@@ -224,8 +279,10 @@ enum PromptInbox {
     enum ApproveError: LocalizedError {
         case flaggedRequiresAcknowledgement(name: String)
         case nameCollision(name: String)
+        case aliasNameCollision(name: String)
         case updateTargetMissing(name: String)
         case mergeSourceMissing(name: String)
+        case wrongLibrary(expected: ItemKind)
         case underlying(String)
 
         var errorDescription: String? {
@@ -234,10 +291,14 @@ enum PromptInbox {
                 return "\"\(name)\" is flagged. Review it in full before approving."
             case .nameCollision(let name):
                 return "A prompt named \"\(name)\" already exists. Submit this as an update."
+            case .aliasNameCollision(let name):
+                return "An alias or function named \"\(name)\" already exists. Edit the suggestion and choose another name."
             case .updateTargetMissing(let name):
                 return "No existing prompt matches \"\(name)\". Choose a prompt to update."
             case .mergeSourceMissing(let name):
                 return "No existing prompt matches \"\(name)\". Choose a prompt to merge."
+            case .wrongLibrary(let expected):
+                return "This approval path accepts a \(expected.label) item."
             case .underlying(let message):
                 return message
             }
@@ -287,6 +348,9 @@ enum PromptInbox {
                         promptsDirectory: URL,
                         acknowledgedFlags: Bool = false,
                         now: Date = Date()) throws -> ApproveResult {
+        guard item.kind == .prompt else {
+            throw ApproveError.wrongLibrary(expected: .prompt)
+        }
         guard acknowledgedFlags || !item.isFlagged else {
             throw ApproveError.flaggedRequiresAcknowledgement(name: item.name)
         }
@@ -335,6 +399,43 @@ enum PromptInbox {
         }
     }
 
+    /// Writes one reviewed alias suggestion through the same guarded writer the
+    /// Composer uses. The builder accepts new aliases only, so approval never replaces
+    /// a definition or removes shell content. A collision sends the item back to the
+    /// reviewer, who can use Edit and approve to choose another name.
+    @discardableResult
+    static func approveAlias(_ item: Item,
+                             existingEntries: [ShellEntry],
+                             rcPath: String,
+                             acknowledgedFlags: Bool = false) throws -> ApproveResult {
+        guard item.kind == .alias else {
+            throw ApproveError.wrongLibrary(expected: .alias)
+        }
+        guard acknowledgedFlags || !item.isFlagged else {
+            throw ApproveError.flaggedRequiresAcknowledgement(name: item.name)
+        }
+        guard item.type == .new else {
+            throw ApproveError.underlying("Alias suggestions support new items only.")
+        }
+        guard !existingEntries.contains(where: {
+            $0.name.lowercased() == item.name.lowercased()
+        }) else {
+            throw ApproveError.aliasNameCollision(name: item.name)
+        }
+
+        do {
+            let backup = try AliasWriter.apply(
+                .upsert(name: item.name, command: item.body, comment: item.description),
+                path: rcPath,
+                allEntries: existingEntries)
+            return ApproveResult(name: item.name,
+                                 replacedBackup: backup.isEmpty ? nil : backup,
+                                 removedMerges: [])
+        } catch {
+            throw ApproveError.underlying(error.localizedDescription)
+        }
+    }
+
     private static func writeApprovedPrompt(_ item: Item, to directory: URL, now: Date) throws -> ApproveResult {
         var frontmatter = PromptFrontmatter.empty()
         if let description = item.description, !description.isEmpty {
@@ -360,6 +461,260 @@ enum PromptInbox {
     /// discarded — is `markDone`/`discardFile`, a separate, explicit step a caller
     /// takes once it's actually done with the file.
     static func discard(_ item: Item) {}
+
+    // MARK: - Explicit import
+
+    struct ImportResult: Equatable {
+        let url: URL
+        let itemCount: Int
+    }
+
+    /// The exact builder selection that produced the copied instructions. Import
+    /// checks both values, so JSON copied from another tab cannot quietly land in the
+    /// wrong review flow.
+    struct BuilderImportPolicy: Equatable {
+        let expectedKind: ItemKind
+        let expectedSource: String
+    }
+
+    enum ImportError: LocalizedError {
+        case emptyClipboard
+        case tooLarge
+        case extraText
+        case invalid(String)
+        case noItems
+        case sensitiveContent(String)
+        case writeFailed(String)
+
+        var errorDescription: String? {
+            switch self {
+            case .emptyClipboard:
+                return "Copy the JSON response first."
+            case .tooLarge:
+                return "The copied response is too large to review."
+            case .extraText:
+                return "Copy one JSON object or one JSON code block."
+            case .invalid(let reason):
+                return "The copied response is not an AliasBar suggestion file: \(reason)."
+            case .noItems:
+                return "The response contains no suggestions."
+            case .sensitiveContent(let reason):
+                return "The response contains sensitive content and was not saved: \(reason)."
+            case .writeFailed(let reason):
+                return "AliasBar could not add these suggestions: \(reason)."
+            }
+        }
+    }
+
+    /// Validates copied assistant output before writing it into the untrusted Inbox.
+    /// This function never writes to either library. The resulting file still needs an
+    /// item-by-item decision through the same review flow as a local agent's output.
+    @discardableResult
+    static func importText(_ text: String, to inboxDirectory: URL) throws -> ImportResult {
+        let json = try normalizedJSON(from: text)
+        guard json.utf8.count <= SensitiveContentClassifier.Thresholds.maximumInputBytes else {
+            throw ImportError.tooLarge
+        }
+
+        let data = Data(json.utf8)
+        let destination = importDestination(in: inboxDirectory)
+
+        switch parse(data: data, url: destination) {
+        case .invalid(_, let reason):
+            throw ImportError.invalid(reason)
+        case .ok(_, let items, _):
+            guard !items.isEmpty else { throw ImportError.noItems }
+            if let sensitive = items.lazy
+                .flatMap(\.flags)
+                .first(where: { $0.reason == .sensitiveContent }) {
+                throw ImportError.sensitiveContent(sensitive.detail)
+            }
+            return try writeImport(data, itemCount: items.count,
+                                   to: destination, inboxDirectory: inboxDirectory)
+        }
+    }
+
+    /// Strict copy/import path for Build my library. All supported assistants return
+    /// this same versioned envelope. It permits only new items of the selected kind,
+    /// caps the response at five, rejects risky alias commands, and runs the secret
+    /// classifier before any directory or file is created.
+    @discardableResult
+    static func importText(_ text: String,
+                           to inboxDirectory: URL,
+                           builderPolicy policy: BuilderImportPolicy) throws -> ImportResult {
+        let json = try normalizedJSON(from: text)
+        guard json.utf8.count <= SensitiveContentClassifier.Thresholds.maximumInputBytes else {
+            throw ImportError.tooLarge
+        }
+        let data = Data(json.utf8)
+        let destination = importDestination(in: inboxDirectory)
+
+        let raw: Any
+        do {
+            raw = try JSONSerialization.jsonObject(with: data)
+        } catch {
+            throw ImportError.invalid("not valid JSON")
+        }
+        guard let top = raw as? [String: Any] else {
+            throw ImportError.invalid("top-level JSON value must be an object")
+        }
+
+        let requiredTop: Set<String> = ["version", "source", "kind", "items"]
+        guard Set(top.keys) == requiredTop else {
+            throw ImportError.invalid(exactFieldsMessage(actual: Set(top.keys), expected: requiredTop,
+                                                         location: "top level"))
+        }
+        guard let version = top["version"] as? NSNumber,
+              CFGetTypeID(version) != CFBooleanGetTypeID(),
+              version.intValue == 1, version.doubleValue == 1 else {
+            throw ImportError.invalid("\"version\" must be 1")
+        }
+        guard let source = top["source"] as? String, source == policy.expectedSource else {
+            throw ImportError.invalid("\"source\" must be \"\(policy.expectedSource)\"")
+        }
+        guard let kindRaw = top["kind"] as? String,
+              kindRaw == policy.expectedKind.rawValue else {
+            throw ImportError.invalid("\"kind\" must be \"\(policy.expectedKind.rawValue)\"")
+        }
+        guard let rawItems = top["items"] as? [Any] else {
+            throw ImportError.invalid("\"items\" must be an array")
+        }
+        guard !rawItems.isEmpty else { throw ImportError.noItems }
+        guard rawItems.count <= 5 else {
+            throw ImportError.invalid("\"items\" may contain no more than 5 suggestions")
+        }
+
+        let promptKeys: Set<String> = ["type", "name", "description", "body"]
+        let aliasKeys: Set<String> = ["type", "name", "command"]
+        let expectedKeys = policy.expectedKind == .prompt ? promptKeys : aliasKeys
+
+        for (index, rawItem) in rawItems.enumerated() {
+            guard let item = rawItem as? [String: Any] else {
+                throw ImportError.invalid("item \(index) is not an object")
+            }
+            guard Set(item.keys) == expectedKeys else {
+                throw ImportError.invalid(exactFieldsMessage(actual: Set(item.keys), expected: expectedKeys,
+                                                             location: "item \(index)"))
+            }
+            guard item["type"] as? String == "new" else {
+                throw ImportError.invalid("item \(index): \"type\" must be \"new\"")
+            }
+            guard let name = item["name"] as? String, PromptStore.isValidName(name) else {
+                throw ImportError.invalid("item \(index): \"name\" must use letters, digits, hyphens, and underscores only")
+            }
+
+            let inspectedText: String
+            switch policy.expectedKind {
+            case .prompt:
+                guard let description = item["description"] as? String,
+                      !description.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                      !description.contains("\n"), !description.contains("\r") else {
+                    throw ImportError.invalid("item \(index): \"description\" must be one line")
+                }
+                guard let body = item["body"] as? String,
+                      !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    throw ImportError.invalid("item \(index): \"body\" must not be empty")
+                }
+                inspectedText = [name, description, body].joined(separator: "\n")
+
+            case .alias:
+                guard let command = item["command"] as? String else {
+                    throw ImportError.invalid("item \(index): \"command\" must be a string")
+                }
+                do {
+                    try AliasWriter.validate(name: name, command: command)
+                } catch {
+                    throw ImportError.invalid("item \(index): \(error.localizedDescription)")
+                }
+                if let reason = builderAliasSafetyRejection(command) {
+                    throw ImportError.invalid("item \(index): \(reason)")
+                }
+                inspectedText = [name, command].joined(separator: "\n")
+            }
+
+            if let reason = SensitiveContentClassifier.quarantineReason(in: inspectedText) {
+                throw ImportError.sensitiveContent(reason.description)
+            }
+        }
+
+        // Run the normal parser too. This keeps the imported file and the later Inbox
+        // scan on one interpretation of names, bodies, and flags.
+        switch parse(data: data, url: destination) {
+        case .invalid(_, let reason):
+            throw ImportError.invalid(reason)
+        case .ok(_, let items, _):
+            guard items.count == rawItems.count else {
+                throw ImportError.invalid("the item count changed during validation")
+            }
+            return try writeImport(data, itemCount: items.count,
+                                   to: destination, inboxDirectory: inboxDirectory)
+        }
+    }
+
+    private static func exactFieldsMessage(actual: Set<String>, expected: Set<String>,
+                                           location: String) -> String {
+        let missing = expected.subtracting(actual).sorted()
+        let extra = actual.subtracting(expected).sorted()
+        var parts: [String] = []
+        if !missing.isEmpty { parts.append("missing \(missing.joined(separator: ", "))") }
+        if !extra.isEmpty { parts.append("unexpected \(extra.joined(separator: ", "))") }
+        return "\(location) fields must match the schema (\(parts.joined(separator: "; ")))"
+    }
+
+    private static func builderAliasSafetyRejection(_ command: String) -> String? {
+        let destructive = #"(?i)\b(sudo|rm|rmdir|mkfs|diskutil|dd|shutdown|reboot|halt|poweroff)\b"#
+        if command.range(of: destructive, options: .regularExpression) != nil {
+            return "destructive or privileged commands are not accepted"
+        }
+        let recursivePermissions = #"(?i)\b(chmod|chown)\b[^\n]*(?:\s-R\b|\s--recursive\b)"#
+        if command.range(of: recursivePermissions, options: .regularExpression) != nil {
+            return "recursive permission changes are not accepted"
+        }
+        let destructiveGit = #"(?i)\bgit\s+(reset\s+--hard|clean(?:\s|$))"#
+        if command.range(of: destructiveGit, options: .regularExpression) != nil {
+            return "destructive Git commands are not accepted"
+        }
+        let downloadedShell = #"(?i)\b(curl|wget)\b[^\n|]*\|\s*(?:sudo\s+)?(?:sh|bash|zsh)\b"#
+        if command.range(of: downloadedShell, options: .regularExpression) != nil {
+            return "downloaded scripts cannot be piped into a shell"
+        }
+        return nil
+    }
+
+    private static func importDestination(in inboxDirectory: URL) -> URL {
+        let filename = "library-build-\(subsecondTimestamp(Date()))-\(UUID().uuidString.lowercased()).json"
+        return inboxDirectory.appendingPathComponent(filename)
+    }
+
+    private static func writeImport(_ data: Data, itemCount: Int, to destination: URL,
+                                    inboxDirectory: URL) throws -> ImportResult {
+        do {
+            try FileManager.default.createDirectory(at: inboxDirectory,
+                                                    withIntermediateDirectories: true)
+            try data.write(to: destination, options: .atomic)
+            return ImportResult(url: destination, itemCount: itemCount)
+        } catch {
+            throw ImportError.writeFailed(error.localizedDescription)
+        }
+    }
+
+    /// ChatGPT commonly wraps JSON in one fenced block. Accept that one wrapper, but
+    /// reject prose before or after it so validation never has to guess which object the
+    /// user intended to import.
+    private static func normalizedJSON(from text: String) throws -> String {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { throw ImportError.emptyClipboard }
+        guard trimmed.hasPrefix("```") else { return trimmed }
+
+        let lines = trimmed.components(separatedBy: .newlines)
+        guard lines.count >= 3,
+              lines.first == "```" || lines.first?.lowercased() == "```json",
+              lines.last == "```"
+        else {
+            throw ImportError.extraText
+        }
+        return lines.dropFirst().dropLast().joined(separator: "\n")
+    }
 
     // MARK: - Inbox file lifecycle
 
@@ -432,11 +787,20 @@ enum PromptInbox {
 /// than folded into `parseItem` so the detection rules read as one place, separate from
 /// schema validation.
 private enum InboxFlagging {
-    static func flags(name: String, description: String?, body: String) -> [PromptInbox.Flag] {
+    static func flags(kind: PromptInbox.ItemKind,
+                      name: String,
+                      description: String?,
+                      body: String) -> [PromptInbox.Flag] {
         let haystack = [name, description ?? "", body].joined(separator: "\n")
         var flags: [PromptInbox.Flag] = []
 
-        if containsShellCommandShape(haystack) {
+        // Every alias suggestion is executable shell text. Requiring the reviewer to
+        // acknowledge that fact keeps a generated command from becoming a one-click
+        // write, even when it contains none of the narrower risky shapes below.
+        if kind == .alias {
+            flags.append(PromptInbox.Flag(reason: .shellCommandShape,
+                                          detail: "Review this shell command before saving"))
+        } else if containsShellCommandShape(haystack) {
             flags.append(PromptInbox.Flag(reason: .shellCommandShape,
                                           detail: "Looks like it contains a shell command"))
         }

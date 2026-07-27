@@ -40,6 +40,10 @@ struct ComposerSheet: View {
                     kindPicker(target)
                 }
 
+                if !target.flagReasons.isEmpty {
+                    inboxFlagBanner(binding)
+                }
+
                 switch target.kind {
                 case .alias: aliasFields(binding)
                 case .prompt: promptFields(binding)
@@ -80,6 +84,7 @@ struct ComposerSheet: View {
     }
 
     private func canSave(_ target: EditTarget) -> Bool {
+        guard target.flagReasons.isEmpty || target.reviewAcknowledged else { return false }
         switch target.kind {
         case .alias:
             return !target.name.isEmpty && !target.command.isEmpty
@@ -127,23 +132,6 @@ struct ComposerSheet: View {
         let target = binding.wrappedValue
         let validation = state.composerPromptValidation(name: target.name, originalName: target.originalName)
         return VStack(alignment: .leading, spacing: 10) {
-            if !target.flagReasons.isEmpty {
-                // Edit-before-approve carries an inbox item's advisory flags here so
-                // the human saving it sees exactly what Approve would have made them
-                // acknowledge — this path must never be the quieter one.
-                VStack(alignment: .leading, spacing: 3) {
-                    Label("Flagged by the inbox review", systemImage: "exclamationmark.triangle.fill")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(.orange)
-                    ForEach(target.flagReasons, id: \.self) { reason in
-                        Text(reason).font(.system(size: 10.5)).foregroundStyle(.secondary)
-                    }
-                }
-                .padding(8)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(RoundedRectangle(cornerRadius: 7).fill(.orange.opacity(0.1)))
-                .accessibilityLabel("This item was flagged by the inbox review")
-            }
             field("Name", binding.name, mono: true, field: .name)
             field("Description", binding.description, mono: false, field: .secondary)
             bodyEditor(binding)
@@ -151,6 +139,28 @@ struct ComposerSheet: View {
             deliveryToggle(binding)
             liveValidation(validation)
         }
+    }
+
+    /// Edit and approve carries Inbox flags into both Composer kinds. The edit path
+    /// must show the same warning as direct approval.
+    private func inboxFlagBanner(_ binding: Binding<EditTarget>) -> some View {
+        let target = binding.wrappedValue
+        return VStack(alignment: .leading, spacing: 3) {
+            Label("Review before saving", systemImage: "exclamationmark.triangle.fill")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.orange)
+            ForEach(target.flagReasons, id: \.self) { reason in
+                Text(reason).font(.system(size: 10.5)).foregroundStyle(.secondary)
+            }
+            Toggle("I reviewed this \(target.kind.rawValue)", isOn: binding.reviewAcknowledged)
+                .toggleStyle(.checkbox)
+                .font(.system(size: 10.5, weight: .medium))
+                .padding(.top, 3)
+        }
+        .padding(8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 7).fill(.orange.opacity(0.1)))
+        .accessibilityLabel("Review this suggestion before saving")
     }
 
     private func bodyEditor(_ binding: Binding<EditTarget>) -> some View {

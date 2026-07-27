@@ -112,3 +112,179 @@ enum AuditPrompt {
         }
     }
 }
+
+// MARK: - Build a library from observed habits
+
+/// The two libraries the setup helper can grow. The helper only proposes new items.
+/// Existing prompt updates and merges still use `AuditPrompt`, where the extra review
+/// context already exists.
+enum LibraryBuildKind: String, CaseIterable, Identifiable {
+    case prompt, alias
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .prompt: return "Prompts"
+        case .alias: return "Aliases"
+        }
+    }
+
+    var inboxKind: PromptInbox.ItemKind {
+        switch self {
+        case .prompt: return .prompt
+        case .alias: return .alias
+        }
+    }
+}
+
+/// Where the user plans to paste the generated instructions. ChatGPT returns JSON for
+/// the user to copy. Codex and Claude Code can put the same JSON in AliasBar's Inbox.
+enum LibraryBuildAssistant: String, CaseIterable, Identifiable {
+    case chatGPT, codex, claudeCode
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .chatGPT: return "ChatGPT"
+        case .codex: return "Codex"
+        case .claudeCode: return "Claude Code"
+        }
+    }
+
+    /// Stable value written into the copied JSON. This is deliberately separate
+    /// from the Swift case name so the external schema stays readable.
+    var schemaValue: String {
+        switch self {
+        case .chatGPT: return "chatgpt"
+        case .codex: return "codex"
+        case .claudeCode: return "claude-code"
+        }
+    }
+
+    func supports(_ kind: LibraryBuildKind) -> Bool {
+        switch (self, kind) {
+        case (.chatGPT, .alias): return false
+        default: return true
+        }
+    }
+
+    static func available(for kind: LibraryBuildKind) -> [LibraryBuildAssistant] {
+        allCases.filter { $0.supports(kind) }
+    }
+}
+
+/// Creates a short instruction packet that asks an assistant to identify repeated work
+/// and return new, reviewable AliasBar items. Existing names are included to prevent
+/// duplicates, but prompt bodies and shell commands are not copied into the packet.
+enum LibraryBuilderPrompt {
+    static func generate(kind: LibraryBuildKind,
+                         assistant: LibraryBuildAssistant,
+                         prompts: [Prompt],
+                         shellEntries: [ShellEntry]) -> String {
+        var output = "Help me build my AliasBar \(kind.label.lowercased()) library.\n\n"
+        output += evidenceInstructions(for: kind, assistant: assistant)
+        output += "\n\n## Existing names\n\n"
+        output += existingNames(kind: kind, prompts: prompts, shellEntries: shellEntries)
+        output += "\n\n## Rules\n\n"
+        output += rules(for: kind)
+        output += "\n\n## Output\n\n"
+        output += outputInstructions(for: kind, assistant: assistant)
+        return output
+    }
+
+    private static func evidenceInstructions(for kind: LibraryBuildKind,
+                                             assistant: LibraryBuildAssistant) -> String {
+        let source: String
+        switch assistant {
+        case .chatGPT:
+            source = "Use only patterns visible in this conversation. Do not assume access to other chats."
+        case .codex, .claudeCode:
+            source = "Use only patterns visible in our current work. Do not inspect unrelated files or history."
+        }
+
+        switch kind {
+        case .prompt:
+            return "## What to inspect\n\n\(source) Find requests I repeat and turn each one into a reusable prompt. If the evidence is weak, return fewer items."
+        case .alias:
+            return "## What to inspect\n\n\(source) Use only complete shell commands already visible in that work. Do not inspect raw shell history, shell variable values, or credential files. Find commands I repeat and turn each one into a short alias. If the evidence is weak, return fewer items."
+        }
+    }
+
+    private static func existingNames(kind: LibraryBuildKind,
+                                      prompts: [Prompt],
+                                      shellEntries: [ShellEntry]) -> String {
+        let names: [String]
+        switch kind {
+        case .prompt:
+            names = prompts.map(\.name)
+        case .alias:
+            names = shellEntries.map(\.name)
+        }
+        let sorted = Array(Set(names)).sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
+        return sorted.isEmpty ? "(none)" : sorted.map { "- \($0)" }.joined(separator: "\n")
+    }
+
+    private static func rules(for kind: LibraryBuildKind) -> String {
+        var lines = [
+            "1. Suggest no more than 5 items.",
+            "2. Suggest only new items supported by repeated behavior. Do not rename, update, or merge existing items.",
+            "3. Skip anything that includes a password, token, private key, credential URL, or other secret.",
+            "4. Use names made from letters, digits, hyphens, and underscores only.",
+            "5. Return valid JSON that matches the schema below. Do not add fields.",
+        ]
+        switch kind {
+        case .prompt:
+            lines.append("6. Write complete prompt bodies. Use {{slots}} only for details that change each time.")
+        case .alias:
+            lines.append("6. Each command must be one line. Do not include destructive commands, privilege escalation, or commands that expose environment values.")
+        }
+        lines.append("7. AliasBar will show every item for review. Do not write or change library items yourself.")
+        return lines.joined(separator: "\n")
+    }
+
+    private static func outputInstructions(for kind: LibraryBuildKind,
+                                           assistant: LibraryBuildAssistant) -> String {
+        let item: String
+        switch kind {
+        case .prompt:
+            item = """
+            {
+              "type": "new",
+              "name": "short-name",
+              "description": "one clear sentence",
+              "body": "the complete reusable prompt"
+            }
+            """
+        case .alias:
+            item = """
+            {
+              "type": "new",
+              "name": "short-name",
+              "command": "the complete one-line command"
+            }
+            """
+        }
+
+        let schema = """
+        {
+          "version": 1,
+          "source": "\(assistant.schemaValue)",
+          "kind": "\(kind.rawValue)",
+          "items": [
+        \(indent(item, by: 4))
+          ]
+        }
+        """
+
+        return "Reply with exactly one JSON code block in this shape. Do not write files or change AliasBar. Keep the four top-level fields exactly as shown. Return an empty items array when nothing has enough evidence.\n\n\(schema)"
+    }
+
+    private static func indent(_ text: String, by spaces: Int) -> String {
+        let prefix = String(repeating: " ", count: spaces)
+        return text.components(separatedBy: .newlines)
+            .map { prefix + $0 }
+            .joined(separator: "\n")
+    }
+}

@@ -1294,12 +1294,18 @@ struct ManageView: View {
     private var sidebar: some View {
         VStack(alignment: .leading, spacing: 1) {
             if state.dialect == .prompt {
-                ForEach(PromptBucket.allCases) { bucket in
-                    promptBucketRow(bucket)
+                if settings.promptFeaturesEnabled {
+                    ForEach(PromptBucket.allCases) { bucket in
+                        promptBucketRow(bucket)
+                    }
+                } else {
+                    promptBucketRow(.inbox)
                 }
                 Spacer()
-                newButton("New prompt") {
-                    state.openComposer(prefill: ComposerPrefill(kind: .prompt))
+                if settings.promptFeaturesEnabled {
+                    newButton("New prompt") {
+                        state.openComposer(prefill: ComposerPrefill(kind: .prompt))
+                    }
                 }
                 dialectFlipHint
             } else {
@@ -1310,7 +1316,9 @@ struct ManageView: View {
                 newButton("New alias") {
                     state.openComposer(prefill: ComposerPrefill(kind: .alias))
                 }
-                dialectFlipHint
+                if state.canOpenPromptManage {
+                    dialectFlipHint
+                }
             }
         }
         .padding(8)
@@ -1343,13 +1351,17 @@ struct ManageView: View {
     private var dialectFlipHint: some View {
         HStack(spacing: 4) {
             Text("⇥").font(.system(size: 9.5, weight: .bold, design: .monospaced))
-            Text(state.dialect == .prompt ? "aliases" : "prompts")
+            Text(state.dialect == .prompt
+                 ? "aliases"
+                 : (settings.promptFeaturesEnabled ? "prompts" : "review"))
                 .font(.system(size: 9.5))
         }
         .foregroundStyle(theme.faint)
         .padding(.horizontal, 2)
         .padding(.top, 2)
-        .help("Press ⇥ to switch between aliases and prompts.")
+        .help(settings.promptFeaturesEnabled
+              ? "Press ⇥ to switch between aliases and prompts."
+              : "Press ⇥ to review suggestions.")
     }
 
     private func promptBucketRow(_ bucket: PromptBucket) -> some View {
