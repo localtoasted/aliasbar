@@ -55,7 +55,7 @@ struct PromptManageView: View {
         switch state.promptBucket {
         case .library: return state.query.isEmpty ? "No prompts yet" : "Nothing matches \"\(state.query)\""
         case .delivery: return state.query.isEmpty ? "No prompts yet" : "Nothing matches \"\(state.query)\""
-        case .health: return "No diagnoses — everything looks healthy"
+        case .health: return "No prompt issues"
         case .inbox:
             // Unreachable: `ManageView` routes `.inbox` to `InboxView` before this
             // type ever renders — kept only so the switch stays exhaustive.
@@ -455,7 +455,7 @@ struct SuggestedManageView: View {
 
                     // Mirrors the shell graveyard's framing: `neverRun` says "you
                     // never run this, delete it?" — this is that sentence's opposite.
-                    Text("You've run this \(suggestion.count)× — worth making it an alias?")
+                    Text("Used \(suggestion.count) times. Create an alias?")
                         .font(.system(size: 11.5, design: theme.bodyDesign))
                         .foregroundStyle(theme.dim)
 
@@ -480,7 +480,7 @@ struct SuggestedManageView: View {
                         }
                         Spacer(minLength: 0)
                     }
-                    Text("The editor opens with the name and command filled in — nothing is written until you save it there.")
+                    Text("AliasBar fills in the name and command. Save to create it.")
                         .font(.system(size: 10))
                         .foregroundStyle(theme.faint)
 

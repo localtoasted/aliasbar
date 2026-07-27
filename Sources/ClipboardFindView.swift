@@ -28,8 +28,8 @@ struct ClipboardFindView: View {
                         ? "Nothing copied yet"
                         : "Nothing matches \"\(state.query)\"",
                     hint: state.query.isEmpty
-                        ? "Copy something, anywhere, and it shows up here."
-                        : "Esc clears the search.")
+                        ? "Copy something to see it here."
+                        : "Press Esc to clear the search.")
             } else {
                 HStack(spacing: 0) {
                     list
@@ -55,15 +55,15 @@ struct ClipboardFindView: View {
                 Image(systemName: "doc.on.clipboard")
                     .font(.system(size: 22, weight: .light))
                     .foregroundStyle(theme.faint)
-                Text("Clipboard watching is off")
+                Text("Clipboard monitoring is off")
                     .font(.system(size: 12.5, weight: .medium))
                     .foregroundStyle(theme.dim)
             }
             VStack(spacing: 5) {
-                Text("Watching starts only when you turn it on.")
+                Text("Turn it on to keep recent clips ready.")
                     .font(.system(size: 11.5))
                     .foregroundStyle(theme.dim)
-                Text("Secret-shaped clips — tokens, keys, passwords — are recognized and held in memory only. They never touch disk, synced or not.")
+                Text("Sensitive clips stay in memory and never save or sync.")
                     .font(.system(size: 10.5))
                     .foregroundStyle(theme.faint)
                     .multilineTextAlignment(.center)
@@ -78,7 +78,7 @@ struct ClipboardFindView: View {
                     Text("⏎")
                         .font(.system(size: 10.5, weight: .bold, design: .monospaced))
                         .foregroundStyle(theme.onAccent.opacity(0.85))
-                    Text("Enable clipboard watching")
+                    Text("Enable clipboard monitoring")
                         .font(.system(size: 11.5, weight: .semibold))
                         .foregroundStyle(theme.onAccent)
                 }

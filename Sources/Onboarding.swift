@@ -113,12 +113,12 @@ struct OnboardingView: View {
 
     private var stepTitle: String {
         switch step {
-        case .found: return "What's already there"
-        case .shortcut: return "One keystroke, from anywhere"
-        case .enter: return "What Enter does"
+        case .found: return "Your aliases and prompts"
+        case .shortcut: return "Set your shortcut"
+        case .enter: return "Choose what Enter does"
         case .file: return "Where your aliases live"
-        case .updates: return "Staying up to date"
-        case .look: return "Pick a look"
+        case .updates: return "Updates"
+        case .look: return "Choose a look"
         }
     }
 
@@ -225,8 +225,8 @@ struct OnboardingView: View {
 
     private var scanIntroLine: String {
         scan.aliasCount == 0 && scan.functionCount == 0
-            ? "AliasBar checked your shell config once, locally — nothing there yet. It'll show up here the moment you add something."
-            : "AliasBar checked your shell config and history once, locally, before asking you anything."
+            ? "No aliases found in your shell config yet."
+            : "AliasBar found these in your shell config."
     }
 
     /// The found-treasure screen: counts, the top-5 "first aha", and the three
@@ -249,7 +249,7 @@ struct OnboardingView: View {
             }
 
             if !scan.topUsed.isEmpty {
-                SettingsGroup("What you actually reach for") {
+                SettingsGroup("Most used") {
                     VStack(spacing: 6) {
                         ForEach(Array(scan.topUsed.enumerated()), id: \.element.id) { index, ranked in
                             topUsedRow(ranked, rank: index + 1)
@@ -257,24 +257,24 @@ struct OnboardingView: View {
                     }
                 }
             } else {
-                NoticeText("No usage history yet — once you run a few, the most-used ones will show up here.",
+                NoticeText("Run a few aliases to see your most used.",
                           tone: .info)
             }
 
-            SettingsGroup("Turn any of this off") {
+            SettingsGroup("Choose what AliasBar uses") {
                 SettingsRow("Usage ranking",
-                            hint: "Off falls back to the file's own order instead of how often you use things.") {
+                            hint: "Turn off to keep your file order.") {
                     ThemedToggle(isOn: historyRankingBinding, label: "Rank by how often you actually use things")
                 }
-                SettingsRow("Claude Code prompt features",
+                SettingsRow("Prompts",
                             hint: scan.claudeCodeDetected
-                                ? "Detected on this Mac — dialects, delivery, and the ⌘I audit prompt stay available."
-                                : "Not detected on this Mac, but you can turn these on anyway.") {
-                    ThemedToggle(isOn: claudeFeaturesBinding, label: "Claude Code prompt features")
+                                ? "Claude Code found. You can install prompts as slash commands."
+                                : "Claude Code was not found. Prompts still work in AliasBar.") {
+                    ThemedToggle(isOn: claudeFeaturesBinding, label: "Prompts")
                 }
-                SettingsRow("Clipboard watching",
-                            hint: "Off until you turn it on. Secret-shaped clips are quarantined in memory only — never written to disk — and gone in about 90 seconds.") {
-                    ThemedToggle(isOn: clipboardWatchingBinding, label: "Watch the clipboard for useful transforms")
+                SettingsRow("Clipboard monitoring",
+                            hint: "Sensitive clips stay in memory and disappear after about 90 seconds.") {
+                    ThemedToggle(isOn: clipboardWatchingBinding, label: "Monitor the clipboard")
                 }
             }
         }
@@ -326,7 +326,7 @@ struct OnboardingView: View {
 
     private var shortcutStep: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("Press it in any app and AliasBar appears over your work, ready to search. Escape hands focus straight back.")
+            Text("Press the shortcut in any app to open AliasBar. Esc returns to your work.")
                 .font(.system(size: 13, design: theme.bodyDesign))
                 .foregroundStyle(theme.dim)
                 .fixedSize(horizontal: false, vertical: true)
@@ -353,12 +353,12 @@ struct OnboardingView: View {
                                     : "Change keyboard shortcut, currently \(settings.hotkey.displayString)")
 
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(recordingHotkey ? "Recording — press the combination you want."
-                                         : "This works as it is.")
+                    Text(recordingHotkey ? "Press your new shortcut."
+                                         : "The default is ready.")
                         .font(.system(size: 12.5, weight: .medium))
                         .foregroundStyle(theme.text)
                     Text(recordingHotkey ? "Include ⌘ or ⌃."
-                                         : "Click the key to choose a different one.")
+                                         : "Click to change it.")
                         .font(.system(size: 11))
                         .foregroundStyle(theme.faint)
                 }
@@ -377,8 +377,8 @@ struct OnboardingView: View {
                     .font(.system(size: 12))
                     .foregroundStyle(hotkeyRehearsed ? .green : theme.faint)
                 Text(hotkeyRehearsed
-                    ? "Nice — that's it, working right now."
-                    : "Try it: press \(settings.hotkey.displayString) now, from anywhere.")
+                    ? "Shortcut works."
+                    : "Press \(settings.hotkey.displayString) to test it.")
                     .font(.system(size: 11.5))
                     .foregroundStyle(theme.dim)
             }
@@ -386,7 +386,7 @@ struct OnboardingView: View {
                                 ? "Shortcut confirmed working"
                                 : "Practice: press \(settings.hotkey.displayString) now to confirm it works")
 
-            NoticeText("The shortcut uses the system hotkey API: macOS tells AliasBar that this one combination fired and nothing else. It never sees any other keystroke, and needs no permission.",
+            NoticeText("AliasBar sees this shortcut only. It cannot read your other keystrokes.",
                        tone: .info)
         }
         .onAppear {
@@ -410,7 +410,7 @@ struct OnboardingView: View {
             recordingHotkey = false
             HotkeyRecorder.shared.isRecording = false
             guard combo.isRegisterable else {
-                hotkeyError = "Include ⌘ or ⌃. macOS no longer accepts shortcuts built only from ⌥ and ⇧."
+                hotkeyError = "Include ⌘ or ⌃."
                 return
             }
             // Register first, persist only on success — the same rule the settings
@@ -433,17 +433,14 @@ struct OnboardingView: View {
     /// The three choices offered here. `copyName` stands in for both copy variants;
     /// the full four-way split lives in Settings for whoever wants it.
     private static let enterChoices: [(EnterAction, String, String)] = [
-        (.pasteName, "Type the alias name into the app behind",
-         "You are usually standing in a terminal about to type it yourself — AliasBar types it for you."),
-        (.pasteCommand, "Type the full command",
-         "The whole expansion lands where you were working."),
-        (.copyName, "Copy to the clipboard",
-         "Nothing is typed anywhere. Paste it yourself with ⌘V. Needs no permission."),
+        (.pasteName, "Paste the alias name", "Best for terminals."),
+        (.pasteCommand, "Paste the full command", "Best when you want to edit the command first."),
+        (.copyName, "Copy", "Paste it yourself with ⌘V. No permission needed."),
     ]
 
     private var enterStep: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("You searched, you found it, you pressed Enter. Then what?")
+            Text("Choose what Enter does.")
                 .font(.system(size: 13, design: theme.bodyDesign))
                 .foregroundStyle(theme.dim)
 
@@ -515,8 +512,8 @@ struct OnboardingView: View {
                 Image(systemName: Typist.isTrusted ? "checkmark.circle.fill" : "hand.raised.fill")
                     .font(.system(size: 12))
                     .foregroundStyle(Typist.isTrusted ? .green : theme.accent)
-                Text(Typist.isTrusted ? "Accessibility is granted — typing works."
-                                      : "Typing into another app needs one permission")
+                Text(Typist.isTrusted ? "Accessibility granted."
+                                      : "Allow AliasBar to paste")
                     .font(.system(size: 12.5, weight: .semibold))
                     .foregroundStyle(theme.text)
             }
@@ -524,20 +521,20 @@ struct OnboardingView: View {
             if !Typist.isTrusted {
                 VStack(alignment: .leading, spacing: 5) {
                     calloutLine(symbol: "checkmark", tint: .green,
-                                text: "What it does: sends a single ⌘V into the app you were just in. That is the entire use.")
+                                text: "AliasBar sends ⌘V to the app you were using.")
                     calloutLine(symbol: "xmark", tint: .orange,
-                                text: "What it never does: read, watch, or record your keystrokes. The shortcut uses a separate API that only reports its own combination.")
+                                text: "AliasBar cannot read or record your typing.")
                 }
 
                 HStack(spacing: 8) {
-                    ThemedButton(axPrompted ? "Show the macOS prompt again" : "Allow — show the macOS prompt") {
+                    ThemedButton(axPrompted ? "Show the macOS prompt again" : "Allow pasting") {
                         axPrompted = true
                         Typist.requestTrust()
                     }
                     .accessibilityLabel(axPrompted
                                         ? "Show the macOS Accessibility permission prompt again"
                                         : "Allow typing by showing the macOS Accessibility permission prompt")
-                    Text("Until it’s granted, Enter copies instead — nothing breaks.")
+                    Text("Until then, Enter copies instead.")
                         .font(.system(size: 10.5))
                         .foregroundStyle(theme.faint)
                 }
@@ -567,7 +564,7 @@ struct OnboardingView: View {
 
     private var fileStep: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("AliasBar reads your aliases and functions from your shell config. It never writes to it unless you edit an alias yourself.")
+            Text("AliasBar reads your shell config. It writes only when you save an alias.")
                 .font(.system(size: 13, design: theme.bodyDesign))
                 .foregroundStyle(theme.dim)
                 .fixedSize(horizontal: false, vertical: true)
@@ -576,8 +573,8 @@ struct OnboardingView: View {
                 Text(ZshrcParser.displayPath)
                     .font(.system(size: 15, weight: .medium, design: .monospaced))
                     .foregroundStyle(theme.text)
-                SettingsRow("Elsewhere?",
-                            hint: "Stored in preferences, so it survives a reboot and applies when AliasBar launches at login.") {
+                SettingsRow("Use another file",
+                            hint: "AliasBar remembers this file.") {
                     HStack(spacing: 8) {
                         TextField("~/.zshrc", text: Binding(
                             get: { settings.rcPathOverride ?? "" },
@@ -600,7 +597,7 @@ struct OnboardingView: View {
                 }
             }
 
-            NoticeText("Usage counts come from ~/.zsh_history, read locally and never sent anywhere.",
+            NoticeText("AliasBar reads usage counts from ~/.zsh_history on this Mac.",
                        tone: .info)
         }
     }
@@ -626,7 +623,7 @@ struct OnboardingView: View {
     /// closed without reaching this step.
     private var updatesStep: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("AliasBar can check its release feed in the background and offer new versions when they appear. Nothing installs without asking you first.")
+            Text("AliasBar can check for updates. You choose when to install them.")
                 .font(.system(size: 13, design: theme.bodyDesign))
                 .foregroundStyle(theme.dim)
                 .fixedSize(horizontal: false, vertical: true)
@@ -639,7 +636,7 @@ struct OnboardingView: View {
                 }
             }
 
-            NoticeText("The check sends nothing about you or your aliases — it only fetches the release feed. Downloads happen only when you accept an update.",
+            NoticeText("Update checks do not include your aliases or personal data.",
                        tone: .info)
         }
     }
@@ -648,7 +645,7 @@ struct OnboardingView: View {
 
     private var lookStep: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text("Three looks, drawn live. One click and you’re done — or open the same controls Settings has and make your own.")
+            Text("Choose a preset or make your own.")
                 .font(.system(size: 13, design: theme.bodyDesign))
                 .foregroundStyle(theme.dim)
                 .fixedSize(horizontal: false, vertical: true)
@@ -694,8 +691,8 @@ struct OnboardingView: View {
     private var inlineTokenEditor: some View {
         VStack(alignment: .leading, spacing: 16) {
             SettingsGroup("Colour") {
-                SettingsRow("Ground",
-                            hint: "Text, rules, and the greys are computed from this and the accent, at contrast ratios that hold whatever you pick.") {
+                SettingsRow("Background",
+                            hint: "Sets the main background color.") {
                     ColourWell(colour: binding(\.ground))
                 }
                 SettingsRow("Accent", hint: nil) { ColourWell(colour: binding(\.accent)) }
@@ -738,7 +735,7 @@ struct OnboardingView: View {
                 }
             }
 
-            SettingsGroup("Keep it") {
+            SettingsGroup("Save preset") {
                 HStack(spacing: 8) {
                     if savingPreset {
                         TextField("Name", text: $newPresetName)
@@ -763,7 +760,7 @@ struct OnboardingView: View {
                             newPresetName = suggestedPresetName
                         }
                         .accessibilityLabel("Save appearance as a preset")
-                        Text("Named looks appear alongside the built-in three, here and in Settings.")
+                        Text("Saved presets appear here and in Settings.")
                             .font(.system(size: 10.5))
                             .foregroundStyle(theme.faint)
                     }
@@ -929,7 +926,7 @@ struct AccessibilityRegrantBanner: ViewModifier {
                         .font(.system(size: 11))
                         .foregroundStyle(.orange)
                         .padding(.top, 1)
-                    Text("macOS dropped AliasBar’s permission to type — it does this when the app is rebuilt. Enter copies instead until it’s back: flip AliasBar off and on under Accessibility.")
+                    Text("AliasBar lost Accessibility permission. Enter will copy until you re-enable AliasBar in System Settings.")
                         .font(.system(size: 10.5))
                         .foregroundStyle(theme.dim)
                         .fixedSize(horizontal: false, vertical: true)

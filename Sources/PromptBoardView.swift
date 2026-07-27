@@ -27,8 +27,7 @@ struct PromptBoardView: View {
             if prompts.isEmpty {
                 EmptyStateView(symbol: "text.book.closed",
                                title: "No prompts yet",
-                               hint: "Save one to ~/.aliasbar/prompts to see it here. ⇥ goes back to your aliases.\n"
-                                   + AppState.promptLibraryEmptyHint)
+                               hint: "Press ⌘N to create one. Press ⇥ for aliases.")
             } else {
                 ScrollView {
                     LazyVGrid(columns: columns, spacing: 6) {

@@ -49,7 +49,7 @@ enum AuditPrompt {
     /// document is a prompt for an AI reader, not a machine-parsed format.
     private static func manifestLine(for prompt: Prompt) -> String {
         let description = prompt.description ?? "(no description)"
-        return "- \(prompt.name) — \(description) — \(digest(of: prompt.body))"
+        return "- \(prompt.name): \(description). \(digest(of: prompt.body))"
     }
 
     private static func digest(of body: String) -> String {

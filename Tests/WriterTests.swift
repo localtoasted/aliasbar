@@ -6017,7 +6017,7 @@ check("manifest line includes the description",
 check("manifest line includes a digest of the body",
       libraryPrompt.contains("Summarize what shipped yesterday"))
 check("a prompt with no description gets a placeholder, not a blank",
-      libraryPrompt.contains("deploy-checklist — (no description)"))
+      libraryPrompt.contains("deploy-checklist: (no description)."))
 check("a body longer than the digest cap is truncated with an ellipsis",
       libraryPrompt.contains("…"))
 check("instructions tell the agent never to re-suggest what exists",
@@ -6043,7 +6043,7 @@ for name in ["alpha", "beta-thing", "gamma_3"] {
     let p = Prompt(name: name, frontmatter: nil, body: "body for \(name)")
     let generated = AuditPrompt.generate(library: [p], ending: .web)
     check("library containing \"\(name)\" always yields its manifest line",
-          generated.contains("- \(name) —"))
+          generated.contains("- \(name):"))
 }
 
 // ---------------------------------------------------------------------------
@@ -6913,7 +6913,7 @@ check("the hint is queued, not shown mid-delivery — the copy's own toast is st
 
 hintState.prepareForShow()
 check("the queued hint is promoted into toast the next time the window opens",
-      hintState.toast == "Want the same for your AI prompts? ⌘I")
+      hintState.toast == "Press ⇥ for prompts.")
 
 hintState.perform(.copyName, on: hintEntry)
 check("a second alias recall after the flag is set queues no further hint — the ordinary copy toast shows",

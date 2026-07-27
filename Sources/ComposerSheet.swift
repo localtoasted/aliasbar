@@ -200,7 +200,7 @@ struct ComposerSheet: View {
                 .foregroundStyle(theme.text)
         }
         .toggleStyle(.checkbox)
-        .help("The popover is always on — this only controls whether it also becomes a Claude Code slash command.")
+        .help("The prompt stays in AliasBar. Turn this on to add a Claude Code slash command.")
     }
 
     @ViewBuilder

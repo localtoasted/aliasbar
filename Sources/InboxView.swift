@@ -30,8 +30,8 @@ struct InboxView: View {
             ScrollView {
                 if rows.isEmpty {
                     EmptyStateView(symbol: "tray",
-                                   title: "Nothing pending",
-                                   hint: "Nothing to review right now.\n" + AppState.promptLibraryEmptyHint)
+                                   title: "No prompts to review",
+                                   hint: AppState.promptLibraryEmptyHint)
                         .padding(.top, 40)
                 } else {
                     LazyVStack(spacing: 1) {
@@ -159,7 +159,7 @@ private struct ItemDetail: View {
                     Button {
                         state.markInboxItemViewed(file: file, index: index)
                     } label: {
-                        Label("I've read the full item", systemImage: "checkmark.seal")
+                        Label("I reviewed this prompt", systemImage: "checkmark.seal")
                             .font(.system(size: 11.5, weight: .semibold))
                     }
                     .buttonStyle(.plain)
@@ -321,7 +321,7 @@ private struct ItemDetail: View {
             .help(item.isFlagged && !review.viewedInFull.contains(index)
                   ? "Flagged items have to be viewed in full before they can be approved."
                   : "")
-            actionButton("Edit before approving", "pencil", prominent: false, enabled: true) {
+            actionButton("Edit and approve", "pencil", prominent: false, enabled: true) {
                 state.editInboxItem(file: file, index: index)
             }
             actionButton("Discard", "trash", prominent: false, enabled: true) {

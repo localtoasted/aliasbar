@@ -70,7 +70,7 @@ struct SnippetManageView: View {
         }
         .buttonStyle(.plain)
         .padding(8)
-        .help("New snippet — ⌘N")
+        .help("New snippet. Press ⌘N.")
     }
 
     private func snippetRow(_ snippet: Snippet, index: Int) -> some View {

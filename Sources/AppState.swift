@@ -642,7 +642,7 @@ final class AppState: ObservableObject {
             // so this can only ever describe *this* Mac, never claim anything about
             // any other machine the same prompt file might also live on.
             case .stale:
-                return "Usage is tracked per machine. This is only worth a look, not a delete — the prompt may simply be used elsewhere."
+                return "Usage is tracked per Mac. You may use this prompt elsewhere."
             case .builtinCollision:
                 return "\(BuiltinSlashCommands.version) already defines this as a built-in command. Installing anyway still works; it just shadows the builtin."
             case .duplicateName(let other):
@@ -2018,7 +2018,7 @@ final class AppState: ObservableObject {
               !settings.hasShownPromptHint
         else { return }
         settings.hasShownPromptHint = true
-        pendingPromptHint = "Want the same for your AI prompts? ⌘I"
+        pendingPromptHint = "Press ⇥ for prompts."
     }
 
     /// A history command goes out by the same route an alias command would.
@@ -2053,7 +2053,7 @@ final class AppState: ObservableObject {
                 // went away in the same frame the explanation was written to it, and the
                 // system prompt that appeared instead had no visible cause. When we could
                 // not do what was asked, the window stays up and says so.
-                errorMessage = "Needs Accessibility to paste — copied instead, ⌘V to use it."
+                errorMessage = "Accessibility is off. Copied instead; press ⌘V to paste."
                 Typist.requestTrust()
                 return
             }

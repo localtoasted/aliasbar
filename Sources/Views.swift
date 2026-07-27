@@ -202,7 +202,7 @@ struct RootView: View {
                                 in: RoundedRectangle(cornerRadius: theme.cornerRadius))
                     .overlay(RoundedRectangle(cornerRadius: theme.cornerRadius)
                         .strokeBorder(theme.accent.opacity(0.28), lineWidth: 1))
-                    .help("Searching your shell history — ⌘H to go back")
+                    .help("Searching shell history. Press ⌘H to return.")
                 }
 
                 // Clipboard's counterpart to the History badge above — same reasoning,
@@ -221,7 +221,7 @@ struct RootView: View {
                                 in: RoundedRectangle(cornerRadius: theme.cornerRadius))
                     .overlay(RoundedRectangle(cornerRadius: theme.cornerRadius)
                         .strokeBorder(theme.accent.opacity(0.28), lineWidth: 1))
-                    .help("Browsing your clipboard history — ⌘K to go back")
+                    .help("Browsing clipboard history. Press ⌘K to return.")
                 }
 
                 // A subset bucket needs a badge in FIND and BOARD because hiding
@@ -242,7 +242,7 @@ struct RootView: View {
                                 in: RoundedRectangle(cornerRadius: theme.cornerRadius))
                     .overlay(RoundedRectangle(cornerRadius: theme.cornerRadius)
                         .strokeBorder(theme.accent.opacity(0.28), lineWidth: 1))
-                    .help("Showing only \(state.bucket.label.lowercased()) — ⌘↑↓ to change, esc for all")
+                    .help("Showing \(state.bucket.label.lowercased()). Press ⌘↑↓ to change or Esc for all.")
                 }
 
                 // The inference copy, FIND only — it explains the dialect boost, which
@@ -254,7 +254,7 @@ struct RootView: View {
                         .foregroundStyle(theme.faint)
                         .lineLimit(1)
                         .layoutPriority(-1)
-                        .help("Guessed only from the app you switched from — never what's on its screen. ⇥ flips between shell and prompt.")
+                        .help("Based on the previous app. AliasBar cannot see its content. Press ⇥ to switch.")
                 }
 
                 Spacer(minLength: 6)
@@ -307,7 +307,7 @@ struct RootView: View {
         switch state.mode {
         case .find:
             return state.bucket == .all
-                ? "Search aliases and functions"
+                ? "Search aliases and prompts"
                 : "Search \(state.bucket.label.lowercased())"
         case .board: return "Type to highlight"
         case .manage:
@@ -332,7 +332,7 @@ struct RootView: View {
             )
             .contentShape(Rectangle())
             .live { state.mode = mode; state.selection = 0 }
-            .help("\(mode.label) — ⌘\(mode == .find ? "1" : mode == .board ? "2" : "3")")
+            .help("\(mode.label). Press ⌘\(mode == .find ? "1" : mode == .board ? "2" : "3").")
     }
 
     // MARK: Footer
@@ -418,7 +418,7 @@ struct RootView: View {
             }
             .liveButton()
             .foregroundStyle(theme.dim)
-            .help("Settings — ⌘,")
+            .help("Settings. Press ⌘,.")
         }
         .frame(height: 16)
         .padding(.horizontal, 12)
@@ -548,7 +548,7 @@ private struct TeachingEmptyState: View {
                 Image(systemName: "doc.text.magnifyingglass")
                     .font(.system(size: 22, weight: .light))
                     .foregroundStyle(theme.faint)
-                Text("Nothing in \(ZshrcParser.displayPath) yet")
+                Text("No aliases found")
                     .font(.system(size: 12.5, weight: .medium))
                     .foregroundStyle(theme.dim)
             }
@@ -585,7 +585,7 @@ private struct TeachingEmptyState: View {
                         Text("⌘N")
                             .font(.system(size: 10.5, weight: .bold, design: .monospaced))
                             .foregroundStyle(theme.onAccent.opacity(0.85))
-                        Text("Write your first alias")
+                        Text("Create an alias")
                             .font(.system(size: 11.5, weight: .semibold))
                             .foregroundStyle(theme.onAccent)
                     }
@@ -596,7 +596,7 @@ private struct TeachingEmptyState: View {
                 .liveButton()
 
                 if let hotkey {
-                    Text("\(hotkey) summons this window from anywhere.")
+                    Text("Press \(hotkey) to open AliasBar.")
                         .font(.system(size: 10.5))
                         .foregroundStyle(theme.faint)
                 }
@@ -636,7 +636,7 @@ private struct NoMatchView: View {
                     Image(systemName: "plus.circle.fill")
                         .font(.system(size: 13, weight: .semibold))
                         .foregroundStyle(theme.accent)
-                    Text(isPrompt ? "Create a prompt named" : "Create an alias named")
+                    Text(isPrompt ? "Create prompt" : "Create alias")
                         .font(.system(size: 12.5, weight: .medium))
                         .foregroundStyle(theme.text)
                     Text(query)
@@ -664,7 +664,7 @@ private struct NoMatchView: View {
                 .contentShape(Rectangle())
                 .live { create() }
 
-                Text("The Composer opens with the name filled in.")
+                Text("AliasBar fills in the name.")
                     .font(.system(size: 10.5))
                     .foregroundStyle(theme.faint)
             }
@@ -708,9 +708,9 @@ struct FindView: View {
             if commands.isEmpty {
                 EmptyStateView(symbol: "clock.arrow.circlepath",
                                title: state.query.isEmpty
-                                   ? "Nothing readable in \(HistoryScanner.path.hasSuffix(".zsh_history") ? "~/.zsh_history" : "your history file")"
-                                   : "Nothing you have run matches \"\(state.query)\"",
-                               hint: "⌘H goes back to your aliases.")
+                                   ? "No shell history found"
+                                   : "No history matches \"\(state.query)\"",
+                               hint: "Press ⌘H to return.")
             } else {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 3) {
@@ -1151,8 +1151,8 @@ struct BoardView: View {
                                    hint: "Esc shows everything again.")
                 } else {
                     EmptyStateView(symbol: "square.grid.3x3",
-                                   title: "Nothing to show",
-                                   hint: "⌘N writes your first alias.")
+                                   title: "No aliases yet",
+                                   hint: "Press ⌘N to create one.")
                 }
             } else {
                 ScrollView {
@@ -1351,7 +1351,7 @@ struct ManageView: View {
             .background(theme.accent, in: RoundedRectangle(cornerRadius: theme.cornerRadius + 1))
         }
         .buttonStyle(.plain)
-        .help("\(label) — ⌘N")
+        .help("\(label). Press ⌘N.")
     }
 
     /// The one thing both sidebar shapes share: a small, constant reminder that ⇥
@@ -1360,13 +1360,13 @@ struct ManageView: View {
     private var dialectFlipHint: some View {
         HStack(spacing: 4) {
             Text("⇥").font(.system(size: 9.5, weight: .bold, design: .monospaced))
-            Text(state.dialect == .prompt ? "shell aliases" : "prompts")
+            Text(state.dialect == .prompt ? "aliases" : "prompts")
                 .font(.system(size: 9.5))
         }
         .foregroundStyle(theme.faint)
         .padding(.horizontal, 2)
         .padding(.top, 2)
-        .help("⇥ swaps between the shell and prompt sidebars")
+        .help("Press ⇥ to switch between aliases and prompts.")
     }
 
     private func promptBucketRow(_ bucket: PromptBucket) -> some View {
@@ -1568,9 +1568,9 @@ struct ManageView: View {
                                    : "Nothing in \(state.bucket.label.lowercased())",
                                hint: state.bucket == .neverRun
                                    ? (settings.historyUsageRankingEnabled
-                                       ? "Everything you've defined has been used at least once."
-                                       : "History-based usage tracking is off — turn it on in Settings to see what you've never run.")
-                                   : "Pick another bucket on the left.")
+                                       ? "No unused aliases."
+                                       : "Turn on usage ranking in Settings to find unused aliases.")
+                                   : "Choose another section.")
             }
             .frame(maxWidth: .infinity)
         }
@@ -1584,11 +1584,11 @@ struct ManageView: View {
             // to be conditioned on the setting too — otherwise every alias reads as
             // never run, when the truth is simply that nothing was counted.
             metaRow("Runs", settings.historyUsageRankingEnabled
-                    ? (entry.uses == 0 ? "never, per your shell history" : "\(entry.uses)×")
-                    : "usage tracking is off in Settings")
+                    ? (entry.uses == 0 ? "No recorded uses" : "\(entry.uses)×")
+                    : "Usage tracking off")
             metaRow("Managed", entry.entry.managed
-                    ? "yes, AliasBar can edit this"
-                    : "no, hand-written")
+                    ? "Editable"
+                    : "Read-only")
         }
     }
 
@@ -1640,7 +1640,7 @@ struct RemovalConfirmSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             VStack(alignment: .leading, spacing: 6) {
-                Text("This removes more than one thing")
+                Text("This deletes multiple lines")
                     .font(.system(size: 15, weight: .semibold, design: theme.bodyDesign))
                     .foregroundStyle(theme.text)
                 Text(blurb)
@@ -1671,7 +1671,7 @@ struct RemovalConfirmSheet: View {
                     .strokeBorder(theme.rule.opacity(0.5), lineWidth: 1)
             )
 
-            Text("A timestamped backup is written either way, so this is reversible.")
+            Text("AliasBar creates a backup first.")
                 .font(.system(size: 11, design: theme.bodyDesign))
                 .foregroundStyle(theme.faint)
 

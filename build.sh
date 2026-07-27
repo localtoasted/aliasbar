@@ -99,6 +99,22 @@ cp "${BUILD_DIR}/${APP_NAME}" "${APP_BUNDLE}/Contents/MacOS/${APP_NAME}"
 mkdir -p "${APP_BUNDLE}/Contents/Frameworks"
 cp -R "${SPARKLE_DIR}/Sparkle.framework" "${APP_BUNDLE}/Contents/Frameworks/"
 
+echo "==> Building app icon"
+ICON_SOURCE="${PROJECT_DIR}/Assets/AppIcon.png"
+ICONSET="${BUILD_DIR}/AliasBar.iconset"
+mkdir -p "${APP_BUNDLE}/Contents/Resources" "${ICONSET}"
+for spec in \
+    "16 icon_16x16.png" "32 icon_16x16@2x.png" \
+    "32 icon_32x32.png" "64 icon_32x32@2x.png" \
+    "128 icon_128x128.png" "256 icon_128x128@2x.png" \
+    "256 icon_256x256.png" "512 icon_256x256@2x.png" \
+    "512 icon_512x512.png" "1024 icon_512x512@2x.png"; do
+    size="${spec%% *}"
+    name="${spec#* }"
+    sips -z "${size}" "${size}" "${ICON_SOURCE}" --out "${ICONSET}/${name}" >/dev/null
+done
+iconutil -c icns "${ICONSET}" -o "${APP_BUNDLE}/Contents/Resources/AliasBar.icns"
+
 cat > "${APP_BUNDLE}/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -112,6 +128,8 @@ cat > "${APP_BUNDLE}/Contents/Info.plist" <<'PLIST'
     <string>AliasBar</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
+    <key>CFBundleIconFile</key>
+    <string>AliasBar.icns</string>
     <key>CFBundleShortVersionString</key>
     <string>0.2</string>
     <key>CFBundleVersion</key>
@@ -165,7 +183,17 @@ sign_bundle() {
     codesign --force --options runtime -s "${identity}" "${fw}/Versions/B/Autoupdate"
     codesign --force --options runtime -s "${identity}" "${fw}/Versions/B/Updater.app"
     codesign --force --options runtime -s "${identity}" "${fw}"
-    codesign --force --options runtime -s "${identity}" "${APP_BUNDLE}"
+    # A self-signed or ad-hoc identity has no Apple Team ID. Hardened Runtime's
+    # library validation would therefore reject Sparkle even after every nested
+    # component is signed with that same local identity. Disable it only for local
+    # builds; Developer ID release builds keep library validation enabled.
+    if [ "${identity}" = "-" ] || [[ "${identity}" == AliasBar\ Local\ Signing* ]]; then
+        codesign --force --options runtime \
+            --entitlements "${PROJECT_DIR}/tools/local-signing.entitlements" \
+            -s "${identity}" "${APP_BUNDLE}"
+    else
+        codesign --force --options runtime -s "${identity}" "${APP_BUNDLE}"
+    fi
 }
 
 if security find-certificate -c "${SIGN_IDENTITY}" >/dev/null 2>&1; then

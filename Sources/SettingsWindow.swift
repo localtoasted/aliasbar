@@ -226,8 +226,8 @@ struct SettingsView: View {
 
     private var behaviourSection: some View {
         VStack(alignment: .leading, spacing: 22) {
-            SettingsGroup("When you pick an alias") {
-                SettingsRow("Enter", hint: "The one that matters. You are usually about to type the alias yourself.") {
+            SettingsGroup("Alias actions") {
+                SettingsRow("Enter", hint: "Choose what Enter does.") {
                     ThemedPicker(selection: $settings.enterAction,
                                  options: EnterAction.allCases,
                                  label: { $0.label })
@@ -240,9 +240,9 @@ struct SettingsView: View {
                 // "Keep it open" there would be a lie. The control greys out instead
                 // of disappearing — the setting is remembered and applies again the
                 // moment Enter goes back to copying.
-                SettingsRow("Afterwards",
+                SettingsRow("After copying",
                             hint: settings.enterAction.needsAccessibility
-                                ? "Pasting always closes the window — the paste can only land once the app you were in is front again. This choice applies to the copy actions."
+                                ? "Pasting closes AliasBar so focus returns to the previous app."
                                 : nil) {
                     ThemedSegments(selection: $settings.afterAction,
                                    options: AfterAction.allCases,
@@ -250,7 +250,7 @@ struct SettingsView: View {
                         .disabled(settings.enterAction.needsAccessibility)
                         .opacity(settings.enterAction.needsAccessibility ? 0.45 : 1)
                 }
-                SettingsRow("⌘⏎", hint: "Always the other half of the pair, so both are one keystroke away.") {
+                SettingsRow("⌘⏎", hint: "Uses the alternate action.") {
                     Text(settings.enterAction.secondary.label)
                         .font(.system(size: 12))
                         .foregroundStyle(theme.faint)
@@ -258,7 +258,7 @@ struct SettingsView: View {
             }
 
             SettingsGroup("Opening AliasBar") {
-                SettingsRow("Shortcut", hint: "Uses the system hotkey API, so AliasBar is told only that this one combination fired and never sees any other keystroke. No permission needed.") {
+                SettingsRow("Shortcut", hint: "AliasBar sees this shortcut only. No permission needed.") {
                     HStack(spacing: 8) {
                         Button {
                             recordingHotkey.toggle()
@@ -267,7 +267,7 @@ struct SettingsView: View {
                                 recordingHotkey = false
                                 HotkeyRecorder.shared.isRecording = false
                                 guard combo.isRegisterable else {
-                                    hotkeyError = "Include ⌘ or ⌃. macOS no longer accepts shortcuts built only from ⌥ and ⇧."
+                                    hotkeyError = "Include ⌘ or ⌃."
                                     return
                                 }
                                 // Register first, persist only on success. Storing the
@@ -309,7 +309,7 @@ struct SettingsView: View {
                 if let hotkeyError {
                     NoticeText(hotkeyError, tone: .warning)
                 }
-                SettingsRow("Appears", hint: settings.presentationStyle.detail) {
+                SettingsRow("Window position", hint: settings.presentationStyle.detail) {
                     ThemedPicker(selection: $settings.presentationStyle,
                                  options: PresentationStyle.allCases,
                                  label: { $0.label })
@@ -362,7 +362,7 @@ struct SettingsView: View {
                     // Says what a checkmark's absence would otherwise leave the user to
                     // infer: their changes are live but unnamed, and picking another
                     // preset will lose them.
-                    NoticeText("Edited — not saved to a preset yet.", tone: .info)
+                    NoticeText("Unsaved preset changes.", tone: .info)
                 }
                 HStack(spacing: 8) {
                     ThemedButton(savingPreset ? "Cancel" : "Save as…") {
@@ -396,7 +396,7 @@ struct SettingsView: View {
                     Spacer(minLength: 0)
                     ThemedButton("Copy") {
                         PasteboardBroker.write(transient: PresetTransfer.export(settings.appearance))
-                        transferNotice = "Copied this look to the clipboard."
+                        transferNotice = "Preset copied."
                     }
                     ThemedButton("Paste") { importFromClipboard() }
                 }
@@ -407,8 +407,8 @@ struct SettingsView: View {
             }
 
             SettingsGroup("Colour") {
-                SettingsRow("Ground",
-                            hint: "Everything else — text, rules, the dim and faint greys — is computed from this and the accent, at contrast ratios that hold whatever you pick.") {
+                SettingsRow("Background",
+                            hint: "Sets the main background color.") {
                     ColourWell(colour: binding(\.ground))
                 }
                 SettingsRow("Accent", hint: nil) { ColourWell(colour: binding(\.accent)) }
@@ -416,10 +416,10 @@ struct SettingsView: View {
                 SettingsRow("Function colour", hint: nil) {
                     ColourWell(colour: binding(\.functionTint))
                 }
-                SettingsRow("Follow macOS",
+                SettingsRow("Match macOS appearance",
                             hint: settings.appearance.darkGround == nil
-                                ? "This look has one ground, so it stays as it is whichever appearance macOS is in."
-                                : "Switches to this look's second ground when macOS is dark.") {
+                                ? "This preset has one appearance."
+                                : "Uses the dark background in Dark Mode.") {
                     ThemedToggle(isOn: $settings.followsSystemAppearance,
                                  label: settings.followsSystemAppearance ? "On" : "Off")
                         .disabled(settings.appearance.darkGround == nil)
@@ -427,7 +427,7 @@ struct SettingsView: View {
                 // Warning and danger colours are deliberately absent. If they were
                 // tintable someone would eventually make a warning invisible, and it
                 // would be the conflict one.
-                NoticeText("Warnings stay orange in every look. They are the one thing a colour choice must not be able to hide.", tone: .info)
+                NoticeText("Warnings always use orange.", tone: .info)
             }
 
             SettingsGroup("Type and shape") {
@@ -436,8 +436,7 @@ struct SettingsView: View {
                                    options: FontChoice.allCases,
                                    label: { $0.label })
                 }
-                SettingsRow("Alias names",
-                            hint: "System faces only. The faces these looks were drawn from are licensed and cannot ship inside an app.") {
+                SettingsRow("Item names", hint: "Uses system fonts.") {
                     ThemedSegments(selection: binding(\.nameFont),
                                    options: FontChoice.allCases,
                                    label: { $0.label })
@@ -452,8 +451,7 @@ struct SettingsView: View {
                             .frame(width: 20, alignment: .trailing)
                     }
                 }
-                SettingsRow("Translucency",
-                            hint: "Zero is an opaque window. Above that the desktop shows through, which suits a look built on glass and fights one built on paper.") {
+                SettingsRow("Translucency", hint: "At 0%, the window is opaque.") {
                     HStack(spacing: 8) {
                         Slider(value: binding(\.translucency), in: 0...1)
                             .frame(width: 160)
@@ -467,7 +465,7 @@ struct SettingsView: View {
 
             SettingsGroup("Motion") {
                 SettingsRow("Animation",
-                            hint: "Reduced keeps fades and drops everything that moves. macOS's own Reduce Motion is obeyed on top of this, whatever it says here.") {
+                            hint: "Reduced keeps fades but removes movement. macOS Reduce Motion takes priority.") {
                     ThemedSegments(selection: $settings.motionLevel,
                                    options: MotionLevel.allCases,
                                    label: { $0.label })
@@ -480,8 +478,7 @@ struct SettingsView: View {
                                    options: BoardDensity.allCases,
                                    label: { $0.label })
                 }
-                SettingsRow("Results in Find",
-                            hint: "Find caps results on purpose. Past six or so you are reading a list instead of recognising an answer, which is slower than typing one more character.") {
+                SettingsRow("Results in Find", hint: "Maximum results shown while searching.") {
                     Stepper(value: $settings.resultLimit, in: 3...12) {
                         Text("\(settings.resultLimit)")
                             .font(.system(size: 13, weight: .semibold, design: .monospaced))
@@ -497,9 +494,9 @@ struct SettingsView: View {
 
     private var contentSection: some View {
         VStack(alignment: .leading, spacing: 22) {
-            SettingsGroup("Shell config") {
+            SettingsGroup("Aliases") {
                 SettingsRow("File",
-                            hint: "Stored in preferences, so it survives a reboot and applies when AliasBar launches at login.") {
+                            hint: "AliasBar remembers this file.") {
                     HStack(spacing: 8) {
                         TextField("~/.zshrc", text: Binding(
                             get: { settings.rcPathOverride ?? "" },
@@ -521,7 +518,7 @@ struct SettingsView: View {
                 NoticeText("Reading \(ZshrcParser.displayPath)", tone: .info)
             }
 
-            SettingsGroup("What to show") {
+            SettingsGroup("Visible items") {
                 SettingsRow("Include", hint: nil) {
                     HStack(spacing: 8) {
                         ThemedToggle(isOn: $settings.showAliases, label: "Aliases")
@@ -541,7 +538,7 @@ struct SettingsView: View {
             }
 
             SettingsGroup("Usage data") {
-                NoticeText("Counts come from ~/.zsh_history, read locally and never written to or sent anywhere. They power ranking and the Never run bucket.",
+                NoticeText("AliasBar reads ~/.zsh_history on this Mac to rank aliases and show unused ones.",
                            tone: .info)
             }
         }
@@ -551,24 +548,24 @@ struct SettingsView: View {
 
     private var clipboardSection: some View {
         VStack(alignment: .leading, spacing: 22) {
-            SettingsGroup("Watching") {
-                SettingsRow("Monitor the clipboard",
-                            hint: "Watching starts only when you turn this on. Secret-shaped clips — tokens, keys, passwords — are recognized and quarantined in memory only; they never touch disk, synced or not.") {
+            SettingsGroup("Clipboard monitoring") {
+                SettingsRow("Monitor clipboard",
+                            hint: "Sensitive clips stay in memory and never sync or save to disk.") {
                     ThemedToggle(isOn: $settings.clipboardMonitoring,
                                  label: settings.clipboardMonitoring ? "On" : "Off")
                 }
             }
 
-            SettingsGroup("Saving to disk") {
-                SettingsRow("Remember clips between launches",
-                            hint: "Off by default. When on, up to 200 recent clips are written to ~/.aliasbar/clips.json so they survive quitting AliasBar. Quarantined clips are never included — this only ever holds what already passed the same secret-shape check the clipboard source itself uses. Turning it back off deletes the stored file and tombstones anything already mirrored into the sync file.") {
+            SettingsGroup("Clipboard history") {
+                SettingsRow("Keep history after quitting",
+                            hint: "Saves up to 200 clips in ~/.aliasbar/clips.json. Sensitive clips are excluded. Turning this off deletes the saved history.") {
                     ThemedToggle(isOn: $settings.clipboardPersistence,
                                  label: settings.clipboardPersistence ? "On" : "Off")
                 }
-                SettingsRow("Include in the sync file",
+                SettingsRow("Sync clipboard history",
                             hint: settings.clipboardPersistence
-                                ? "Mirrors those same clips into the Sync file (Settings > Sync), if one is configured. That file may live in iCloud Drive, Dropbox, or a dotfiles repo — only turn this on if you're comfortable with clipboard history living wherever that file does."
-                                : "Needs \"Remember clips between launches\" on first — there is nothing to mirror otherwise.") {
+                                ? "Adds saved clips to your sync file. Its folder may sync through another service."
+                                : "Turn on ‘Keep history after quitting’ first.") {
                     ThemedToggle(isOn: $settings.clipboardInSyncFile,
                                  label: settings.clipboardInSyncFile ? "On" : "Off")
                         .disabled(!settings.clipboardPersistence)
@@ -576,8 +573,8 @@ struct SettingsView: View {
                 }
             }
 
-            SettingsGroup("Quarantine") {
-                NoticeText("Quarantine isn't configurable. Concealed pasteboard content (from password managers) and anything that looks like a secret is held in memory for about 90 seconds — long enough to notice a mistaken copy — and shown only as a reason (\"GitHub token\", \"high-entropy string\"), never as content. It is never written to disk, synced or not, regardless of the settings above.",
+            SettingsGroup("Sensitive clips") {
+                NoticeText("AliasBar hides passwords, tokens, and other sensitive clips. It keeps only the reason in memory for about 90 seconds, then removes it. Sensitive content never reaches disk or sync.",
                            tone: .info)
             }
         }
@@ -587,9 +584,9 @@ struct SettingsView: View {
 
     private var syncSection: some View {
         VStack(alignment: .leading, spacing: 22) {
-            SettingsGroup("File sync") {
-                SettingsRow("Sync settings & presets",
-                            hint: "Off by default. Writes one JSON file at a path you choose — put it in iCloud Drive, Dropbox, or a dotfiles repo to carry your look and presets to another Mac.") {
+            SettingsGroup("Sync") {
+                SettingsRow("Sync settings and presets",
+                            hint: "Choose a JSON file in iCloud Drive, Dropbox, or a dotfiles repo.") {
                     ThemedToggle(isOn: Binding(
                         get: { settings.syncFileURL != nil },
                         set: { on in
@@ -620,7 +617,7 @@ struct SettingsView: View {
                     let conflicts = SettingsSync.conflictFiles(near: url)
                     if !conflicts.isEmpty {
                         HStack(alignment: .top, spacing: 8) {
-                            NoticeText("\(conflicts.count) conflict \(conflicts.count == 1 ? "copy" : "copies") saved next to the sync file. Nothing was lost — every version is still on disk.",
+                            NoticeText("\(conflicts.count) conflict \(conflicts.count == 1 ? "copy" : "copies") saved next to the sync file. All versions remain on disk.",
                                        tone: .warning)
                             ThemedButton("Reveal") {
                                 NSWorkspace.shared.activateFileViewerSelecting(conflicts)
@@ -630,12 +627,12 @@ struct SettingsView: View {
                 }
             }
 
-            SettingsGroup("What roams") {
-                NoticeText("Appearance — the current look and every saved preset — plus search scope, sort order, the startup view, the Find result limit, and the Enter / ⌘⏎ actions. Nothing else.",
+            SettingsGroup("Synced") {
+                NoticeText("Appearance, presets, search options, startup view, result limit, and Enter actions.",
                            tone: .info)
             }
-            SettingsGroup("What stays on this Mac") {
-                NoticeText("The sync file's own location, your shell config path, hotkey, launch-at-login, onboarding state, Accessibility permission, window placement, all three clipboard toggles, and usage counts. Clipboard history and snippets only ever enter this file through their own separate opt-in — turning this on does not turn either of those on.",
+            SettingsGroup("Not synced") {
+                NoticeText("File locations, hotkey, login setting, permissions, window position, clipboard options, and usage counts. Clipboard history and snippets require their own sync options.",
                            tone: .info)
             }
         }
@@ -645,9 +642,9 @@ struct SettingsView: View {
 
     private var expansionSection: some View {
         VStack(alignment: .leading, spacing: 22) {
-            SettingsGroup("Inline expansion") {
+            SettingsGroup("Text expansion") {
                 SettingsRow("Enable",
-                            hint: "Off by default. When on, a rolling buffer no longer than your longest snippet trigger is compared against your snippets in memory as you type — anywhere on the Mac, in any app. It is never written to disk, and while this is off, AliasBar isn't watching your typing at all.") {
+                            hint: "Expand snippet triggers as you type. AliasBar watches only enough text to match a trigger and does not save it.") {
                     ThemedToggle(isOn: $settings.inlineExpansionEnabled,
                                  label: settings.inlineExpansionEnabled ? "On" : "Off")
                         .onChange(of: settings.inlineExpansionEnabled) { enabled in
@@ -661,12 +658,12 @@ struct SettingsView: View {
                 if expansionMonitor.status != .off {
                     expansionStatusNotice
                 }
-                NoticeText("Never watched, even while this is on: any secure field — a password prompt, or anything else macOS itself marks as secure input. That's checked before every single keystroke and excluded automatically, with no setting of its own.",
+                NoticeText("AliasBar ignores password fields and other secure inputs.",
                            tone: .info)
             }
 
             SettingsGroup("Snippets") {
-                NoticeText("Triggers and templates live in Manage → Snippets — create, edit, and delete them there. A snippet can hold {{holes}} for the parts that change; typing the trigger with expansion on opens a small fill-in prompt for those before pasting.",
+                NoticeText("Create snippets in Manage → Snippets. Use {{holes}} for text you fill in each time.",
                            tone: .info)
             }
         }
@@ -712,9 +709,9 @@ struct SettingsView: View {
         case .active:
             return "Watching for triggers. Accessibility is granted."
         case .needsAccessibility:
-            return "Needs Accessibility to watch for triggers — until it's granted, nothing expands."
+            return "Allow Accessibility to use text expansion."
         case .tapFailed:
-            return "macOS stopped the watcher (this can happen after sleep, or a revoked permission). Turned back off — flip the toggle to try again."
+            return "Text expansion stopped. Turn it off and on to retry."
         case .off:
             return ""
         }
@@ -752,14 +749,14 @@ struct SettingsView: View {
                     Text("AliasBar")
                         .font(.system(size: 22, weight: .bold))
                         .foregroundStyle(theme.text)
-                    Text("Every alias and shell function, one keystroke away.")
+                    Text("Aliases and prompts, one shortcut away.")
                         .font(.system(size: 12))
                         .foregroundStyle(theme.dim)
                 }
             }
 
             SettingsGroup("Updates") {
-                SettingsRow("Automatic", hint: "Checks the AliasBar release feed in the background and offers new versions when they appear. Nothing installs without asking.") {
+                SettingsRow("Automatic", hint: "Checks for updates in the background. You choose when to install them.") {
                     ThemedToggle(isOn: $updater.automaticallyChecksForUpdates,
                                  label: "Check for updates automatically")
                 }
@@ -769,7 +766,7 @@ struct SettingsView: View {
             }
 
             SettingsGroup("Privacy") {
-                NoticeText("AliasBar reads your shell config and shell history for usage counts, and keeps its own files under ~/.aliasbar (prompts, usage, and — only if you turn on the toggles above — clipboard history and snippets). It checks whether ~/.claude exists, and writes there only when you install a prompt as a command. Nothing here is ever sent anywhere. Its only network access is checking for and downloading app updates — automatic checks are on unless you switch them off, downloads only when you accept an update.",
+                NoticeText("AliasBar keeps aliases, prompts, snippets, usage data, and clipboard history on this Mac. It writes Claude Code commands only when you install one. The only network access is checking for and downloading updates.",
                            tone: .info)
             }
 
