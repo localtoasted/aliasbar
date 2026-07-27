@@ -8,6 +8,11 @@ PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILD_DIR="${PROJECT_DIR}/.build/tests"
 mkdir -p "${BUILD_DIR}"
 
+# The tests call real delivery paths. Never let a trusted developer machine turn a
+# fixture into a system-clipboard write, Accessibility prompt, focus change, or
+# synthesized Command-V.
+export ALIASBAR_TEST_MODE=1
+
 # The test file uses top-level code, which Swift only allows in a file named main.swift.
 cp "${PROJECT_DIR}/Tests/WriterTests.swift" "${BUILD_DIR}/main.swift"
 

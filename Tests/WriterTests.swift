@@ -4,6 +4,10 @@ import Carbon.HIToolbox
 
 // Test harness for AliasWriter. Runs against scratch files only.
 
+// `test.sh` sets this before launch. Setting it here as well keeps a directly invoked
+// writer-tests binary just as isolated from the user's desktop.
+setenv(DesktopInteractionGuard.environmentKey, "1", 1)
+
 var failures = 0
 var passes = 0
 
@@ -16,6 +20,11 @@ func check(_ label: String, _ condition: Bool, _ detail: String = "") {
         print("  FAIL \(label)\(detail.isEmpty ? "" : " — \(detail)")")
     }
 }
+
+check("test mode blocks live desktop interaction", DesktopInteractionGuard.isActive)
+check("test mode reports Accessibility delivery unavailable", !Typist.isTrusted)
+check("test mode identifies the system pasteboard as blocked",
+      DesktopInteractionGuard.blocks(NSPasteboard.general))
 
 let sandbox = NSTemporaryDirectory() + "aliasbar-writer-tests-\(UUID().uuidString)"
 try! FileManager.default.createDirectory(atPath: sandbox, withIntermediateDirectories: true)
@@ -5907,6 +5916,8 @@ _ = PromptUsageCounter.recordUse(of: "beta", path: boardUsagePath)
 let boardSettings = AppSettings.shared
 let boardStore = EntryStore()
 let boardState = AppState(store: boardStore, settings: boardSettings)
+let boardPasteboard = FakePasteboard()
+boardState.pasteboard = boardPasteboard
 boardState.prepareForShow()
 boardState.mode = .board
 
@@ -5987,6 +5998,8 @@ let boardUsageBeforeEnter = PromptUsageCounter.all(path: boardUsagePath)["beta"]
 boardState.performBoardPrompt(boardBeta)
 check("Enter on a prompt card records a use through PromptUsageCounter",
       (PromptUsageCounter.all(path: boardUsagePath)["beta"]?.count ?? 0) == boardUsageBeforeEnter + 1)
+check("a Board prompt test delivers only to its fake pasteboard",
+      boardPasteboard.string(forType: .string) == boardBeta.body)
 
 // --- Column metrics differ per deck (cards are wider than keycaps) ---------------
 
@@ -8829,7 +8842,8 @@ do {
     // Startup load: a fresh monitor, built the way `App.swift` builds one after a
     // relaunch — seeded from `loadInitialHistory()` alone, before any `poll()`.
     let reloadedController = ClipboardPersistenceController(settings: settings, clipsPath: clipsPath)
-    let reloadedMonitor = ClipboardMonitor(initialHistory: reloadedController.loadInitialHistory())
+    let reloadedMonitor = ClipboardMonitor(pasteboard: trackedFakePasteboard(),
+                                           initialHistory: reloadedController.loadInitialHistory())
     check("a fresh monitor loads the persisted history at startup",
           reloadedMonitor.history.map(\.content) == onDisk.map(\.content))
 }

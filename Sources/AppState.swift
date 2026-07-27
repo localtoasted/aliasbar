@@ -874,6 +874,7 @@ final class AppState: ObservableObject {
     /// with the prompt's file selected; editing the prompt itself stays a job for
     /// whatever editor the user already keeps `~/.aliasbar/prompts` open in.
     func revealPromptFile(_ shortcut: Shortcut) {
+        guard !DesktopInteractionGuard.isActive else { return }
         guard shortcut.kind == .prompt else { return }
         let url = URL(fileURLWithPath: AppPaths.promptsDirectory).appendingPathComponent("\(shortcut.name).md")
         NSWorkspace.shared.activateFileViewerSelecting([url])

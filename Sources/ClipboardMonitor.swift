@@ -69,13 +69,16 @@ final class ClipboardMonitor {
         self.pollInterval = pollInterval
         // Whatever is already on the pasteboard at construction time is not a change
         // we witnessed — only a difference from here on counts as a capture.
-        self.lastChangeCount = pasteboard.changeCount
+        self.lastChangeCount = DesktopInteractionGuard.blocks(pasteboard)
+            ? 0
+            : pasteboard.changeCount
         self.history = initialHistory
         self.persistence = persistence
     }
 
     func start() {
         stop()
+        guard !DesktopInteractionGuard.blocks(pasteboard) else { return }
         timer = Timer.scheduledTimer(withTimeInterval: pollInterval, repeats: true) { [weak self] _ in
             self?.poll()
         }
@@ -96,6 +99,7 @@ final class ClipboardMonitor {
     /// One check for a pasteboard change. Called by the timer; also called directly
     /// by tests so a check never has to wait on `Timer` firing for real.
     func poll() {
+        guard !DesktopInteractionGuard.blocks(pasteboard) else { return }
         let count = pasteboard.changeCount
         guard count != lastChangeCount else { return }
         lastChangeCount = count

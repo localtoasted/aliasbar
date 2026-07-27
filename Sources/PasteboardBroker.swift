@@ -13,6 +13,25 @@ protocol PasteboardWriting: AnyObject {
 
 extension NSPasteboard: PasteboardWriting {}
 
+/// Hard boundary between automated tests and the live desktop.
+///
+/// The test binary exercises the same delivery methods as the app. On a developer Mac
+/// that has already granted Accessibility, those methods can otherwise write fixture
+/// text to the real clipboard and synthesize Command-V into whichever app is focused.
+/// `test.sh` sets this flag before the binary starts; direct test-binary runs set it in
+/// their top-level harness as a second line of defense.
+enum DesktopInteractionGuard {
+    static let environmentKey = "ALIASBAR_TEST_MODE"
+
+    static var isActive: Bool {
+        ProcessInfo.processInfo.environment[environmentKey] == "1"
+    }
+
+    static func blocks(_ pasteboard: PasteboardWriting) -> Bool {
+        isActive && pasteboard === NSPasteboard.general
+    }
+}
+
 /// The only place in the app that writes to a pasteboard.
 ///
 /// Every write records the `changeCount` it produced as our own. That is the one
@@ -46,6 +65,11 @@ enum PasteboardBroker {
     /// Writes `transient` to `pasteboard` and remembers the changeCount it produced.
     @discardableResult
     static func write(transient: String, to pasteboard: PasteboardWriting = NSPasteboard.general) -> Int {
+        // Tests may use any number of in-memory pasteboards, but the user's real one
+        // is never a valid test target.
+        guard !DesktopInteractionGuard.blocks(pasteboard) else {
+            return 0
+        }
         pasteboard.clearContents()
         pasteboard.setString(transient, forType: .string)
         let count = pasteboard.changeCount
@@ -82,7 +106,8 @@ enum PasteboardBroker {
     /// Captures `pasteboard`'s current string content, to hand to `restoreUserContent`
     /// once whatever transient write follows is done with it.
     static func snapshot(of pasteboard: PasteboardWriting = NSPasteboard.general) -> Snapshot {
-        Snapshot(string: pasteboard.string(forType: .string))
+        guard !DesktopInteractionGuard.blocks(pasteboard) else { return Snapshot(string: nil) }
+        return Snapshot(string: pasteboard.string(forType: .string))
     }
 
     /// Restores `snapshot`, but only if `pasteboard`'s changeCount is still exactly
@@ -96,6 +121,7 @@ enum PasteboardBroker {
         ifStillChangeCount expected: Int,
         on pasteboard: PasteboardWriting = NSPasteboard.general
     ) -> Bool {
+        guard !DesktopInteractionGuard.blocks(pasteboard) else { return false }
         guard pasteboard.changeCount == expected else { return false }
         pasteboard.clearContents()
         if let string = snapshot.string {

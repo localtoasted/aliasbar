@@ -188,6 +188,7 @@ final class ExpansionMonitor: ObservableObject {
     /// created — when Accessibility isn't granted yet.
     func start() {
         guard eventTap == nil else { return }
+        guard !DesktopInteractionGuard.isActive else { return }
         // The callers are gated on this too, but the "never observes anything while
         // off" claim belongs to this type, not to caller discipline: a third caller
         // added later cannot accidentally start the tap with the setting off.
@@ -465,6 +466,7 @@ final class ExpansionFillInController: NSObject, NSWindowDelegate {
     func show(snippet: Snippet, slots: [String],
               onConfirm: @escaping (String) -> Void,
               onCancel: @escaping () -> Void) {
+        guard !DesktopInteractionGuard.isActive else { return }
         pendingCancel = onCancel
         let hostView = ExpansionFillInHostView(
             snippet: snippet, slots: slots,

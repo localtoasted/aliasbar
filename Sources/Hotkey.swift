@@ -39,6 +39,7 @@ final class HotkeyManager {
     /// UI must never claim one combination is taken and another is free.
     @discardableResult
     func register(_ combo: HotkeyCombo, onFire: @escaping () -> Void) -> Bool {
+        guard !DesktopInteractionGuard.isActive else { return false }
         guard installHandler() else {
             Diag.log("hotkey event handler could not be installed")
             return false
@@ -140,6 +141,7 @@ enum PreviousApp {
     private(set) static var stored: NSRunningApplication?
 
     static func remember() {
+        guard !DesktopInteractionGuard.isActive else { return }
         let front = NSWorkspace.shared.frontmostApplication
         // Ignore ourselves, or reopening while already open would trap focus here.
         if front?.processIdentifier != ProcessInfo.processInfo.processIdentifier {
@@ -148,6 +150,10 @@ enum PreviousApp {
     }
 
     static func restore() {
+        guard !DesktopInteractionGuard.isActive else {
+            stored = nil
+            return
+        }
         guard let app = stored else { return }
         app.activate(options: [])
         stored = nil
@@ -165,10 +171,13 @@ enum PreviousApp {
 /// is checked before every attempt so a revoked permission surfaces as a message rather
 /// than as keystrokes silently going nowhere.
 enum Typist {
-    static var isTrusted: Bool { AXIsProcessTrusted() }
+    static var isTrusted: Bool {
+        !DesktopInteractionGuard.isActive && AXIsProcessTrusted()
+    }
 
     /// Prompts for Accessibility permission, showing the system dialog.
     static func requestTrust() {
+        guard !DesktopInteractionGuard.isActive else { return }
         let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true]
         _ = AXIsProcessTrustedWithOptions(options as CFDictionary)
     }
@@ -179,6 +188,7 @@ enum Typist {
     /// dozens, it cannot be garbled by key-repeat timing, and it handles every character
     /// including ones with no key code on the current layout.
     static func paste(_ text: String) -> Bool {
+        guard !DesktopInteractionGuard.isActive else { return false }
         guard isTrusted else { return false }
 
         PasteboardBroker.write(transient: text)
