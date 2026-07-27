@@ -17,4 +17,4 @@ All ten options keep the selected Refined Classic symbol: a greater than mark fo
 
 The matching `-source.png` files preserve the generated originals. The files without that suffix have transparent backgrounds and are ready for review or export.
 
-The current app icon remains the original flat Refined Classic artwork until a treatment is selected.
+Machined Metal is the selected app icon and title treatment. Flat Precision remains available as the small-size fallback source.
