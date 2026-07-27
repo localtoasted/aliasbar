@@ -11470,6 +11470,458 @@ do {
 }
 
 // ---------------------------------------------------------------------------
+print("\n51. PRE-288: a line inside another statement's span is not a definition")
+
+// A legacy multi-line alias holds its value together with quotes, so its interior
+// physical lines are *value bytes*, not statements. All three places that locate an
+// alias — range discovery inside `rewrite`, `managedAliases`, and
+// `ZshrcParser.parseText` — found them by scanning for a `alias ` line prefix and
+// never ran the lexer forward from the block's begin marker, so a line like
+//
+//     alias outer='first
+//     alias ghost=inner
+//     last'
+//
+// registered `ghost` as a real, editable alias. Every existing guard passed: removing
+// a line from inside a quoted string leaves perfectly well-formed zsh, so the `zsh -n`
+// gate had nothing to object to, and the user saw "Deleted" while `outer` was
+// silently rewritten to `alias outer='first\nlast'`.
+//
+// THE SEMANTICS PINNED HERE: a physical line the lexer has already consumed as part
+// of an earlier statement's span is not a definition, so the name on it simply does
+// not exist. `parseText` omits it, `managedAliases` omits it, range discovery does not
+// find it, an upsert of that name appends a brand-new alias the ordinary way, and a
+// delete of that name takes the same silent no-op path any other absent name takes
+// (pinned since section 22's golden file). Deliberately NOT "refuse the edit": a
+// refusal would require the writer to keep recognising the phantom in order to reject
+// it, which keeps it alive in the model, and it would make non-existence
+// distinguishable from non-existence.
+//
+// Empirically the lexer continues a span only across an open quote, a backslash
+// continuation, and an unconsumed heredoc — `case … esac` does not continue one. So a
+// conditional `alias` inside a `case` arm body at top level stays a real definition,
+// and the controls below pin that the fix does not reach it.
+
+/// Applies an operation and hands back the error instead of the backup path, so a
+/// section that cares about *whether* an edit was refused reads in one line.
+func pre288Apply(_ operation: AliasWriter.Operation, _ path: String) -> Error? {
+    do {
+        _ = try AliasWriter.apply(operation, path: path, allEntries: [])
+        return nil
+    } catch {
+        return error
+    }
+}
+
+/// The names `managedAliases` reports for a whole file's text.
+func pre288Managed(_ text: String) -> [String] {
+    let lines = text.components(separatedBy: "\n")
+    return ((try? AliasWriter.managedAliases(in: lines)) ?? []).map(\.name)
+}
+
+/// The names `parseText` surfaces — which is exactly what the UI lists.
+func pre288Parsed(_ text: String) -> [String] {
+    ZshrcParser.parseText(text, sourceFile: "/pre288/.zshrc").map(\.name)
+}
+
+/// A managed block wrapping `body`, with a trailing newline like a real rc file.
+func pre288Block(_ body: String) -> String {
+    """
+    \(ManagedBlock.begin)
+    \(ManagedBlock.notice)
+    \(body)
+    \(ManagedBlock.end)
+
+    """
+}
+
+// --- delete of a phantom nested in a single-quoted multi-line value -------------
+do {
+    // Today: succeeds, and rewrites `outer` to "alias outer='first\nlast'".
+    let path = scratch(pre288Block("""
+    alias outer='first
+    alias ghost=inner
+    last'
+    alias plain='echo plain'
+    """))
+    let before = read(path)
+    let failure = pre288Apply(.delete(name: "ghost"), path)
+    let after = read(path)
+
+    check("deleting a phantom in a single-quoted value does not raise", failure == nil,
+          "\(failure as Any)")
+    check("...and leaves the file byte-identical", after == before, after)
+    check("...so the enclosing value keeps its interior line",
+          after.contains("alias outer='first\nalias ghost=inner\nlast'"), after)
+    check("...and the real neighbour is untouched",
+          after.contains("alias plain='echo plain'"), after)
+    check("...and zsh still parses it", zshAccepts(path))
+}
+
+// --- upsert of a phantom nested in a double-quoted multi-line value -------------
+do {
+    // Today: injects "alias ghost='echo hijacked'" as the middle line of outer's value.
+    let path = scratch(pre288Block("""
+    alias outer="first
+    alias ghost=inner
+    last"
+    """))
+    check("upserting a phantom in a double-quoted value succeeds",
+          pre288Apply(.upsert(name: "ghost", command: "echo hijacked", comment: nil), path) == nil)
+    let after = read(path)
+
+    check("the enclosing value is not written into",
+          after.contains("alias outer=\"first\nalias ghost=inner\nlast\""), after)
+    check("...and the new alias is appended as its own statement before the end marker",
+          after.contains("last\"\nalias ghost='echo hijacked'\n\(ManagedBlock.end)"), after)
+    check("...and zsh parses the result", zshAccepts(path))
+    check("...and only now does the name exist",
+          pre288Managed(after) == ["outer", "ghost"], "\(pre288Managed(after))")
+}
+
+// --- rename whose SOURCE is a phantom ------------------------------------------
+do {
+    // Today: succeeds, writing "alias spook='echo boo'" inside outer's value.
+    let path = scratch(pre288Block("""
+    alias outer='first
+    alias ghost=inner
+    last'
+    """))
+    let before = read(path)
+    let failure = pre288Apply(.rename(from: "ghost", to: "spook", command: "echo boo"), path)
+    let after = read(path)
+
+    // A source that does not exist is the existing `renameSourceMissing` case, not a
+    // new error: the phantom is absent, and absence already has an answer here.
+    check("renaming from a phantom source is refused as a missing source",
+          (failure as? AliasWriter.WriteError).map {
+              if case .renameSourceMissing = $0 { return true } else { return false }
+          } == true, "\(failure as Any)")
+    check("...and nothing was written", after == before, after)
+    check("...and zsh still parses it", zshAccepts(path))
+}
+
+// --- rename whose DESTINATION collides with a phantom ---------------------------
+do {
+    // Today: the phantom is seen as an existing destination, so `real` is written over
+    // the interior line of outer's value and the genuine definition is dropped.
+    let path = scratch(pre288Block("""
+    alias outer='first
+    alias ghost=inner
+    last'
+    alias real='echo real'
+    """))
+    check("renaming onto a phantom destination succeeds",
+          pre288Apply(.rename(from: "real", to: "ghost", command: "echo real"), path) == nil)
+    let after = read(path)
+
+    check("the enclosing value is not written into",
+          after.contains("alias outer='first\nalias ghost=inner\nlast'"), after)
+    check("...the phantom was not treated as an existing destination, so the source moved in place",
+          after.contains("last'\nalias ghost='echo real'"), after)
+    check("...and the old name is gone", !after.contains("alias real="), after)
+    check("...and zsh parses the result", zshAccepts(path))
+}
+
+// --- managedAliases must not list the phantom -----------------------------------
+do {
+    let text = pre288Block("""
+    alias outer='first
+    alias ghost=inner
+    last'
+    alias plain='echo plain'
+    """)
+    check("managedAliases skips a name that lives inside another statement's value",
+          pre288Managed(text) == ["outer", "plain"], "\(pre288Managed(text))")
+}
+
+// --- ZshrcParser.parseText must not surface the phantom -------------------------
+// This is the one that decides whether the phantom is offered to the user at all: the
+// list, the editor, and the delete button are all driven by these entries.
+do {
+    let text = """
+    alias outer='first
+    alias ghost=inner
+    last'
+    alias after='echo after'
+    greet() {
+      echo hi
+    }
+    """
+    check("parseText omits a name that lives inside another statement's value",
+          pre288Parsed(text) == ["outer", "after", "greet"], "\(pre288Parsed(text))")
+
+    // Controls: the surrounding entries must come back completely unchanged. The
+    // truncation of `outer`'s reported command to its first physical line is existing
+    // behavior and deliberately out of PRE-288's scope — the only thing changing is
+    // classification.
+    let entries = ZshrcParser.parseText(text, sourceFile: "/pre288/.zshrc")
+    check("...the enclosing alias is still reported, at its own line",
+          entries.first?.name == "outer" && entries.first?.line == 1,
+          "\(entries.map { "\($0.name)@\($0.line)" })")
+    check("...with its existing (first-physical-line) command, unchanged by this fix",
+          entries.first?.command == "'first", "\(entries.first?.command ?? "nil")")
+    check("...the alias after it keeps its line number",
+          entries.first(where: { $0.name == "after" })?.line == 4,
+          "\(entries.map { "\($0.name)@\($0.line)" })")
+    check("...and the function after that is still found",
+          entries.first(where: { $0.name == "greet" })?.kind == .function)
+}
+
+// --- a phantom outside the block is not a real clash ----------------------------
+// `apply` reparses the file to refuse a name already defined outside its own block.
+// Fed a phantom, it told the user their brand-new alias was "already defined at
+// .zshrc:2" and refused to write anything — the parser bug surfacing as a lockout
+// rather than as corruption.
+do {
+    let path = scratch("""
+    alias unmanaged='first
+    alias ghost=inner
+    last'
+    \(ManagedBlock.begin)
+    \(ManagedBlock.notice)
+    alias plain='echo plain'
+    \(ManagedBlock.end)
+
+    """)
+    check("a phantom outside the block does not block creating that alias",
+          pre288Apply(.upsert(name: "ghost", command: "echo mine", comment: nil), path) == nil)
+    let after = read(path)
+    check("...the unmanaged statement is untouched",
+          after.contains("alias unmanaged='first\nalias ghost=inner\nlast'"), after)
+    check("...and the new alias landed inside the block",
+          after.contains("alias plain='echo plain'\nalias ghost='echo mine'\n\(ManagedBlock.end)"),
+          after)
+    check("...and zsh parses the result", zshAccepts(path))
+}
+
+// --- the phantom's name is ALSO a real alias later in the block ------------------
+// The dangerous half: the real definition must still be the one that is found. A scan
+// that stops at the first `alias `-prefixed match edits the value bytes and leaves the
+// genuine alias in place, so the user's edit appears to do nothing.
+do {
+    let path = scratch(pre288Block("""
+    alias outer='first
+    alias dup=inner
+    last'
+    alias dup='echo real'
+    alias plain='echo plain'
+    """))
+    check("upserting a name that is both a phantom and a real alias succeeds",
+          pre288Apply(.upsert(name: "dup", command: "echo updated", comment: nil), path) == nil)
+    var after = read(path)
+    check("the real definition is the one that was edited",
+          after.contains("alias dup='echo updated'"), after)
+    check("...the enclosing value is untouched",
+          after.contains("alias outer='first\nalias dup=inner\nlast'"), after)
+    check("...and there is exactly one definition line for it",
+          after.components(separatedBy: "alias dup='echo updated'").count == 2, after)
+
+    check("deleting it removes the real definition", pre288Apply(.delete(name: "dup"), path) == nil)
+    after = read(path)
+    check("...the real definition is gone", !after.contains("alias dup='echo updated'"), after)
+    check("...the enclosing value still has its interior line",
+          after.contains("alias outer='first\nalias dup=inner\nlast'"), after)
+    check("...and its neighbour survives", after.contains("alias plain='echo plain'"), after)
+    check("...and zsh parses the result", zshAccepts(path))
+}
+
+do {
+    // Same shape, through rename: the genuine line is what must move.
+    let path = scratch(pre288Block("""
+    alias outer='first
+    alias dup=inner
+    last'
+    alias dup='echo real'
+    """))
+    check("renaming a name that is both a phantom and a real alias succeeds",
+          pre288Apply(.rename(from: "dup", to: "renamed", command: "echo real"), path) == nil)
+    let after = read(path)
+    check("the real definition carries the new name",
+          after.contains("last'\nalias renamed='echo real'"), after)
+    check("...nothing was written inside the enclosing value",
+          after.contains("alias outer='first\nalias dup=inner\nlast'"), after)
+    check("...and zsh parses the result", zshAccepts(path))
+}
+
+// --- heredoc bodies --------------------------------------------------------------
+// The lexer already carries an unconsumed heredoc across lines; nothing consulted it.
+// A heredoc body is data being written to a file, so an `alias` line in one is text.
+do {
+    // Today: the delete removes the line from inside the heredoc body, and `zsh -n`
+    // is perfectly happy with the result.
+    let path = scratch(pre288Block("""
+    cat <<'EOF' > /dev/null
+    alias ghosth=inner
+    EOF
+    alias plain='echo plain'
+    """))
+    check("the heredoc fixture parses to begin with", zshAccepts(path))
+    check("managedAliases skips a name in a heredoc body",
+          pre288Managed(read(path)) == ["plain"], "\(pre288Managed(read(path)))")
+
+    let before = read(path)
+    check("deleting a name from a heredoc body does not raise",
+          pre288Apply(.delete(name: "ghosth"), path) == nil)
+    check("...and leaves the file byte-identical", read(path) == before, read(path))
+}
+
+do {
+    // Today: the upsert writes "alias ghosth='echo mine'" into the heredoc body.
+    let path = scratch(pre288Block("""
+    cat <<'EOF' > /dev/null
+    alias ghosth=inner
+    EOF
+    alias plain='echo plain'
+    """))
+    check("upserting a name that only appears in a heredoc body succeeds",
+          pre288Apply(.upsert(name: "ghosth", command: "echo mine", comment: nil), path) == nil)
+    let after = read(path)
+    check("the heredoc body is not written into",
+          after.contains("cat <<'EOF' > /dev/null\nalias ghosth=inner\nEOF"), after)
+    check("...and the new alias is appended before the end marker",
+          after.contains("alias plain='echo plain'\nalias ghosth='echo mine'\n\(ManagedBlock.end)"),
+          after)
+    check("...and zsh parses the result", zshAccepts(path))
+}
+
+do {
+    // And a heredoc nested inside a legacy alias's own quoted value, which is both
+    // conditions at once.
+    let path = scratch(pre288Block("""
+    alias doc='cat <<EOF
+    alias ghostd=inner
+    EOF'
+    """))
+    let before = read(path)
+    check("deleting a name from a heredoc inside a quoted value does not raise",
+          pre288Apply(.delete(name: "ghostd"), path) == nil)
+    check("...and leaves the file byte-identical", read(path) == before, read(path))
+}
+
+do {
+    // parseText sees the whole file, not just the block, so it needs the same answer.
+    let text = """
+    cat <<EOF
+    alias ghosth=inner
+    EOF
+    alias real='echo real'
+    """
+    check("parseText omits a name in a heredoc body",
+          pre288Parsed(text) == ["real"], "\(pre288Parsed(text))")
+}
+
+// --- backslash continuations ------------------------------------------------------
+// The worst of the family. Removing the continuation line leaves `alias twoline=1 \`
+// dangling, so the *next* real alias becomes its continuation and disappears from the
+// shell entirely — and the file still parses, so no guard fires.
+do {
+    let path = scratch(pre288Block("""
+    alias twoline=1 \\
+    alias ghostb=inner
+    alias plain='echo plain'
+    """))
+    check("the continuation fixture parses to begin with", zshAccepts(path))
+    check("managedAliases skips a name on a continuation line",
+          pre288Managed(read(path)) == ["twoline", "plain"], "\(pre288Managed(read(path)))")
+
+    let before = read(path)
+    check("deleting a name on a continuation line does not raise",
+          pre288Apply(.delete(name: "ghostb"), path) == nil)
+    let after = read(path)
+    check("...and leaves the file byte-identical", after == before, after)
+    check("...so the neighbour is not swallowed by the dangling continuation",
+          after.contains("alias ghostb=inner\nalias plain='echo plain'"), after)
+}
+
+// --- case arms ---------------------------------------------------------------------
+do {
+    // A `case` written inside a legacy alias's quoted value. Today the phantom is
+    // listed by managedAliases and the delete is refused — by the collateral guard,
+    // for the wrong reason. Once the name does not exist, there is nothing to refuse.
+    let path = scratch(pre288Block("""
+    alias sw='case $1 in
+    alias ghostc=inner) echo one ;;
+    *) echo other ;;
+    esac'
+    alias plain='echo plain'
+    """))
+    check("the case-in-a-value fixture parses to begin with", zshAccepts(path))
+    check("managedAliases skips a name in a case arm inside a quoted value",
+          pre288Managed(read(path)) == ["sw", "plain"], "\(pre288Managed(read(path)))")
+
+    let before = read(path)
+    check("deleting it is a no-op rather than a refusal",
+          pre288Apply(.delete(name: "ghostc"), path) == nil)
+    check("...and the file is byte-identical", read(path) == before, read(path))
+}
+
+do {
+    // CONTROL, and the boundary of this fix. The lexer does not continue a span across
+    // `case … esac`, so an `alias` in an arm body is a real (conditional) statement and
+    // must keep behaving exactly as it does today: listed, parsed, and deletable.
+    let path = scratch(pre288Block("""
+    case $TERM in
+    xterm*)
+    alias caseReal='echo inner'
+    ;;
+    esac
+    alias plain='echo plain'
+    """))
+    check("managedAliases still lists an alias in a case arm body",
+          pre288Managed(read(path)) == ["caseReal", "plain"], "\(pre288Managed(read(path)))")
+    check("parseText still surfaces it at its own line",
+          pre288Parsed("""
+          case $TERM in
+          xterm*)
+          alias caseReal='echo inner'
+          ;;
+          esac
+          """) == ["caseReal"])
+    check("and it is still deletable", pre288Apply(.delete(name: "caseReal"), path) == nil)
+    let after = read(path)
+    check("...its line is gone", !after.contains("alias caseReal="), after)
+    check("...the case statement survives",
+          after.contains("case $TERM in\nxterm*)\n;;\nesac"), after)
+    check("...and zsh parses the result", zshAccepts(path))
+}
+
+// --- negative control: an ordinary alias right after a multi-line one ---------------
+do {
+    let path = scratch(pre288Block("""
+    alias outer='first
+    second'
+    alias next='echo next'
+    """))
+    check("an ordinary alias after a multi-line one is still found and edited",
+          pre288Apply(.upsert(name: "next", command: "echo edited", comment: nil), path) == nil)
+    var after = read(path)
+    check("...in place, not appended a second time",
+          after.contains("second'\nalias next='echo edited'\n\(ManagedBlock.end)"), after)
+    check("...and the multi-line alias above it is untouched",
+          after.contains("alias outer='first\nsecond'"), after)
+    check("...and both names are still listed",
+          pre288Managed(after) == ["outer", "next"], "\(pre288Managed(after))")
+
+    check("...and it is still deletable", pre288Apply(.delete(name: "next"), path) == nil)
+    after = read(path)
+    check("...leaving only the multi-line alias",
+          pre288Managed(after) == ["outer"], "\(pre288Managed(after))")
+    check("...whose own lines both survive",
+          after.contains("alias outer='first\nsecond'"), after)
+    check("...and zsh parses the result", zshAccepts(path))
+
+    // And the enclosing alias itself must remain editable: the fix skips lines *inside*
+    // a span, never the line that opens it.
+    check("...and the multi-line alias itself is still editable",
+          pre288Apply(.upsert(name: "outer", command: "echo collapsed", comment: nil), path) == nil)
+    after = read(path)
+    check("...collapsing to one line with no orphaned tail",
+          after.contains("alias outer='echo collapsed'") && !after.contains("second'"), after)
+    check("...and zsh parses the result", zshAccepts(path))
+}
+
+// ---------------------------------------------------------------------------
 print("\n" + String(repeating: "-", count: 60))
 print("\(passes) passed, \(failures) failed")
 exit(failures == 0 ? 0 : 1)

@@ -290,3 +290,173 @@ final class AliasWriterApplyTests: XCTestCase {
         }
     }
 }
+
+/// PRE-288: a physical line the lexer has already consumed as part of an earlier
+/// statement's span is value bytes, not a definition.
+///
+/// A legacy multi-line alias holds its value together with quotes, so a line like
+/// `alias ghost=inner` sitting between `alias outer='first` and `last'` is text. All
+/// three name-locating sites found it anyway by scanning for a `alias ` line prefix,
+/// and no guard caught the result: deleting a line from inside a quoted string leaves
+/// perfectly well-formed zsh, so the `zsh -n` gate had nothing to object to.
+///
+/// The full matrix (renames, heredoc bodies, `case` arms, backslash continuations,
+/// negative controls) lives in Tests/WriterTests.swift section 51. What is here is the
+/// part that needs nothing but the Foundation core, so `swift test` gates it too.
+final class AliasWriterNestedDefinitionTests: XCTestCase {
+    private var sandbox: URL!
+
+    override func setUpWithError() throws {
+        sandbox = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("aliasbar-pre288-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: sandbox, withIntermediateDirectories: true)
+    }
+
+    override func tearDownWithError() throws {
+        try? FileManager.default.removeItem(at: sandbox)
+    }
+
+    private func scratch(_ contents: String) throws -> String {
+        let path = sandbox.appendingPathComponent("zshrc-\(UUID().uuidString)").path
+        try contents.write(toFile: path, atomically: true, encoding: .utf8)
+        return path
+    }
+
+    private func read(_ path: String) throws -> String {
+        try String(contentsOfFile: path, encoding: .utf8)
+    }
+
+    /// A managed block holding one legacy multi-line alias whose middle physical line
+    /// looks like its own definition, plus an ordinary neighbour.
+    private var nestedFixture: String {
+        """
+        \(ManagedBlock.begin)
+        \(ManagedBlock.notice)
+        alias outer='first
+        alias ghost=inner
+        last'
+        alias plain='echo plain'
+        \(ManagedBlock.end)
+
+        """
+    }
+
+    func testParseTextDoesNotSurfaceANameInsideAQuotedValue() {
+        // This is what decides whether the phantom is ever offered to the user: the
+        // list, the editor, and the delete button all read these entries.
+        let entries = ZshrcParser.parseText(nestedFixture, sourceFile: "/pre288/.zshrc")
+        XCTAssertEqual(entries.map(\.name), ["outer", "plain"])
+        // Control: the enclosing alias is still reported at its own line, with the
+        // command it has always reported. Only classification changes here.
+        XCTAssertEqual(entries.first?.line, 3)
+        XCTAssertEqual(entries.first?.command, "'first")
+    }
+
+    func testManagedAliasesDoesNotListANameInsideAQuotedValue() throws {
+        let names = try AliasWriter.managedAliases(
+            in: nestedFixture.components(separatedBy: "\n")).map(\.name)
+        XCTAssertEqual(names, ["outer", "plain"])
+    }
+
+    func testDeletingSuchANameLeavesTheEnclosingAliasByteIdentical() throws {
+        let path = try scratch(nestedFixture)
+        // The name does not exist, so this is the ordinary absent-name no-op.
+        _ = try AliasWriter.apply(.delete(name: "ghost"), path: path, allEntries: [])
+        XCTAssertEqual(try read(path), nestedFixture,
+                       "the enclosing alias must not be rewritten")
+    }
+
+    func testUpsertingSuchANameAppendsRatherThanWritingIntoTheValue() throws {
+        let path = try scratch(nestedFixture)
+        _ = try AliasWriter.apply(.upsert(name: "ghost", command: "echo mine", comment: nil),
+                                  path: path, allEntries: [])
+
+        let after = try read(path)
+        XCTAssertTrue(after.contains("alias outer='first\nalias ghost=inner\nlast'"),
+                      "the enclosing value must not be written into: \(after)")
+        XCTAssertTrue(
+            after.contains("alias plain='echo plain'\nalias ghost='echo mine'\n\(ManagedBlock.end)"),
+            "the new alias belongs at the end of the block: \(after)")
+    }
+
+    func testRenamingFromSuchANameIsAMissingSource() throws {
+        let path = try scratch(nestedFixture)
+        XCTAssertThrowsError(
+            try AliasWriter.apply(.rename(from: "ghost", to: "spook", command: "echo boo"),
+                                  path: path, allEntries: [])
+        ) { error in
+            guard case AliasWriter.WriteError.renameSourceMissing = error else {
+                return XCTFail("expected renameSourceMissing, got \(error)")
+            }
+        }
+        XCTAssertEqual(try read(path), nestedFixture, "a refused write must change nothing")
+    }
+
+    func testARealDefinitionSharingThePhantomsNameIsStillTheOneEdited() throws {
+        let path = try scratch("""
+        \(ManagedBlock.begin)
+        \(ManagedBlock.notice)
+        alias outer='first
+        alias dup=inner
+        last'
+        alias dup='echo real'
+        \(ManagedBlock.end)
+
+        """)
+        _ = try AliasWriter.apply(.upsert(name: "dup", command: "echo updated", comment: nil),
+                                  path: path, allEntries: [])
+
+        let after = try read(path)
+        XCTAssertTrue(after.contains("alias dup='echo updated'"), after)
+        XCTAssertTrue(after.contains("alias outer='first\nalias dup=inner\nlast'"),
+                      "the enclosing value must not be written into: \(after)")
+        XCTAssertEqual(after.components(separatedBy: "alias dup='echo updated'").count - 1, 1)
+    }
+
+    func testAPhantomOutsideTheBlockDoesNotBlockCreatingThatAlias() throws {
+        // `apply` reparses the file to refuse a name already defined outside its own
+        // block. Fed a phantom, it told the user their brand-new alias was already
+        // defined and refused to write — the parser bug as a lockout, not corruption.
+        let path = try scratch("""
+        alias unmanaged='first
+        alias ghost=inner
+        last'
+        \(ManagedBlock.begin)
+        \(ManagedBlock.notice)
+        alias plain='echo plain'
+        \(ManagedBlock.end)
+
+        """)
+        _ = try AliasWriter.apply(.upsert(name: "ghost", command: "echo mine", comment: nil),
+                                  path: path, allEntries: [])
+
+        let after = try read(path)
+        XCTAssertTrue(after.contains("alias unmanaged='first\nalias ghost=inner\nlast'"), after)
+        XCTAssertTrue(
+            after.contains("alias plain='echo plain'\nalias ghost='echo mine'\n\(ManagedBlock.end)"),
+            after)
+    }
+
+    func testAnOrdinaryAliasAfterAMultiLineOneIsStillFoundAndEdited() throws {
+        // Negative control: the fix skips lines *inside* a span, never the line that
+        // opens one and never the statement that follows it.
+        let path = try scratch("""
+        \(ManagedBlock.begin)
+        \(ManagedBlock.notice)
+        alias outer='first
+        second'
+        alias next='echo next'
+        \(ManagedBlock.end)
+
+        """)
+        _ = try AliasWriter.apply(.upsert(name: "next", command: "echo edited", comment: nil),
+                                  path: path, allEntries: [])
+
+        let after = try read(path)
+        XCTAssertTrue(after.contains("second'\nalias next='echo edited'\n\(ManagedBlock.end)"), after)
+        XCTAssertTrue(after.contains("alias outer='first\nsecond'"), after)
+        XCTAssertEqual(
+            try AliasWriter.managedAliases(in: after.components(separatedBy: "\n")).map(\.name),
+            ["outer", "next"])
+    }
+}
