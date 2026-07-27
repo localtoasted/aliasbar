@@ -13,12 +13,11 @@ struct InboxView: View {
     @ObservedObject var state: AppState
     @ObservedObject var settings: AppSettings
     @Environment(\.theme) private var theme
-    @Environment(\.motion) private var motion
 
     var body: some View {
-        HStack(spacing: 0) {
+        ManageListDetail {
             inboxList
-            Rectangle().fill(theme.rule.opacity(0.5)).frame(width: 1)
+        } detail: {
             inboxDetail
         }
     }
@@ -27,29 +26,23 @@ struct InboxView: View {
 
     private var inboxList: some View {
         let rows = state.inboxRows
-        return ScrollViewReader { proxy in
-            ScrollView {
-                if rows.isEmpty {
-                    EmptyStateView(symbol: "tray",
-                                   title: "No suggestions to review",
-                                   hint: "Build suggestions in Settings, then import the copied JSON.")
-                        .padding(.top, 40)
-                } else {
-                    LazyVStack(spacing: 1) {
-                        ForEach(Array(rows.enumerated()), id: \.element.id) { index, row in
-                            inboxRow(row, index: index)
-                                .id(row.id)
-                        }
+        return ManageListScrollView(selection: state.selection,
+                                    scrollTarget: state.selectedInboxRow?.id) {
+            if rows.isEmpty {
+                EmptyStateView(symbol: "tray",
+                               title: "No suggestions to review",
+                               hint: "Build suggestions in Settings, then import the copied JSON.")
+                    .padding(.top, 40)
+            } else {
+                LazyVStack(spacing: 1) {
+                    ForEach(Array(rows.enumerated()), id: \.element.id) { index, row in
+                        inboxRow(row, index: index)
+                            .id(row.id)
                     }
-                    .padding(6)
                 }
-            }
-            .onChange(of: state.selection) { _ in
-                guard let selected = state.selectedInboxRow else { return }
-                withAnimation(motion.selectionScroll) { proxy.scrollTo(selected.id, anchor: .center) }
+                .padding(6)
             }
         }
-        .frame(width: 224)
     }
 
     @ViewBuilder
@@ -66,7 +59,7 @@ struct InboxView: View {
     }
 
     private func itemRow(_ item: PromptInbox.Item, selected: Bool, index: Int) -> some View {
-        HStack(spacing: 6) {
+        ManageListRow(selected: selected, onSelect: { state.selection = index }) {
             Image(systemName: item.kind == .prompt ? "text.book.closed" : "at")
                 .font(.system(size: 9, weight: .semibold))
                 .foregroundStyle(theme.faint)
@@ -83,16 +76,10 @@ struct InboxView: View {
                     .foregroundStyle(.orange)
             }
         }
-        .padding(.horizontal, 7)
-        .padding(.vertical, 5)
-        .background(selected ? theme.selectionFill : .clear,
-                    in: RoundedRectangle(cornerRadius: theme.cornerRadius))
-        .contentShape(Rectangle())
-        .live { state.selection = index }
     }
 
     private func invalidFileRow(_ url: URL, selected: Bool, index: Int) -> some View {
-        HStack(spacing: 6) {
+        ManageListRow(selected: selected, onSelect: { state.selection = index }) {
             Image(systemName: "doc.badge.exclamationmark")
                 .font(.system(size: 10, weight: .semibold))
                 .frame(width: 14)
@@ -103,12 +90,6 @@ struct InboxView: View {
                 .lineLimit(1)
             Spacer(minLength: 2)
         }
-        .padding(.horizontal, 7)
-        .padding(.vertical, 5)
-        .background(selected ? theme.selectionFill : .clear,
-                    in: RoundedRectangle(cornerRadius: theme.cornerRadius))
-        .contentShape(Rectangle())
-        .live { state.selection = index }
     }
 
     // MARK: Detail

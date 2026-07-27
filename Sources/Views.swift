@@ -1381,7 +1381,6 @@ struct ManageView: View {
     @ObservedObject var state: AppState
     @ObservedObject var settings: AppSettings
     @Environment(\.theme) private var theme
-    @Environment(\.motion) private var motion
 
     var body: some View {
         HStack(spacing: 0) {
@@ -1402,9 +1401,11 @@ struct ManageView: View {
             } else if state.bucket == .snippets {
                 SnippetManageView(state: state, settings: settings)
             } else {
-                list
-                Rectangle().fill(theme.rule.opacity(0.5)).frame(width: 1)
-                detail
+                ManageListDetail {
+                    list
+                } detail: {
+                    detail
+                }
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -1552,27 +1553,21 @@ struct ManageView: View {
     }
 
     private var list: some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                LazyVStack(spacing: 1) {
-                    ForEach(Array(state.bucketEntries.enumerated()), id: \.element.id) { index, entry in
-                        manageRow(entry, index: index)
-                            .id(entry.id)
-                    }
+        ManageListScrollView(selection: state.selection,
+                             scrollTarget: state.selectedEntry?.id) {
+            LazyVStack(spacing: 1) {
+                ForEach(Array(state.bucketEntries.enumerated()), id: \.element.id) { index, entry in
+                    manageRow(entry, index: index)
+                        .id(entry.id)
                 }
-                .padding(6)
             }
-            .onChange(of: state.selection) { _ in
-                guard let entry = state.selectedEntry else { return }
-                withAnimation(motion.selectionScroll) { proxy.scrollTo(entry.id, anchor: .center) }
-            }
+            .padding(6)
         }
-        .frame(width: 224)
     }
 
     private func manageRow(_ entry: RankedEntry, index: Int) -> some View {
         let selected = state.selection == index
-        return HStack(spacing: 6) {
+        return ManageListRow(selected: selected, onSelect: { state.selection = index }) {
             KindBadge(kind: entry.entry.kind, size: 14)
             Text(entry.name)
                 .font(.system(size: 13, weight: .medium, design: theme.nameDesign))
@@ -1598,12 +1593,6 @@ struct ManageView: View {
                     .foregroundStyle(theme.faint)
             }
         }
-        .padding(.horizontal, 7)
-        .padding(.vertical, 5)
-        .background(selected ? theme.selectionFill : .clear,
-                    in: RoundedRectangle(cornerRadius: theme.cornerRadius))
-        .contentShape(Rectangle())
-        .live { state.selection = index }
     }
 
     @ViewBuilder

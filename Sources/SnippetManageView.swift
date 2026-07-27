@@ -4,20 +4,18 @@ import SwiftUI
 
 /// The shell sidebar's Snippets bucket: list + detail for `SnippetStore`'s
 /// contents, parallel to `SuggestedManageView` in shape (its own dedicated view,
-/// since a `Snippet` fits neither `[RankedEntry]` nor `Shortcut`). Reused
-/// conventions throughout — row/detail styling matches `PromptManageView` and
-/// `SuggestedManageView` — but every helper here is its own, not imported from
-/// either: small, self-contained view code, not a shared component.
+/// since a `Snippet` fits neither `[RankedEntry]` nor `Shortcut`). Its model-specific
+/// content stays local while the shared MANAGE split, scrolling, row chrome, actions,
+/// and metadata treatment live in `ManageComponents.swift`.
 struct SnippetManageView: View {
     @ObservedObject var state: AppState
     @ObservedObject var settings: AppSettings
     @Environment(\.theme) private var theme
-    @Environment(\.motion) private var motion
 
     var body: some View {
-        HStack(spacing: 0) {
+        ManageListDetail {
             snippetList
-            Rectangle().fill(theme.rule.opacity(0.5)).frame(width: 1)
+        } detail: {
             snippetDetail
         }
     }
@@ -28,34 +26,28 @@ struct SnippetManageView: View {
         let results = state.snippetManageResults
         return VStack(spacing: 0) {
             newSnippetButton
-            ScrollViewReader { proxy in
-                ScrollView {
-                    if results.isEmpty {
-                        EmptyStateView(symbol: "wand.and.stars",
-                                       title: state.query.isEmpty
-                                           ? "No snippets yet"
-                                           : "Nothing matches \"\(state.query)\"",
-                                       hint: "⌘N creates one. Turn on inline expansion in "
-                                           + "Settings → Expansion to have triggers expand "
-                                           + "as you type, anywhere.")
-                            .padding(.top, 32)
-                    } else {
-                        LazyVStack(spacing: 1) {
-                            ForEach(Array(results.enumerated()), id: \.element.id) { index, snippet in
-                                snippetRow(snippet, index: index)
-                                    .id(snippet.id)
-                            }
+            ManageListScrollView(selection: state.selection,
+                                 scrollTarget: state.selectedSnippet?.id) {
+                if results.isEmpty {
+                    EmptyStateView(symbol: "wand.and.stars",
+                                   title: state.query.isEmpty
+                                       ? "No snippets yet"
+                                       : "Nothing matches \"\(state.query)\"",
+                                   hint: "⌘N creates one. Turn on inline expansion in "
+                                       + "Settings → Expansion to have triggers expand "
+                                       + "as you type, anywhere.")
+                        .padding(.top, 32)
+                } else {
+                    LazyVStack(spacing: 1) {
+                        ForEach(Array(results.enumerated()), id: \.element.id) { index, snippet in
+                            snippetRow(snippet, index: index)
+                                .id(snippet.id)
                         }
-                        .padding(6)
                     }
-                }
-                .onChange(of: state.selection) { _ in
-                    guard let selected = state.selectedSnippet else { return }
-                    withAnimation(motion.selectionScroll) { proxy.scrollTo(selected.id, anchor: .center) }
+                    .padding(6)
                 }
             }
         }
-        .frame(width: 224)
     }
 
     private var newSnippetButton: some View {
@@ -76,7 +68,7 @@ struct SnippetManageView: View {
 
     private func snippetRow(_ snippet: Snippet, index: Int) -> some View {
         let selected = state.selection == index
-        return HStack(spacing: 6) {
+        return ManageListRow(selected: selected, onSelect: { state.selection = index }) {
             Image(systemName: "wand.and.stars")
                 .font(.system(size: 10, weight: .semibold))
                 .frame(width: 14)
@@ -87,12 +79,6 @@ struct SnippetManageView: View {
                 .lineLimit(1)
             Spacer(minLength: 2)
         }
-        .padding(.horizontal, 7)
-        .padding(.vertical, 5)
-        .background(selected ? theme.selectionFill : .clear,
-                    in: RoundedRectangle(cornerRadius: theme.cornerRadius))
-        .contentShape(Rectangle())
-        .live { state.selection = index }
     }
 
     // MARK: Detail
@@ -110,7 +96,7 @@ struct SnippetManageView: View {
                             .font(.system(size: 17, weight: .semibold, design: theme.nameDesign))
                             .foregroundStyle(theme.text)
                         Spacer()
-                        actionButton("Edit", "pencil", prominent: false) {
+                        ManageActionButton("Edit", "pencil", style: .standard) {
                             state.beginEditSnippet(snippet)
                         }
                     }
@@ -126,13 +112,13 @@ struct SnippetManageView: View {
                         .overlay(RoundedRectangle(cornerRadius: theme.cornerRadius + 1)
                             .strokeBorder(theme.rule.opacity(0.35), lineWidth: 1))
 
-                    metaRow("Holes", holesSummary(snippet.template))
-                    metaRow("Edited", Self.editedDateFormatter.string(from: snippet.modifiedAt))
+                    ManageMetaRow("Holes", holesSummary(snippet.template))
+                    ManageMetaRow("Edited", Self.editedDateFormatter.string(from: snippet.modifiedAt))
 
                     InfoBanner(text: "Turn on inline expansion in Settings > Expansion. "
                                + "AliasBar skips password and secure fields.")
 
-                    actionButton("Delete", "trash", prominent: false) {
+                    ManageActionButton("Delete", "trash", style: .standard) {
                         state.deleteSnippet(snippet)
                     }
                     Spacer(minLength: 0)
@@ -175,36 +161,6 @@ struct SnippetManageView: View {
         return formatter
     }()
 
-    private func metaRow(_ label: String, _ value: String) -> some View {
-        HStack(alignment: .top, spacing: 6) {
-            Text(label.uppercased())
-                .font(.system(size: 9, weight: .semibold))
-                .foregroundStyle(theme.faint)
-                .frame(width: 58, alignment: .leading)
-            Text(value)
-                .font(.system(size: 10, design: .monospaced))
-                .foregroundStyle(theme.dim)
-            Spacer(minLength: 0)
-        }
-    }
-
-    private func actionButton(_ title: String, _ symbol: String, prominent: Bool,
-                              action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            HStack(spacing: 4) {
-                Image(systemName: symbol).font(.system(size: 9, weight: .semibold))
-                Text(title).font(.system(size: 10, weight: .medium))
-            }
-            .foregroundStyle(prominent ? theme.onAccent : theme.dim)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 5)
-            .background(prominent ? theme.accent : theme.surface,
-                        in: RoundedRectangle(cornerRadius: theme.cornerRadius))
-            .overlay(RoundedRectangle(cornerRadius: theme.cornerRadius)
-                .strokeBorder(prominent ? .clear : theme.rule.opacity(0.5), lineWidth: 1))
-        }
-        .buttonStyle(.plain)
-    }
 }
 
 // MARK: - Snippet create/edit sheet

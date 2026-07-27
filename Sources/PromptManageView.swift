@@ -9,12 +9,11 @@ struct PromptManageView: View {
     @ObservedObject var state: AppState
     @ObservedObject var settings: AppSettings
     @Environment(\.theme) private var theme
-    @Environment(\.motion) private var motion
 
     var body: some View {
-        HStack(spacing: 0) {
+        ManageListDetail {
             promptList
-            Rectangle().fill(theme.rule.opacity(0.5)).frame(width: 1)
+        } detail: {
             promptDetail
         }
     }
@@ -23,36 +22,30 @@ struct PromptManageView: View {
 
     private var promptList: some View {
         let results = state.promptManageResults
-        return ScrollViewReader { proxy in
-            ScrollView {
-                if results.isEmpty {
-                    VStack(spacing: 10) {
-                        EmptyStateView(symbol: emptySymbol,
-                                       title: emptyTitle,
-                                       hint: emptyHint)
-                            .padding(.top, 40)
-                        if showsEmptyLibraryHint {
-                            DismissibleInfoBanner(text: AppState.promptLibraryEmptyHint,
-                                                  onDismiss: state.dismissPromptLibraryHint)
-                                .padding(.horizontal, 8)
-                        }
+        return ManageListScrollView(selection: state.selection,
+                                    scrollTarget: state.selectedPromptManageShortcut?.id) {
+            if results.isEmpty {
+                VStack(spacing: 10) {
+                    EmptyStateView(symbol: emptySymbol,
+                                   title: emptyTitle,
+                                   hint: emptyHint)
+                        .padding(.top, 40)
+                    if showsEmptyLibraryHint {
+                        DismissibleInfoBanner(text: AppState.promptLibraryEmptyHint,
+                                              onDismiss: state.dismissPromptLibraryHint)
+                            .padding(.horizontal, 8)
                     }
-                } else {
-                    LazyVStack(spacing: 1) {
-                        ForEach(Array(results.enumerated()), id: \.element.id) { index, shortcut in
-                            promptManageRow(shortcut, index: index)
-                                .id(shortcut.id)
-                        }
-                    }
-                    .padding(6)
                 }
-            }
-            .onChange(of: state.selection) { _ in
-                guard let selected = state.selectedPromptManageShortcut else { return }
-                withAnimation(motion.selectionScroll) { proxy.scrollTo(selected.id, anchor: .center) }
+            } else {
+                LazyVStack(spacing: 1) {
+                    ForEach(Array(results.enumerated()), id: \.element.id) { index, shortcut in
+                        promptManageRow(shortcut, index: index)
+                            .id(shortcut.id)
+                    }
+                }
+                .padding(6)
             }
         }
-        .frame(width: 224)
     }
 
     private var emptySymbol: String {
@@ -83,7 +76,7 @@ struct PromptManageView: View {
 
     private func promptManageRow(_ shortcut: Shortcut, index: Int) -> some View {
         let selected = state.selection == index
-        return HStack(spacing: 6) {
+        return ManageListRow(selected: selected, onSelect: { state.selection = index }) {
             Image(systemName: "text.book.closed.fill")
                 .font(.system(size: 10, weight: .semibold))
                 .frame(width: 14)
@@ -101,12 +94,6 @@ struct PromptManageView: View {
             Spacer(minLength: 2)
             rowTrailer(shortcut)
         }
-        .padding(.horizontal, 7)
-        .padding(.vertical, 5)
-        .background(selected ? theme.selectionFill : .clear,
-                    in: RoundedRectangle(cornerRadius: theme.cornerRadius))
-        .contentShape(Rectangle())
-        .live { state.selection = index }
     }
 
     /// The one piece of context worth a glance from the list alone, without opening
@@ -183,7 +170,7 @@ struct PromptManageView: View {
             // explicitly fine even for a stale-only or colliding-only diagnosis — it's
             // the destructive actions Health withholds, never this one. ⌘E does the
             // same thing from the keyboard.
-            actionButton("Edit", "pencil", prominent: false) {
+            ManageActionButton("Edit", "pencil", style: .standard) {
                 state.beginEditPrompt(shortcut)
             }
         }
@@ -211,9 +198,9 @@ struct PromptManageView: View {
                 .overlay(RoundedRectangle(cornerRadius: theme.cornerRadius + 1)
                     .strokeBorder(theme.rule.opacity(0.35), lineWidth: 1))
 
-            metaRow("Slots", shortcut.slots.isEmpty ? "none" : shortcut.slots.joined(separator: ", "))
-            metaRow("Edited", shortcut.editedAt.map(Self.editedDateFormatter.string) ?? "unknown")
-            metaRow("Usage", shortcut.uses == 0 ? "never, on this Mac" : "\(shortcut.uses)× on this Mac")
+            ManageMetaRow("Slots", shortcut.slots.isEmpty ? "none" : shortcut.slots.joined(separator: ", "))
+            ManageMetaRow("Edited", shortcut.editedAt.map(Self.editedDateFormatter.string) ?? "unknown")
+            ManageMetaRow("Usage", shortcut.uses == 0 ? "never, on this Mac" : "\(shortcut.uses)× on this Mac")
         }
     }
 
@@ -254,7 +241,7 @@ struct PromptManageView: View {
                     .font(.system(size: 12, design: theme.bodyDesign))
                     .foregroundStyle(theme.dim)
                     .fixedSize(horizontal: false, vertical: true)
-                actionButton("Install as /\(shortcut.name)", "arrow.up.circle.fill", prominent: true) {
+                ManageActionButton("Install as /\(shortcut.name)", "arrow.up.circle.fill", style: .prominent) {
                     state.installPrompt(shortcut)
                 }
                 collisionAdvisory(for: shortcut.name)
@@ -263,7 +250,7 @@ struct PromptManageView: View {
                 Label("Installed as /\(shortcut.name) in Claude Code", systemImage: "checkmark.circle.fill")
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(theme.accent)
-                actionButton("Uninstall", "arrow.down.circle", prominent: false) {
+                ManageActionButton("Uninstall", "arrow.down.circle", style: .standard) {
                     state.uninstallPrompt(shortcut)
                 }
 
@@ -273,10 +260,10 @@ struct PromptManageView: View {
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(.orange)
                 HStack(spacing: 6) {
-                    actionButton("Reinstall (overwrite)", "arrow.triangle.2.circlepath", prominent: true) {
+                    ManageActionButton("Reinstall (overwrite)", "arrow.triangle.2.circlepath", style: .prominent) {
                         state.installPrompt(shortcut)
                     }
-                    actionButton("Uninstall", "arrow.down.circle", prominent: false) {
+                    ManageActionButton("Uninstall", "arrow.down.circle", style: .standard) {
                         state.uninstallPrompt(shortcut)
                     }
                 }
@@ -334,41 +321,10 @@ struct PromptManageView: View {
             // Deliberately no delete/uninstall action here: a stale-only or
             // colliding-only diagnosis is a "worth a look", never a "worth removing"
             // — the packet is explicit that Health never offers anything destructive.
-            actionButton("Reveal in Finder", "folder", prominent: false) {
+            ManageActionButton("Reveal in Finder", "folder", style: .standard) {
                 state.revealPromptFile(shortcut)
             }
         }
-    }
-
-    private func metaRow(_ label: String, _ value: String) -> some View {
-        HStack(alignment: .top, spacing: 6) {
-            Text(label.uppercased())
-                .font(.system(size: 9, weight: .semibold))
-                .foregroundStyle(theme.faint)
-                .frame(width: 58, alignment: .leading)
-            Text(value)
-                .font(.system(size: 10, design: .monospaced))
-                .foregroundStyle(theme.dim)
-            Spacer(minLength: 0)
-        }
-    }
-
-    private func actionButton(_ title: String, _ symbol: String, prominent: Bool,
-                              action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            HStack(spacing: 4) {
-                Image(systemName: symbol).font(.system(size: 9, weight: .semibold))
-                Text(title).font(.system(size: 10, weight: .medium))
-            }
-            .foregroundStyle(prominent ? theme.onAccent : theme.dim)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 5)
-            .background(prominent ? theme.accent : theme.surface,
-                        in: RoundedRectangle(cornerRadius: theme.cornerRadius))
-            .overlay(RoundedRectangle(cornerRadius: theme.cornerRadius)
-                .strokeBorder(prominent ? .clear : theme.rule.opacity(0.5), lineWidth: 1))
-        }
-        .buttonStyle(.plain)
     }
 }
 
@@ -382,56 +338,49 @@ struct SuggestedManageView: View {
     @ObservedObject var state: AppState
     @ObservedObject var settings: AppSettings
     @Environment(\.theme) private var theme
-    @Environment(\.motion) private var motion
 
     var body: some View {
-        HStack(spacing: 0) {
+        ManageListDetail {
             suggestionList
-            Rectangle().fill(theme.rule.opacity(0.5)).frame(width: 1)
+        } detail: {
             suggestionDetail
         }
     }
 
     private var suggestionList: some View {
         let results = state.suggestedEntries
-        return ScrollViewReader { proxy in
-            ScrollView {
-                if results.isEmpty {
-                    // `state.suggestedEntries` is unconditionally empty while
-                    // `historyUsageRankingEnabled` is off (`refreshSuggestions`'s own
-                    // guard), so the reason worth stating changes too — this isn't
-                    // "nothing repeats yet", it's "nothing is being mined at all".
-                    EmptyStateView(symbol: "sparkles",
-                                   title: !settings.historyUsageRankingEnabled
-                                       ? "History-based suggestions are off"
-                                       : (state.query.isEmpty
-                                           ? "Nothing repeats often enough yet"
-                                           : "Nothing matches \"\(state.query)\""),
-                                   hint: !settings.historyUsageRankingEnabled
-                                       ? "Turn on history usage ranking in Settings to mine your shell history for repeats."
-                                       : "A command has to show up 5+ times, at 2+ words, to qualify.")
-                        .padding(.top, 40)
-                } else {
-                    LazyVStack(spacing: 1) {
-                        ForEach(Array(results.enumerated()), id: \.element.id) { index, suggestion in
-                            suggestionRow(suggestion, index: index)
-                                .id(suggestion.id)
-                        }
+        return ManageListScrollView(selection: state.selection,
+                                    scrollTarget: state.selectedSuggestion?.id) {
+            if results.isEmpty {
+                // `state.suggestedEntries` is unconditionally empty while
+                // `historyUsageRankingEnabled` is off (`refreshSuggestions`'s own
+                // guard), so the reason worth stating changes too — this isn't
+                // "nothing repeats yet", it's "nothing is being mined at all".
+                EmptyStateView(symbol: "sparkles",
+                               title: !settings.historyUsageRankingEnabled
+                                   ? "History-based suggestions are off"
+                                   : (state.query.isEmpty
+                                       ? "Nothing repeats often enough yet"
+                                       : "Nothing matches \"\(state.query)\""),
+                               hint: !settings.historyUsageRankingEnabled
+                                   ? "Turn on history usage ranking in Settings to mine your shell history for repeats."
+                                   : "A command has to show up 5+ times, at 2+ words, to qualify.")
+                    .padding(.top, 40)
+            } else {
+                LazyVStack(spacing: 1) {
+                    ForEach(Array(results.enumerated()), id: \.element.id) { index, suggestion in
+                        suggestionRow(suggestion, index: index)
+                            .id(suggestion.id)
                     }
-                    .padding(6)
                 }
-            }
-            .onChange(of: state.selection) { _ in
-                guard let selected = state.selectedSuggestion else { return }
-                withAnimation(motion.selectionScroll) { proxy.scrollTo(selected.id, anchor: .center) }
+                .padding(6)
             }
         }
-        .frame(width: 224)
     }
 
     private func suggestionRow(_ suggestion: AliasSuggestion, index: Int) -> some View {
         let selected = state.selection == index
-        return HStack(spacing: 6) {
+        return ManageListRow(selected: selected, onSelect: { state.selection = index }) {
             Image(systemName: "sparkles")
                 .font(.system(size: 10, weight: .semibold))
                 .frame(width: 14)
@@ -445,12 +394,6 @@ struct SuggestedManageView: View {
                 .font(.system(size: 9, design: .monospaced))
                 .foregroundStyle(theme.faint)
         }
-        .padding(.horizontal, 7)
-        .padding(.vertical, 5)
-        .background(selected ? theme.selectionFill : .clear,
-                    in: RoundedRectangle(cornerRadius: theme.cornerRadius))
-        .contentShape(Rectangle())
-        .live { state.selection = index }
     }
 
     @ViewBuilder
@@ -483,13 +426,13 @@ struct SuggestedManageView: View {
                                + "Ignore hides the suggestion.")
 
                     HStack(spacing: 6) {
-                        actionButton("Create", "plus.circle.fill", prominent: true) {
+                        ManageActionButton("Create", "plus.circle.fill", style: .prominent) {
                             state.createFromSuggestion(suggestion)
                         }
-                        actionButton("Rename", "pencil", prominent: false) {
+                        ManageActionButton("Rename", "pencil", style: .standard) {
                             state.renameFromSuggestion(suggestion)
                         }
-                        actionButton("Ignore", "eye.slash", prominent: false) {
+                        ManageActionButton("Ignore", "eye.slash", style: .standard) {
                             state.ignoreSuggestion(suggestion)
                         }
                         Spacer(minLength: 0)
@@ -511,23 +454,6 @@ struct SuggestedManageView: View {
         }
     }
 
-    private func actionButton(_ title: String, _ symbol: String, prominent: Bool,
-                              action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            HStack(spacing: 4) {
-                Image(systemName: symbol).font(.system(size: 9, weight: .semibold))
-                Text(title).font(.system(size: 10, weight: .medium))
-            }
-            .foregroundStyle(prominent ? theme.onAccent : theme.dim)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 5)
-            .background(prominent ? theme.accent : theme.surface,
-                        in: RoundedRectangle(cornerRadius: theme.cornerRadius))
-            .overlay(RoundedRectangle(cornerRadius: theme.cornerRadius)
-                .strokeBorder(prominent ? .clear : theme.rule.opacity(0.5), lineWidth: 1))
-        }
-        .buttonStyle(.plain)
-    }
 }
 
 // MARK: - Shared: the local-only/read-only note
