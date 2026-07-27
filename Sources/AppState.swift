@@ -485,12 +485,16 @@ final class AppState: ObservableObject {
         var shortcuts = pool.map { ranked -> Shortcut in
             var shortcut = Shortcut(entry: ranked.entry)
             shortcut.uses = ranked.uses
+            shortcut.isPinned = settings.isPinned(shortcut)
             return shortcut
         }
         if bucket == .all {
             shortcuts += promptCache.map { prompt -> Shortcut in
                 var shortcut = Shortcut(prompt: prompt)
-                shortcut.uses = promptUsageCache[prompt.name]?.count ?? 0
+                let usage = promptUsageCache[prompt.name]
+                shortcut.uses = usage?.count ?? 0
+                shortcut.lastUsed = usage?.lastUsed
+                shortcut.isPinned = settings.isPinned(shortcut)
                 return shortcut
             }
         }
@@ -614,7 +618,9 @@ final class AppState: ObservableObject {
     private func deliverPrompt(_ shortcut: Shortcut, rendered: String, raw: Bool) {
         let pasting = !raw && (settings.enterAction == .pasteName || settings.enterAction == .pasteCommand)
         deliver(rendered, pasting: pasting,
-                toast: raw ? "Copied \(shortcut.name) (raw)" : "Copied \(shortcut.name)")
+                toast: raw
+                    ? "Copied raw prompt: \(shortcut.name)"
+                    : "Copied prompt: \(shortcut.name)")
         PromptUsageCounter.recordUse(of: shortcut.name, path: AppPaths.promptUsagePath)
     }
 
@@ -688,7 +694,10 @@ final class AppState: ObservableObject {
     private var promptShortcuts: [Shortcut] {
         promptCache.map { prompt -> Shortcut in
             var shortcut = Shortcut(prompt: prompt)
-            shortcut.uses = promptUsageCache[prompt.name]?.count ?? 0
+            let usage = promptUsageCache[prompt.name]
+            shortcut.uses = usage?.count ?? 0
+            shortcut.lastUsed = usage?.lastUsed
+            shortcut.isPinned = settings.isPinned(shortcut)
             return shortcut
         }
     }
@@ -1523,9 +1532,10 @@ final class AppState: ObservableObject {
         let pasting = settings.enterAction == .pasteName || settings.enterAction == .pasteCommand
         if let index = clipActionSelection, clipboardActions.indices.contains(index) {
             let action = clipboardActions[index]
-            deliver(action.output, pasting: pasting, toast: "Copied \(action.title)")
+            deliver(action.output, pasting: pasting,
+                    toast: "Copied clipboard action: \(action.title)")
         } else {
-            deliver(clip.content, pasting: pasting, toast: "Copied clip")
+            deliver(clip.content, pasting: pasting, toast: "Copied clipboard item")
         }
     }
 
@@ -1843,6 +1853,57 @@ final class AppState: ObservableObject {
         else if selection < 0 { selection = 0 }
     }
 
+    // MARK: - Pins
+
+    func isPinned(_ shortcut: Shortcut) -> Bool {
+        settings.isPinned(shortcut)
+    }
+
+    /// Toggles the selected item's one durable ranking override. FIND can reorder as
+    /// soon as the preference changes, so the selected identity is recovered in the
+    /// new order instead of leaving the same row index pointed at a different item.
+    func togglePin(_ shortcut: Shortcut) {
+        let id = shortcut.id
+        guard let pinned = settings.togglePinned(shortcut) else { return }
+        if mode == .find, findSource == .aliases,
+           let newIndex = findResults.firstIndex(where: { $0.id == id }) {
+            selection = newIndex
+        }
+        let kind = shortcut.kind == .prompt ? "prompt" : "alias"
+        show(toast: "\(pinned ? "Pinned" : "Unpinned") \(kind): \(shortcut.name)")
+    }
+
+    func togglePin(_ entry: RankedEntry) {
+        togglePin(Shortcut(entry: entry.entry))
+    }
+
+    /// The single keyboard route, shared by FIND, BOARD, and MANAGE. History,
+    /// clipboard, functions, suggestions, snippets, and Review intentionally have no
+    /// pin target.
+    private func togglePinForSelection() {
+        let shortcut: Shortcut?
+        switch mode {
+        case .find:
+            shortcut = findSource == .aliases ? selectedShortcut : nil
+        case .board:
+            if dialect == .prompt {
+                shortcut = selectedPrompt.map { Shortcut(prompt: $0) }
+            } else {
+                shortcut = selectedEntry.map { Shortcut(entry: $0.entry) }
+            }
+        case .manage:
+            if dialect == .prompt {
+                shortcut = promptBucket == .inbox ? nil : selectedPromptManageShortcut
+            } else if bucket == .suggested || bucket == .snippets {
+                shortcut = nil
+            } else {
+                shortcut = selectedEntry.map { Shortcut(entry: $0.entry) }
+            }
+        }
+        guard let shortcut else { return }
+        togglePin(shortcut)
+    }
+
     // MARK: - Keyboard
 
     /// Handles a key event. Returns true when consumed, so the caller knows to swallow it.
@@ -1926,6 +1987,10 @@ final class AppState: ObservableObject {
         // else" mnemonic several command-palette-style apps already share.
         case kVK_ANSI_K where command:
             if findSource == .clipboard { findSource = .aliases } else { enterClipboard() }
+            return true
+
+        case kVK_ANSI_P where command:
+            togglePinForSelection()
             return true
 
         case kVK_Return where historyMode:
@@ -2259,13 +2324,18 @@ final class AppState: ObservableObject {
     // MARK: - Actions
 
     func perform(_ action: EnterAction, on entry: RankedEntry) {
-        let payload = (action == .copyName || action == .pasteName)
+        let usesName = action == .copyName || action == .pasteName
+        let payload = usesName
             ? entry.entry.name
             : entry.entry.command
         let pasting = action == .pasteName || action == .pasteCommand
+        let kind = entry.entry.kind == .alias ? "alias" : "function"
+        let feedback = usesName
+            ? "Copied \(kind) name: \(entry.name)"
+            : "Copied command: \(entry.name)"
         deliver(payload,
                 pasting: pasting,
-                toast: action == .copyName ? "Copied \(entry.name)" : "Copied command")
+                toast: feedback)
         queuePromptHintIfEarned()
     }
 
@@ -2290,7 +2360,7 @@ final class AppState: ObservableObject {
         deliver(command.text,
                 pasting: settings.enterAction == .pasteName
                     || settings.enterAction == .pasteCommand,
-                toast: "Copied command")
+                toast: "Copied history command")
     }
 
     /// Puts a string where the user asked for it: the clipboard, or straight into
@@ -2314,7 +2384,7 @@ final class AppState: ObservableObject {
                 // went away in the same frame the explanation was written to it, and the
                 // system prompt that appeared instead had no visible cause. When we could
                 // not do what was asked, the window stays up and says so.
-                errorMessage = "Accessibility is off. Copied instead; press ⌘V to paste."
+                errorMessage = "Accessibility is off. \(toast). Press ⌘V to paste."
                 Typist.requestTrust()
                 return
             }

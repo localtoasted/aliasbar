@@ -43,6 +43,16 @@ struct Shortcut: Identifiable, Hashable {
     /// `PromptUsageCounter` for prompt).
     var uses: Int = 0
 
+    /// FIND's lightest-weight organization signal. Pin state is supplied by the
+    /// settings layer; the model stays I/O-free so ranking can be tested with plain
+    /// values and no preferences domain. Functions deliberately cannot be pinned.
+    var isPinned = false
+
+    /// Prompts already record this beside their use count. Alias history has no
+    /// equivalent timestamp, so it remains nil there. Ranking consults it only after
+    /// pin state, match quality, and use count have tied.
+    var lastUsed: Date? = nil
+
     // Shell-only. nil/false for prompts.
     let sourceFile: String?
     let line: Int?
@@ -63,6 +73,18 @@ struct Shortcut: Identifiable, Hashable {
             // (PromptStore refuses a write that would collide), so the name alone is
             // a stable identity — there is no line/file pair to disambiguate with.
             return "prompt-\(name)"
+        }
+    }
+
+    /// Stable across source-file line changes and app launches. Alias names are
+    /// case-sensitive shell tokens; prompt names are unique case-insensitively, so
+    /// prompt keys are normalized. Functions return nil because pinning a function
+    /// would advertise an action the product does not support.
+    var pinKey: String? {
+        switch kind {
+        case .alias: return "alias:\(name)"
+        case .prompt: return "prompt:\(name.lowercased())"
+        case .function: return nil
         }
     }
 }

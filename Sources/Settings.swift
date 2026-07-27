@@ -297,6 +297,7 @@ final class AppSettings: ObservableObject {
         static let hotkeyModifiers = "hotkeyModifiers"
         static let hotkeyEnabled = "hotkeyEnabled"
         static let resultLimit = "resultLimit"
+        static let pinnedShortcuts = "pinnedShortcuts"
         static let onboardingComplete = "onboardingComplete"
         static let hasEverPasted = "hasEverPasted"
         static let historyUsageRankingEnabled = "historyUsageRankingEnabled"
@@ -429,6 +430,35 @@ final class AppSettings: ObservableObject {
             defaults.set(resultLimit, forKey: Key.resultLimit)
             syncCoordinator?.push(.resultLimit)
         }
+    }
+
+    /// The only lightweight organization state FIND needs. Stored as stable
+    /// `alias:<name>` / `prompt:<name>` keys in this Mac's preferences; no folders,
+    /// tags, or separate pin collection is introduced.
+    @Published private(set) var pinnedShortcutKeys: Set<String> {
+        didSet { defaults.set(pinnedShortcutKeys.sorted(), forKey: Key.pinnedShortcuts) }
+    }
+
+    func isPinned(_ shortcut: Shortcut) -> Bool {
+        guard let key = shortcut.pinKey else { return false }
+        return pinnedShortcutKeys.contains(key)
+    }
+
+    func setPinned(_ pinned: Bool, for shortcut: Shortcut) {
+        guard let key = shortcut.pinKey else { return }
+        if pinned {
+            pinnedShortcutKeys.insert(key)
+        } else {
+            pinnedShortcutKeys.remove(key)
+        }
+    }
+
+    @discardableResult
+    func togglePinned(_ shortcut: Shortcut) -> Bool? {
+        guard shortcut.pinKey != nil else { return nil }
+        let pinned = !isPinned(shortcut)
+        setPinned(pinned, for: shortcut)
+        return pinned
     }
 
     // MARK: First run
@@ -654,6 +684,7 @@ final class AppSettings: ObservableObject {
         promptFeaturesEnabled = store.object(forKey: Key.promptFeaturesEnabled) as? Bool ?? true
         hasShownPromptHint = store.object(forKey: Key.hasShownPromptHint) as? Bool ?? false
         resultLimit = store.object(forKey: Key.resultLimit) as? Int ?? 6
+        pinnedShortcutKeys = Set(store.stringArray(forKey: Key.pinnedShortcuts) ?? [])
 
         // Off until the user turns it on. Watching the clipboard is this product's
         // trust wedge; starting the read silently on launch would undercut it.

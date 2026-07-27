@@ -145,9 +145,8 @@ enum ShortcutRanker {
     }
 
     /// `pool` is every shortcut FIND is allowed to show — shell and prompt alike,
-    /// unfiltered by dialect. An empty query returns the whole pool in the same rest
-    /// order `Ranker.rank` uses (usage, then name), with the dialect boost applied on
-    /// top the same as any other query length under two characters.
+    /// unfiltered by dialect. Pins lead the list, then relevance, the short-query
+    /// dialect hint, usage, prompt recency, and name provide deterministic ties.
     static func rank(_ pool: [Shortcut],
                      query: String,
                      scope: SearchScope,
@@ -172,13 +171,19 @@ enum ShortcutRanker {
         }
 
         return scored.sorted { lhs, rhs in
+            // Pins are the one deliberate override. Everything below remains the
+            // ordinary ordering ladder for items with equal pin state.
+            if lhs.0.isPinned != rhs.0.isPinned { return lhs.0.isPinned }
+            if lhs.1 != rhs.1 { return lhs.1 > rhs.1 }
             if boostActive {
                 let lhsBoost = matchesDialect(lhs.0, dialect)
                 let rhsBoost = matchesDialect(rhs.0, dialect)
                 if lhsBoost != rhsBoost { return lhsBoost }
             }
-            if lhs.1 != rhs.1 { return lhs.1 > rhs.1 }
             if lhs.0.uses != rhs.0.uses { return lhs.0.uses > rhs.0.uses }
+            if lhs.0.lastUsed != rhs.0.lastUsed {
+                return (lhs.0.lastUsed ?? .distantPast) > (rhs.0.lastUsed ?? .distantPast)
+            }
             // Shorter names win at equal relevance, matching `Ranker`.
             if lhs.0.name.count != rhs.0.name.count {
                 return lhs.0.name.count < rhs.0.name.count

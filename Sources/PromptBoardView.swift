@@ -36,6 +36,7 @@ struct PromptBoardView: View {
                             PromptCard(prompt: prompt,
                                        selected: state.selection == index,
                                        dimmed: dimmed,
+                                       pinned: state.isPinned(Shortcut(prompt: prompt)),
                                        usage: state.promptUsage(for: prompt.name),
                                        density: settings.boardDensity,
                                        action: { state.activateBoardPrompt(at: index) })
@@ -73,6 +74,10 @@ struct PromptBoardView: View {
                             .font(.system(size: 9.5, design: .monospaced))
                             .foregroundStyle(theme.faint)
                     }
+                    let shortcut = Shortcut(prompt: prompt)
+                    PinButton(pinned: state.isPinned(shortcut), name: prompt.name) {
+                        state.togglePin(shortcut)
+                    }
                     SelectedActionHints(
                         primaryKeys: "⏎",
                         primaryLabel: settings.enterAction.needsAccessibility
@@ -105,6 +110,7 @@ private struct PromptCard: View {
     let prompt: Prompt
     let selected: Bool
     let dimmed: Bool
+    let pinned: Bool
     let usage: Int
     let density: BoardDensity
     let action: () -> Void
@@ -120,6 +126,12 @@ private struct PromptCard: View {
                     .foregroundStyle(theme.text)
                     .lineLimit(1)
                     .minimumScaleFactor(0.75)
+                if pinned {
+                    Image(systemName: "star.fill")
+                        .font(.system(size: 7.5, weight: .semibold))
+                        .foregroundStyle(theme.accent)
+                        .accessibilityLabel("Pinned")
+                }
                 Spacer(minLength: 2)
                 if slotCount > 0 {
                     Text("\(slotCount)")

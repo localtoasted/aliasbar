@@ -87,6 +87,12 @@ struct PromptManageView: View {
                 .font(.system(size: 13, weight: .medium, design: theme.nameDesign))
                 .foregroundStyle(theme.text)
                 .lineLimit(1)
+            if shortcut.isPinned {
+                Image(systemName: "star.fill")
+                    .font(.system(size: 8.5, weight: .semibold))
+                    .foregroundStyle(theme.accent)
+                    .accessibilityLabel("Pinned")
+            }
             Spacer(minLength: 2)
             rowTrailer(shortcut)
         }
@@ -165,6 +171,9 @@ struct PromptManageView: View {
                 .font(.system(size: 17, weight: .semibold, design: theme.nameDesign))
                 .foregroundStyle(theme.text)
             Spacer()
+            PinButton(pinned: state.isPinned(shortcut), name: shortcut.name) {
+                state.togglePin(shortcut)
+            }
             // Present in every bucket, including Health: an Edit/view action is
             // explicitly fine even for a stale-only or colliding-only diagnosis — it's
             // the destructive actions Health withholds, never this one. ⌘E does the

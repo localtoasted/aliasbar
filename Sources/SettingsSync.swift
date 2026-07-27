@@ -55,6 +55,7 @@ enum SettingsSync {
         case followsSystemAppearance
         case showFunctions
         case showAliases
+        case pinnedShortcuts
     }
 
     /// Saved presets travel as records (one per preset, keyed by its `id`), not as a

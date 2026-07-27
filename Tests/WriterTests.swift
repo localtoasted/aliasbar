@@ -4887,6 +4887,42 @@ let rankedByUsage2 = ShortcutRanker.rank([usageTieShell2, usageTiePrompt2], quer
 check("usage breaks a tier tie toward the shell entry even when dialect favors prompt",
       rankedByUsage2.first?.name == "sync-shell")
 
+// --- Pins lead, then relevance, usage, and prompt recency -------------------
+
+var pinnedBodyMatch = dialectPromptShortcut(name: "daily-note", body: "deploy checklist")
+pinnedBodyMatch.isPinned = true
+let unpinnedExactMatch = dialectShellShortcut(name: "deploy")
+let pinFirst = ShortcutRanker.rank([unpinnedExactMatch, pinnedBodyMatch], query: "deploy",
+                                   scope: .everything, dialect: .shell)
+check("a pinned match leads FIND even when an unpinned name is more exact",
+      pinFirst.first?.name == "daily-note")
+
+var pinnedOneCharPrompt = dialectPromptShortcut(name: "zprompt")
+pinnedOneCharPrompt.isPinned = true
+let pinBeatsContext = ShortcutRanker.rank([oneCharShell, pinnedOneCharPrompt], query: "z",
+                                         scope: .everything, dialect: .shell)
+check("pin state leads the one-character context boost", pinBeatsContext.first?.name == "zprompt")
+
+var olderPrompt = dialectPromptShortcut(name: "memo-old", uses: 4)
+olderPrompt.isPinned = true
+olderPrompt.lastUsed = Date(timeIntervalSince1970: 100)
+var newerPrompt = dialectPromptShortcut(name: "memo-new", uses: 4)
+newerPrompt.isPinned = true
+newerPrompt.lastUsed = Date(timeIntervalSince1970: 200)
+let recencyTie = ShortcutRanker.rank([olderPrompt, newerPrompt], query: "memo",
+                                    scope: .everything, dialect: .prompt)
+check("prompt recency breaks a tie after equal pin, match, and usage",
+      recencyTie.first?.name == "memo-new")
+
+check("aliases and prompts have stable pin keys",
+      dialectShellShortcut(name: "GS").pinKey == "alias:GS"
+          && dialectPromptShortcut(name: "StandUp").pinKey == "prompt:standup")
+let unpinnableFunction = Shortcut(entry: ShellEntry(kind: .function, name: "work",
+                                                     command: "echo work", comment: nil,
+                                                     sourceFile: "/tmp/functions.zshrc",
+                                                     line: 2, managed: false))
+check("functions cannot be pinned", unpinnableFunction.pinKey == nil)
+
 // --- Shell tier mirrors Ranker's scope rules; prompts ignore scope entirely --
 
 let scopedShell = dialectShellShortcut(name: "xx", command: "special-command-token",
@@ -5001,6 +5037,30 @@ func freshTestSettings() -> (settings: AppSettings, defaults: UserDefaults) {
     let suiteName = "aliasbar-settings-tests-\(UUID().uuidString)"
     let defaults = UserDefaults(suiteName: suiteName)!
     return (AppSettings(defaults: defaults), defaults)
+}
+
+// --- Pins are local, durable preferences ------------------------------------
+
+do {
+    let (settings, defaults) = freshTestSettings()
+    let alias = dialectShellShortcut(name: "pin-me")
+    let prompt = dialectPromptShortcut(name: "Daily-Brief")
+    check("shortcuts start unpinned in a fresh preferences domain",
+          !settings.isPinned(alias) && !settings.isPinned(prompt))
+    settings.setPinned(true, for: alias)
+    settings.setPinned(true, for: prompt)
+
+    let reloaded = AppSettings(defaults: defaults)
+    check("alias and prompt pins persist across a fresh AppSettings instance",
+          reloaded.isPinned(alias) && reloaded.isPinned(prompt))
+    check("prompt pin lookup is case-insensitive",
+          reloaded.isPinned(dialectPromptShortcut(name: "daily-brief")))
+    check("trying to pin a function changes no persisted pin state",
+          reloaded.togglePinned(unpinnableFunction) == nil
+              && reloaded.pinnedShortcutKeys.count == 2)
+
+    reloaded.setPinned(false, for: alias)
+    check("unpin persists too", !AppSettings(defaults: defaults).isPinned(alias))
 }
 
 // --- The boundary is exactly the seven cases the interview froze (assumption A2) ---
@@ -6777,10 +6837,36 @@ do {
     check("copy-mode delivers the exact body to the broker",
           fake.string(forType: .string) == "Copy-only body, no slots here.")
     check("copy feedback appears before a Close-after-copy dismissal",
-          state.toast == "Copied copyonlyprompt" && !dismissed)
+          state.toast == "Copied prompt: copyonlyprompt" && !dismissed)
     RunLoop.current.run(until: Date().addingTimeInterval(AppState.copyFeedbackDismissDelay + 0.08))
     check("copy-mode honors afterAction == .close after feedback is visible", dismissed)
     check("copying a prompt records a use", usageCount("copyonlyprompt") == before + 1)
+}
+
+
+// ⌘P toggles the selected alias or prompt without leaving the selection attached
+// to a different row after FIND immediately reranks its new pin state.
+do {
+    let (state, _) = freshPre260State(enterAction: .copyName, afterAction: .stayOpen)
+    state.query = "copy"
+    guard let initial = state.findResults.firstIndex(where: { $0.name == "copyonlyprompt" }) else {
+        check("pin keyboard fixture finds copyonlyprompt", false)
+        fatalError("missing pin keyboard fixture")
+    }
+    state.selection = initial
+    let pinEvent = NSEvent.keyEvent(with: .keyDown, location: .zero,
+                                    modifierFlags: [.command], timestamp: 0,
+                                    windowNumber: 0, context: nil, characters: "p",
+                                    charactersIgnoringModifiers: "p", isARepeat: false,
+                                    keyCode: UInt16(kVK_ANSI_P))!
+    check("⌘P is consumed", state.handleKey(pinEvent))
+    check("⌘P pins the selected prompt", state.settings.isPinned(shortcut(named: "copyonlyprompt", in: state)))
+    check("FIND keeps the pinned item selected after reranking",
+          state.selectedShortcut?.name == "copyonlyprompt")
+    _ = state.handleKey(pinEvent)
+    check("pressing ⌘P again unpins the same selected prompt",
+          !state.settings.isPinned(shortcut(named: "copyonlyprompt", in: state))
+              && state.selectedShortcut?.name == "copyonlyprompt")
 }
 
 do {
@@ -7035,6 +7121,19 @@ let hintEntry = RankedEntry(entry: ShellEntry(kind: .alias, name: "gs", command:
                                               line: 1, managed: true),
                            uses: 3)
 
+do {
+    let (settings, _) = freshTestSettings()
+    settings.afterAction = .stayOpen
+    let state = AppState(store: EntryStore(), settings: settings)
+    state.pasteboard = FakePasteboard()
+    state.perform(.copyName, on: hintEntry)
+    check("alias-name copy feedback names the action and item",
+          state.toast == "Copied alias name: gs")
+    state.perform(.copyCommand, on: hintEntry)
+    check("command copy feedback names the selected alias",
+          state.toast == "Copied command: gs")
+}
+
 let (hintSettings, _) = freshTestSettings()
 hintSettings.onboardingComplete = true
 let hintState = AppState(store: EntryStore(), settings: hintSettings)
@@ -7047,7 +7146,7 @@ hintState.perform(.copyName, on: hintEntry)
 check("hasShownPromptHint flips true after the first successful alias recall",
       hintSettings.hasShownPromptHint)
 check("the hint is queued, not shown mid-delivery — the copy's own toast is still on screen",
-      hintState.toast == "Copied gs")
+      hintState.toast == "Copied alias name: gs")
 
 hintState.prepareForShow()
 check("the queued hint is promoted into toast the next time the window opens",
@@ -7055,10 +7154,10 @@ check("the queued hint is promoted into toast the next time the window opens",
 
 hintState.perform(.copyName, on: hintEntry)
 check("a second alias recall after the flag is set queues no further hint — the ordinary copy toast shows",
-      hintState.toast == "Copied gs")
+      hintState.toast == "Copied alias name: gs")
 hintState.prepareForShow()
 check("no hint is shown a second time on a later open, once already fired once",
-      hintState.toast == "Copied gs")
+      hintState.toast == "Copied alias name: gs")
 
 let (gatedHintSettings, _) = freshTestSettings()
 gatedHintSettings.onboardingComplete = false
