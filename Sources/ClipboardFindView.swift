@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 // MARK: - FIND: clipboard source (PRE-247-C/D)
 
@@ -161,7 +162,7 @@ struct ClipboardFindView: View {
 /// not necessarily a shell command.
 private struct ClipRow: View {
     @Environment(\.theme) private var theme
-    let clip: SafeClip
+    let clip: ClipboardHistoryItem
     let selected: Bool
     let highlight: Namespace.ID
 
@@ -173,11 +174,21 @@ private struct ClipRow: View {
         trimmed.components(separatedBy: .newlines).first ?? trimmed
     }
 
-    private var kind: ClipKind { ClipKind.detect(trimmed) }
+    private var kind: ClipKind? {
+        guard clip.textClip != nil else { return nil }
+        return ClipKind.detect(trimmed)
+    }
 
     var body: some View {
         HStack(spacing: 8) {
-            if let label = kind.shortLabel {
+            if clip.imageClip != nil {
+                Image(systemName: "photo")
+                    .font(.system(size: 9.5, weight: .semibold))
+                    .foregroundStyle(theme.accent)
+                    .frame(width: 18, height: 18)
+                    .background(theme.accent.opacity(0.14),
+                                in: RoundedRectangle(cornerRadius: theme.cornerRadius - 1))
+            } else if let label = kind?.shortLabel {
                 Text(label)
                     .font(.system(size: 8.5, weight: .bold, design: .monospaced))
                     .foregroundStyle(theme.accent)
@@ -249,7 +260,7 @@ private struct QuarantineSummaryRow: View {
 private struct ClipDetailPane: View {
     @ObservedObject var state: AppState
     @Environment(\.theme) private var theme
-    let clip: SafeClip
+    let clip: ClipboardHistoryItem
 
     private var actions: [ClipAction] { state.clipboardActions }
 
@@ -258,6 +269,7 @@ private struct ClipDetailPane: View {
     }
 
     private func activateRawClip() {
+        guard clip.textClip != nil else { return }
         state.clipActionSelection = nil
         state.performClipboardEnter()
     }
@@ -265,7 +277,7 @@ private struct ClipDetailPane: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 7) {
-                Image(systemName: "doc.on.clipboard.fill")
+                Image(systemName: clip.imageClip == nil ? "doc.on.clipboard.fill" : "photo.fill")
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(theme.accent)
                 Text(ClipAgeFormatter.string(from: clip.detectedAt))
@@ -274,38 +286,56 @@ private struct ClipDetailPane: View {
                 Spacer(minLength: 0)
             }
 
-            CommandText(command: clip.content, lineLimit: nil, size: 12)
-                .padding(9)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(theme.surface, in: RoundedRectangle(cornerRadius: theme.cornerRadius + 1))
-                .overlay {
-                    if state.clipActionSelection == nil {
-                        RoundedRectangle(cornerRadius: theme.cornerRadius + 1)
-                            .strokeBorder(theme.accent.opacity(0.6), lineWidth: 1.5)
+            if let imageClip = clip.imageClip {
+                imagePreview(imageClip)
+            } else {
+                CommandText(command: clip.content, lineLimit: nil, size: 12)
+                    .padding(9)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(theme.surface,
+                                in: RoundedRectangle(cornerRadius: theme.cornerRadius + 1))
+                    .overlay {
+                        if state.clipActionSelection == nil {
+                            RoundedRectangle(cornerRadius: theme.cornerRadius + 1)
+                                .strokeBorder(theme.accent.opacity(0.6), lineWidth: 1.5)
+                        }
                     }
-                }
-                .contentShape(Rectangle())
-                .onTapGesture { activateRawClip() }
-                // Keep the content selectable with the pointer while giving VoiceOver
-                // the same default action as a native button.
-                .accessibilityElement(children: .combine)
-                .accessibilityLabel("\(actionVerb) original clip")
-                .accessibilityAddTraits(.isButton)
-                .accessibilityAction { activateRawClip() }
+                    .contentShape(Rectangle())
+                    .onTapGesture { activateRawClip() }
+                    // Keep the content selectable with the pointer while giving VoiceOver
+                    // the same default action as a native button.
+                    .accessibilityElement(children: .combine)
+                    .accessibilityLabel("\(actionVerb) original clip")
+                    .accessibilityAddTraits(.isButton)
+                    .accessibilityAction { activateRawClip() }
+            }
 
             HStack(spacing: 7) {
                 if state.settings.promptFeaturesEnabled {
-                    Button("Save as prompt") { state.createFromSelectedClip(kind: .prompt) }
+                    Button(state.clipboardImageOCRClipID == clip.id
+                        ? "Reading text..."
+                        : "Save as prompt") {
+                        state.createFromSelectedClip(kind: .prompt, expectedID: clip.id)
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(state.clipboardImageOCRClipID != nil)
+                }
+                if clip.textClip != nil {
+                    Button("Save as alias") {
+                        state.createFromSelectedClip(kind: .alias, expectedID: clip.id)
+                    }
                         .buttonStyle(.bordered)
                 }
-                Button("Save as alias") { state.createFromSelectedClip(kind: .alias) }
-                    .buttonStyle(.bordered)
                 Spacer(minLength: 0)
-                SelectedActionHints(
-                    primaryKeys: "⏎",
-                    primaryLabel: state.settings.enterAction.needsAccessibility ? "paste clip" : "copy clip",
-                    secondaryKeys: actions.isEmpty ? nil : "⇥",
-                    secondaryLabel: actions.isEmpty ? nil : "transforms")
+                if clip.textClip != nil {
+                    SelectedActionHints(
+                        primaryKeys: "⏎",
+                        primaryLabel: state.settings.enterAction.needsAccessibility
+                            ? "paste clip"
+                            : "copy clip",
+                        secondaryKeys: actions.isEmpty ? nil : "⇥",
+                        secondaryLabel: actions.isEmpty ? nil : "transforms")
+                }
             }
             .accessibilityElement(children: .contain)
             .accessibilityLabel("Create from selected clip")
@@ -327,6 +357,41 @@ private struct ClipDetailPane: View {
                 }
             }
         }
+    }
+
+    @ViewBuilder
+    private func imagePreview(_ imageClip: ClipboardImageClip) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if let data = imageClip.data, let image = NSImage(data: data) {
+                Image(nsImage: image)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(maxWidth: .infinity, maxHeight: 260)
+                    .clipShape(RoundedRectangle(cornerRadius: theme.cornerRadius + 1))
+                Text("AliasBar reads the text on this Mac when you save it as a prompt.")
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(theme.faint)
+            } else if let issue = imageClip.issueMessage {
+                HStack(alignment: .top, spacing: 7) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                    Text(issue)
+                        .font(.system(size: 11))
+                        .foregroundStyle(theme.dim)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(10)
+            }
+        }
+        .padding(9)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(theme.surface, in: RoundedRectangle(cornerRadius: theme.cornerRadius + 1))
+        .overlay(RoundedRectangle(cornerRadius: theme.cornerRadius + 1)
+            .strokeBorder(theme.rule.opacity(0.6), lineWidth: 1))
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(imageClip.issueMessage.map { "Clipboard image. \($0)" }
+            ?? imageClip.dimensionsLabel.map { "Clipboard image, \($0) pixels" }
+            ?? "Clipboard image")
     }
 }
 

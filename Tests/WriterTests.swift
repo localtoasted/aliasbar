@@ -3554,12 +3554,16 @@ print("\n32. PasteboardBroker: self-write tracking and guarded restore")
 // recognize a write the same fake instance just received.
 final class FakePasteboard: PasteboardReading, PasteboardWriting {
     private(set) var changeCount = 0
+    private(set) var dataReadCount = 0
     private var stringValue: String?
+    private var imageValue: Data?
+    private var imageType: NSPasteboard.PasteboardType?
     private var concealedFlag = false
 
     var types: [NSPasteboard.PasteboardType]? {
-        guard stringValue != nil || concealedFlag else { return nil }
+        guard stringValue != nil || imageType != nil || concealedFlag else { return nil }
         var declared: [NSPasteboard.PasteboardType] = stringValue != nil ? [.string] : []
+        if let imageType { declared.append(imageType) }
         if concealedFlag { declared.append(NSPasteboard.PasteboardType("org.nspasteboard.ConcealedType")) }
         return declared
     }
@@ -3568,9 +3572,16 @@ final class FakePasteboard: PasteboardReading, PasteboardWriting {
         type == .string ? stringValue : nil
     }
 
+    func data(forType type: NSPasteboard.PasteboardType) -> Data? {
+        dataReadCount += 1
+        return type == imageType ? imageValue : nil
+    }
+
     @discardableResult
     func clearContents() -> Int {
         stringValue = nil
+        imageValue = nil
+        imageType = nil
         concealedFlag = false
         changeCount += 1
         return changeCount
@@ -3588,6 +3599,19 @@ final class FakePasteboard: PasteboardReading, PasteboardWriting {
     /// entirely, the way a real external app's copy would.
     func simulateExternalCopy(_ string: String?, concealed: Bool = false) {
         stringValue = string
+        imageValue = nil
+        imageType = nil
+        concealedFlag = concealed
+        changeCount += 1
+    }
+
+    func simulateExternalImage(_ data: Data?,
+                               type: NSPasteboard.PasteboardType = .png,
+                               alternateText: String? = nil,
+                               concealed: Bool = false) {
+        stringValue = alternateText
+        imageValue = data
+        imageType = type
         concealedFlag = concealed
         changeCount += 1
     }
@@ -3674,6 +3698,17 @@ check("concealed content is quarantined even though the text itself is innocuous
       concealedMonitor.history.isEmpty
           && concealedMonitor.activeQuarantine.first?.reason == .concealedPasteboardType)
 
+let oversizedConcealedPasteboard = FakePasteboard()
+let oversizedConcealedMonitor = makeMonitor(pasteboard: oversizedConcealedPasteboard)
+oversizedConcealedPasteboard.simulateExternalCopy(
+    String(repeating: "s", count: ClipboardMonitor.byteCap + 1), concealed: true)
+oversizedConcealedMonitor.poll()
+check("an oversized concealed clip keeps only a generic quarantine marker",
+      oversizedConcealedMonitor.history.isEmpty
+          && oversizedConcealedMonitor.activeQuarantine.count == 1
+          && oversizedConcealedMonitor.activeQuarantine.first?.content == "Clipboard item"
+          && oversizedConcealedMonitor.activeQuarantine.first?.reason == .concealedPasteboardType)
+
 let hotPasteboard = FakePasteboard()
 let hotMonitor = makeMonitor(pasteboard: hotPasteboard)
 hotPasteboard.simulateExternalCopy("ghp_\(providerTokenBody)")
@@ -3709,12 +3744,110 @@ atCapPasteboard.simulateExternalCopy(String(repeating: "b", count: ClipboardMoni
 atCapMonitor.poll()
 check("a clip exactly at the byte cap is still captured", atCapMonitor.history.count == 1)
 
+let onePixelPNG = Data(base64Encoded:
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")!
+
 let imageOnlyPasteboard = FakePasteboard()
 let imageOnlyMonitor = makeMonitor(pasteboard: imageOnlyPasteboard)
 imageOnlyPasteboard.simulateExternalCopy(nil)
 imageOnlyMonitor.poll()
 check("a copy with no string representation produces no entry and does not crash",
-      imageOnlyMonitor.history.isEmpty && imageOnlyMonitor.activeQuarantine.isEmpty)
+      imageOnlyMonitor.items.isEmpty && imageOnlyMonitor.activeQuarantine.isEmpty)
+
+let directImagePasteboard = FakePasteboard()
+let directImageMonitor = makeMonitor(pasteboard: directImagePasteboard)
+directImagePasteboard.simulateExternalImage(onePixelPNG)
+directImageMonitor.poll()
+check("a direct clipboard image is a selectable history item",
+      directImageMonitor.items.count == 1
+          && directImageMonitor.imageHistory.count == 1
+          && directImageMonitor.history.isEmpty)
+check("a captured image records dimensions without running OCR",
+      directImageMonitor.imageHistory.first?.dimensionsLabel == "1×1")
+let directImageID = directImageMonitor.items.first?.id
+check("a clipboard image keeps one stable selection ID",
+      directImageID != nil && directImageMonitor.items.first?.id == directImageID)
+check("image bytes have no Codable path",
+      (directImageMonitor.imageHistory[0] as Any) as? any Encodable == nil)
+
+let concealedImagePasteboard = FakePasteboard()
+let concealedImageMonitor = makeMonitor(pasteboard: concealedImagePasteboard)
+concealedImagePasteboard.simulateExternalImage(onePixelPNG, concealed: true)
+concealedImageMonitor.poll()
+check("a concealed image is quarantined before its bytes are read",
+      concealedImagePasteboard.dataReadCount == 0
+          && concealedImageMonitor.items.isEmpty
+          && concealedImageMonitor.activeQuarantine.first?.reason == .concealedPasteboardType)
+
+let secretAlternateImagePasteboard = FakePasteboard()
+let secretAlternateImageMonitor = makeMonitor(pasteboard: secretAlternateImagePasteboard)
+secretAlternateImagePasteboard.simulateExternalImage(
+    onePixelPNG, alternateText: "ghp_\(providerTokenBody)")
+secretAlternateImageMonitor.poll()
+check("a secret-shaped image alternate string quarantines before retaining image bytes",
+      secretAlternateImagePasteboard.dataReadCount == 0
+          && secretAlternateImageMonitor.items.isEmpty
+          && secretAlternateImageMonitor.activeQuarantine.first?.reason == .githubToken)
+
+let unreadableImagePasteboard = FakePasteboard()
+let unreadableImageMonitor = makeMonitor(pasteboard: unreadableImagePasteboard)
+unreadableImagePasteboard.simulateExternalImage(Data("not an image".utf8))
+unreadableImageMonitor.poll()
+check("an unreadable declared image stays selectable with a clear issue",
+      unreadableImageMonitor.imageHistory.first?.payload == .unreadable
+          && unreadableImageMonitor.imageHistory.first?.issueMessage != nil)
+
+let firstTIFFFrame = NSBitmapImageRep(
+    bitmapDataPlanes: nil, pixelsWide: 1, pixelsHigh: 1,
+    bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+    colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+let secondTIFFFrame = NSBitmapImageRep(
+    bitmapDataPlanes: nil, pixelsWide: 1, pixelsHigh: 1,
+    bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+    colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+let multiFrameTIFF = NSBitmapImageRep.tiffRepresentationOfImageReps(
+    in: [firstTIFFFrame, secondTIFFFrame])!
+let multiFramePasteboard = FakePasteboard()
+let multiFrameMonitor = makeMonitor(pasteboard: multiFramePasteboard)
+multiFramePasteboard.simulateExternalImage(multiFrameTIFF, type: .tiff)
+multiFrameMonitor.poll()
+check("multi-frame images are rejected before preview or OCR can decode every frame",
+      multiFrameMonitor.imageHistory.first?.payload == .multipleFrames
+          && multiFrameMonitor.imageHistory.first?.data == nil
+          && multiFrameMonitor.imageHistory.first?.issueMessage?.contains("single frame") == true)
+
+let hugeImagePasteboard = FakePasteboard()
+let hugeImageMonitor = makeMonitor(pasteboard: hugeImagePasteboard)
+hugeImagePasteboard.simulateExternalImage(
+    Data(repeating: 0, count: ClipboardImageCapture.maximumRetainedBytes + 1))
+hugeImageMonitor.poll()
+check("an oversized image stores no bytes but remains visible with a clear issue",
+      hugeImageMonitor.imageHistory.first?.payload == .tooLarge
+          && hugeImageMonitor.imageHistory.first?.data == nil
+          && hugeImageMonitor.imageHistory.first?.issueMessage != nil)
+
+let imageCapPasteboard = FakePasteboard()
+let imageCapMonitor = makeMonitor(pasteboard: imageCapPasteboard)
+for marker in 0..<(ClipboardMonitor.imageHistoryCap + 3) {
+    var distinctImage = onePixelPNG
+    distinctImage.append(UInt8(marker))
+    imageCapPasteboard.simulateExternalImage(distinctImage)
+    imageCapMonitor.poll()
+}
+check("session image history has its own small item cap",
+      imageCapMonitor.imageHistory.count == ClipboardMonitor.imageHistoryCap)
+
+let imageBudgetPasteboard = FakePasteboard()
+let imageBudgetMonitor = makeMonitor(pasteboard: imageBudgetPasteboard)
+for marker in 0..<5 {
+    var paddedImage = onePixelPNG
+    paddedImage.append(Data(repeating: UInt8(marker), count: 8 * 1_024 * 1_024))
+    imageBudgetPasteboard.simulateExternalImage(paddedImage)
+    imageBudgetMonitor.poll()
+}
+check("session image history enforces its total encoded-byte budget",
+      imageBudgetMonitor.imageHistory.reduce(0) { $0 + ($1.data?.count ?? 0) }
+          <= ClipboardMonitor.imageHistoryByteBudget)
 
 let dedupePasteboard = FakePasteboard()
 let dedupeMonitor = makeMonitor(pasteboard: dedupePasteboard)
@@ -4843,7 +4976,7 @@ let rankedEmptyPromptDialect = ShortcutRanker.rank(boostPool, query: "", scope: 
 check("empty query: prompt dialect boosts the prompt shortcut to the front",
       rankedEmptyPromptDialect.first?.name == "aaa-prompt")
 
-// --- "Two typed letters override the guess" ---------------------------------
+// --- The selected library stays first at every query length ------------------
 
 let oneCharShell = dialectShellShortcut(name: "zshell")
 let oneCharPrompt = dialectPromptShortcut(name: "zprompt")
@@ -4860,32 +4993,32 @@ check("at one typed character, flipping dialect flips which one leads",
 let twoCharShell = dialectShellShortcut(name: "abshel")
 let twoCharPrompt = dialectPromptShortcut(name: "abprom")
 let twoCharPool = [twoCharShell, twoCharPrompt]
-// Equal tier (both a prefix match), equal usage, equal name length — with the boost
-// off, only the alphabet is left to decide, and "abprom" < "abshel".
+// Equal tier (both a prefix match), equal usage, equal name length. Tab must still
+// change which kind leads after more than one character has been typed.
 let rankedTwoCharShellDialect = ShortcutRanker.rank(twoCharPool, query: "ab", scope: .everything, dialect: .shell)
 let rankedTwoCharPromptDialect = ShortcutRanker.rank(twoCharPool, query: "ab", scope: .everything, dialect: .prompt)
-check("at two typed characters, dialect no longer affects order",
-      rankedTwoCharShellDialect.map(\.name) == rankedTwoCharPromptDialect.map(\.name))
-check("at two typed characters, order falls back to relevance/alphabetical only",
-      rankedTwoCharShellDialect.map(\.name) == ["abprom", "abshel"])
+check("at two typed characters, shell view keeps aliases first",
+      rankedTwoCharShellDialect.map(\.name) == ["abshel", "abprom"])
+check("at two typed characters, prompt view keeps prompts first",
+      rankedTwoCharPromptDialect.map(\.name) == ["abprom", "abshel"])
 
-// --- Usage breaks ties within a tier, independent of dialect -----------------
+// --- The selected library leads before usage breaks same-kind ties ------------
 
 let usageTieShell = dialectShellShortcut(name: "deploy-shell", uses: 5)
 let usageTiePrompt = dialectPromptShortcut(name: "deploy-prompt", uses: 50)
 let usageTiePool = [usageTieShell, usageTiePrompt]
-// "deploy" is 6 characters, so the boost is already off; both names prefix-match it
-// at the same tier, leaving usage as the only tiebreaker.
+// Both names prefix-match. The selected library leads even when the other kind has
+// more uses, which makes the Tab switch visible and predictable.
 let rankedByUsage = ShortcutRanker.rank(usageTiePool, query: "deploy", scope: .everything, dialect: .shell)
-check("usage breaks a tier tie toward the prompt when it has more uses",
-      rankedByUsage.first?.name == "deploy-prompt")
+check("shell view leads with an alias before cross-kind usage",
+      rankedByUsage.first?.name == "deploy-shell")
 
 let usageTieShell2 = dialectShellShortcut(name: "sync-shell", uses: 80)
 let usageTiePrompt2 = dialectPromptShortcut(name: "sync-prompt", uses: 3)
 let rankedByUsage2 = ShortcutRanker.rank([usageTieShell2, usageTiePrompt2], query: "sync",
                                         scope: .everything, dialect: .prompt)
-check("usage breaks a tier tie toward the shell entry even when dialect favors prompt",
-      rankedByUsage2.first?.name == "sync-shell")
+check("prompt view leads with a prompt before cross-kind usage",
+      rankedByUsage2.first?.name == "sync-prompt")
 
 // --- Pins lead, then relevance, usage, and prompt recency -------------------
 
@@ -9366,6 +9499,11 @@ check("alias and prompt rows share selection-following scroll targets",
 check("clipboard rows own selection-following scroll targets",
       clipboardFindSource.contains(".id(clip.id)")
           && clipboardFindSource.contains("guard let selected = state.selectedClip"))
+check("clipboard badges classify trimmed text",
+      clipboardFindSource.contains("return ClipKind.detect(trimmed)"))
+check("clipboard image errors reach VoiceOver",
+      clipboardFindSource
+          .contains("imageClip.issueMessage.map { \"Clipboard image. \\($0)\" }"))
 check("the all-purpose footer is gone",
       !interactionViewsSource.contains("private var footer"))
 check("shortcuts live with selected actions",
@@ -9794,6 +9932,70 @@ do {
           AppState.clipboardDraft(multilinePrompt, for: .prompt) == multilinePrompt)
 }
 
+final class StubClipboardImageTextRecognitionTask: ClipboardImageTextRecognitionTask {
+    private(set) var cancelCount = 0
+    func cancel() { cancelCount += 1 }
+}
+
+final class StubClipboardImageTextRecognizer: ClipboardImageTextRecognizing {
+    var result: (Data) -> Result<String, ClipboardImageTextRecognitionError>
+    private(set) var received: [Data] = []
+
+    init(result: @escaping (Data) -> Result<String, ClipboardImageTextRecognitionError>) {
+        self.result = result
+    }
+
+    @discardableResult
+    func recognizeText(
+        in data: Data,
+        completion: @escaping (Result<String, ClipboardImageTextRecognitionError>) -> Void
+    ) -> ClipboardImageTextRecognitionTask {
+        let task = StubClipboardImageTextRecognitionTask()
+        received.append(data)
+        completion(result(data))
+        return task
+    }
+}
+
+final class DeferredClipboardImageTextRecognizer: ClipboardImageTextRecognizing {
+    struct Call {
+        let data: Data
+        let task: StubClipboardImageTextRecognitionTask
+        let completion: (Result<String, ClipboardImageTextRecognitionError>) -> Void
+    }
+
+    private(set) var calls: [Call] = []
+
+    @discardableResult
+    func recognizeText(
+        in data: Data,
+        completion: @escaping (Result<String, ClipboardImageTextRecognitionError>) -> Void
+    ) -> ClipboardImageTextRecognitionTask {
+        let task = StubClipboardImageTextRecognitionTask()
+        calls.append(Call(data: data, task: task, completion: completion))
+        return task
+    }
+
+    /// Delivers even after cancellation to prove AppState ignores a late callback.
+    func complete(_ index: Int, with result: Result<String, ClipboardImageTextRecognitionError>) {
+        calls[index].completion(result)
+    }
+}
+
+check("OCR normalizes line endings and outside whitespace without flattening layout",
+      ClipboardOCRText.normalize("  \r\nFirst\r\n  indented\rLast  \n")
+          == "First\n  indented\nLast")
+
+var guardedVisionResult: Result<String, ClipboardImageTextRecognitionError>?
+VisionClipboardImageTextRecognizer().recognizeText(in: onePixelPNG) {
+    guardedVisionResult = $0
+}
+if case .failure(.blockedInTestMode)? = guardedVisionResult {
+    check("test mode blocks accidental Vision OCR", true)
+} else {
+    check("test mode blocks accidental Vision OCR", false)
+}
+
 do {
     let (settings, _) = freshTestSettings()
     settings.promptFeaturesEnabled = true
@@ -9823,6 +10025,192 @@ do {
     state.createFromSelectedClip(kind: .alias)
     check("Save as Alias prefills a safe selected command",
           state.editor?.command == "git status --short")
+}
+
+do {
+    let (settings, _) = freshTestSettings()
+    settings.promptFeaturesEnabled = true
+    let state = AppState(store: EntryStore(), settings: settings)
+    let livePasteboard = ReadCountingPasteboard("the live clipboard must not win")
+    state.pasteboard = livePasteboard
+
+    let imagePasteboard = FakePasteboard()
+    let monitor = ClipboardMonitor(pasteboard: imagePasteboard)
+    state.clipboardMonitor = monitor
+
+    var olderImage = onePixelPNG
+    olderImage.append(1)
+    var newerImage = onePixelPNG
+    newerImage.append(2)
+    imagePasteboard.simulateExternalImage(olderImage)
+    monitor.poll()
+    imagePasteboard.simulateExternalImage(newerImage)
+    monitor.poll()
+
+    state.enterClipboard()
+    state.selection = 1 // choose the older image, not the newest row
+    let selectedID = state.selectedClip?.id
+    let imageReadsBeforeAction = imagePasteboard.dataReadCount
+    let recognizer = StubClipboardImageTextRecognizer { data in
+        .success(data == olderImage
+            ? "  First line\r\n  keep this indent\rLast line  \n"
+            : "wrong image")
+    }
+    state.clipboardImageTextRecognizer = recognizer
+    state.createFromSelectedClip(kind: .prompt, expectedID: monitor.items[0].id)
+    check("a stale detail action cannot OCR a different selected clipboard item",
+          recognizer.received.isEmpty
+              && state.errorMessage == "The clipboard selection changed. Select the item again.")
+    state.createFromSelectedClip(kind: .prompt, expectedID: selectedID)
+
+    check("Save as Prompt OCRs the specifically selected image ID",
+          selectedID == monitor.items[1].id
+              && recognizer.received == [olderImage]
+              && state.editor?.body == "First line\n  keep this indent\nLast line")
+    check("image OCR opens the normal reviewable prompt composer",
+          state.editor?.kind == .prompt
+              && state.editor?.source == "selected-clipboard-image")
+    check("image-to-prompt never reads whatever is now on the live clipboard",
+          livePasteboard.readCount == 0
+              && imagePasteboard.dataReadCount == imageReadsBeforeAction)
+}
+
+do {
+    let (settings, _) = freshTestSettings()
+    settings.promptFeaturesEnabled = true
+    let state = AppState(store: EntryStore(), settings: settings)
+    let imagePasteboard = FakePasteboard()
+    let monitor = ClipboardMonitor(pasteboard: imagePasteboard)
+    state.clipboardMonitor = monitor
+
+    var firstImage = onePixelPNG
+    firstImage.append(10)
+    var secondImage = onePixelPNG
+    secondImage.append(11)
+    imagePasteboard.simulateExternalImage(firstImage)
+    monitor.poll()
+    imagePasteboard.simulateExternalImage(secondImage)
+    monitor.poll()
+    state.enterClipboard()
+
+    let recognizer = DeferredClipboardImageTextRecognizer()
+    state.clipboardImageTextRecognizer = recognizer
+    let firstSelectedID = state.selectedClip!.id
+    state.createFromSelectedClip(kind: .prompt, expectedID: firstSelectedID)
+    state.createFromSelectedClip(kind: .prompt, expectedID: firstSelectedID)
+    check("retrying image OCR cancels the prior Vision task",
+          recognizer.calls.count == 2
+              && recognizer.calls[0].task.cancelCount == 1)
+
+    state.selection = 1
+    check("changing clipboard selection cancels active image OCR",
+          recognizer.calls[1].task.cancelCount == 1
+              && state.clipboardImageOCRClipID == nil)
+
+    state.selection = 0
+    let rowZeroID = state.selectedClip!.id
+    state.createFromSelectedClip(kind: .prompt, expectedID: rowZeroID)
+    _ = state.handleKey(keyEvent(keyCode: 40, modifiers: .command)) // ⌘K leaves Clipboard
+    check("leaving Clipboard with row zero selected cancels active image OCR",
+          state.findSource == .aliases
+              && recognizer.calls[2].task.cancelCount == 1
+              && state.clipboardImageOCRClipID == nil)
+
+    _ = state.handleKey(keyEvent(keyCode: 40, modifiers: .command)) // ⌘K returns to Clipboard
+    let secondSelectedID = state.selectedClip!.id
+    state.createFromSelectedClip(kind: .prompt, expectedID: secondSelectedID)
+    state.presentationWillClose()
+    check("closing the palette cancels active image OCR",
+          recognizer.calls[3].task.cancelCount == 1
+              && state.clipboardImageOCRClipID == nil)
+
+    for index in recognizer.calls.indices {
+        recognizer.complete(index, with: .success("late text from cancelled OCR"))
+    }
+    check("a completion delivered after cancellation cannot open Composer",
+          state.editor == nil)
+}
+
+do {
+    let (settings, _) = freshTestSettings()
+    settings.promptFeaturesEnabled = true
+    let state = AppState(store: EntryStore(), settings: settings)
+    let imagePasteboard = FakePasteboard()
+    let monitor = ClipboardMonitor(pasteboard: imagePasteboard)
+    state.clipboardMonitor = monitor
+    imagePasteboard.simulateExternalImage(onePixelPNG)
+    monitor.poll()
+    state.enterClipboard()
+
+    let recognizer = StubClipboardImageTextRecognizer { _ in .success(" \r\n ") }
+    state.clipboardImageTextRecognizer = recognizer
+    state.createFromSelectedClip(kind: .prompt)
+    check("an image with no recognized text stays out of Composer with a clear error",
+          state.editor == nil
+              && state.errorMessage == "AliasBar found no readable text in this image.")
+
+    recognizer.result = { _ in .failure(.failed) }
+    state.createFromSelectedClip(kind: .prompt)
+    check("an OCR failure stays out of Composer with a clear error",
+          state.editor == nil
+              && state.errorMessage == "AliasBar could not read text from this image.")
+
+    recognizer.result = { _ in
+        .success(String(repeating: "x", count:
+            SensitiveContentClassifier.Thresholds.maximumInputBytes + 1))
+    }
+    state.createFromSelectedClip(kind: .prompt)
+    check("oversized OCR text fails the prompt limit before secret quarantine",
+          state.editor == nil
+              && monitor.imageHistory.count == 1
+              && monitor.activeQuarantine.isEmpty
+              && state.errorMessage == "The text in this image is too long for a prompt.")
+}
+
+do {
+    let (settings, _) = freshTestSettings()
+    settings.promptFeaturesEnabled = true
+    let state = AppState(store: EntryStore(), settings: settings)
+    let imagePasteboard = FakePasteboard()
+    let monitor = ClipboardMonitor(pasteboard: imagePasteboard,
+                                   quarantine: QuarantineStore(clock: { quarantineBase }),
+                                   clock: { quarantineBase })
+    state.clipboardMonitor = monitor
+    imagePasteboard.simulateExternalImage(onePixelPNG)
+    monitor.poll()
+    state.enterClipboard()
+
+    state.clipboardImageTextRecognizer = StubClipboardImageTextRecognizer { _ in
+        .success("GITHUB_TOKEN=ghp_" + String(repeating: "A", count: 24))
+    }
+    state.createFromSelectedClip(kind: .prompt)
+    check("secret-shaped OCR text is quarantined instead of entering Composer",
+          state.editor == nil
+              && monitor.imageHistory.isEmpty
+              && monitor.activeQuarantine.first?.reason == .githubToken
+              && state.errorMessage
+                  == "AliasBar removed this image from clipboard history because its text may contain a secret.")
+}
+
+do {
+    let (settings, _) = freshTestSettings()
+    settings.promptFeaturesEnabled = true
+    let state = AppState(store: EntryStore(), settings: settings)
+    let imagePasteboard = FakePasteboard()
+    let monitor = ClipboardMonitor(pasteboard: imagePasteboard)
+    state.clipboardMonitor = monitor
+    imagePasteboard.simulateExternalImage(
+        Data(repeating: 0, count: ClipboardImageCapture.maximumRetainedBytes + 1))
+    monitor.poll()
+    state.enterClipboard()
+
+    let recognizer = StubClipboardImageTextRecognizer { _ in .success("must not run") }
+    state.clipboardImageTextRecognizer = recognizer
+    state.createFromSelectedClip(kind: .prompt)
+    check("an oversized selected image explains the limit without invoking OCR",
+          recognizer.received.isEmpty
+              && state.editor == nil
+              && state.errorMessage?.contains("16 MB") == true)
 }
 
 let libraryPanelSource = read(projectRoot.appendingPathComponent("Sources/LibraryBuilderPanel.swift").path)
@@ -10136,6 +10524,9 @@ check("the search field is laid out before the view controls",
       rootViewSource.contains("VStack(spacing: 9) {\n            searchField\n            navigationBar"))
 check("the view controls show a contextual Tab library hint",
       rootViewSource.contains("KeyHint(keys: \"⇥\", label:"))
+check("the Find rest label follows the library selected with Tab",
+      rootViewSource
+          .contains("state.dialect == .prompt ? \"PROMPTS FIRST\" : \"ALIASES FIRST\""))
 check("selection actions reserve stable row width instead of reflowing text",
       rootViewSource.contains("struct StableRowActionHints")
           && rootViewSource.contains(".frame(width: 196, height: 24, alignment: .trailing)")

@@ -146,7 +146,13 @@ extension ZshrcParser {
     static var path: String { AppPaths.rcPath }
 
     static var displayPath: String {
-        (path as NSString).abbreviatingWithTildeInPath
+        let environment = ProcessInfo.processInfo.environment
+        if environment["ALIASBAR_TEST_MODE"] == "1",
+           let label = environment["ALIASBAR_TEST_RC_DISPLAY_PATH"],
+           !label.isEmpty {
+            return label
+        }
+        return (path as NSString).abbreviatingWithTildeInPath
     }
 
     static func parse() -> ParseOutcome {

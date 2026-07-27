@@ -99,11 +99,10 @@ enum ContextDetector {
 ///
 /// Two scoring regimes share one pool, because the two kinds of thing being searched
 /// have different fields worth matching: shell entries by name/comment/command exactly
-/// as `Ranker` already scores them, prompts by name/description/body. Below two typed
-/// characters, `dialect` gets first look — the guess is doing the useful work of
-/// surfacing the likely kind without hiding the other one; at two or more, the guess
-/// steps aside and lets relevance decide on its own, because by then the user's own
-/// keystrokes know more than the frontmost app did.
+/// as `Ranker` already scores them, prompts by name/description/body. The selected
+/// dialect keeps its kind first at every query length, so pressing Tab always has a
+/// visible effect. It is still a preference rather than a filter: both kinds remain
+/// searchable in the same list.
 enum ShortcutRanker {
     /// `Shortcut`'s shell-shaped fields, scored through `Ranker.shellFieldScore` —
     /// the exact same numeric ladder (500_000 down to 100_000) `Ranker` itself uses
@@ -145,16 +144,13 @@ enum ShortcutRanker {
     }
 
     /// `pool` is every shortcut FIND is allowed to show — shell and prompt alike,
-    /// unfiltered by dialect. Pins lead the list, then relevance, the short-query
-    /// dialect hint, usage, prompt recency, and name provide deterministic ties.
+    /// unfiltered by dialect. Pins lead the list, then the selected dialect, relevance,
+    /// usage, prompt recency, and name provide deterministic ties.
     static func rank(_ pool: [Shortcut],
                      query: String,
                      scope: SearchScope,
                      dialect: Dialect) -> [Shortcut] {
         let q = query.lowercased().trimmingCharacters(in: .whitespaces)
-        // "Two typed letters override the guess": at zero or one, the boost still
-        // applies; at two, it stops.
-        let boostActive = q.count < 2
 
         let scored: [(Shortcut, Int)]
         if q.isEmpty {
@@ -174,12 +170,10 @@ enum ShortcutRanker {
             // Pins are the one deliberate override. Everything below remains the
             // ordinary ordering ladder for items with equal pin state.
             if lhs.0.isPinned != rhs.0.isPinned { return lhs.0.isPinned }
+            let lhsBoost = matchesDialect(lhs.0, dialect)
+            let rhsBoost = matchesDialect(rhs.0, dialect)
+            if lhsBoost != rhsBoost { return lhsBoost }
             if lhs.1 != rhs.1 { return lhs.1 > rhs.1 }
-            if boostActive {
-                let lhsBoost = matchesDialect(lhs.0, dialect)
-                let rhsBoost = matchesDialect(rhs.0, dialect)
-                if lhsBoost != rhsBoost { return lhsBoost }
-            }
             if lhs.0.uses != rhs.0.uses { return lhs.0.uses > rhs.0.uses }
             if lhs.0.lastUsed != rhs.0.lastUsed {
                 return (lhs.0.lastUsed ?? .distantPast) > (rhs.0.lastUsed ?? .distantPast)

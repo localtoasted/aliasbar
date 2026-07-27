@@ -280,7 +280,10 @@ final class AppState: ObservableObject {
         didSet { normalizeSelectionAfterSurfaceChange() }
     }
     @Published var query = "" {
-        didSet { resetSelectionForQuery() }
+        didSet {
+            if findSource == .clipboard { cancelClipboardImageOCR() }
+            resetSelectionForQuery()
+        }
     }
     /// Whichever list a source is currently navigating — shell/prompt rows, history
     /// commands, or clipboard clips, depending on `findSource`/`mode`. Resetting the
@@ -288,7 +291,12 @@ final class AppState: ObservableObject {
     /// route that moves this (arrow keys, a query edit, flipping `findSource` itself)
     /// from having to remember to do it individually.
     @Published var selection = 0 {
-        didSet { if findSource == .clipboard { clipActionSelection = nil } }
+        didSet {
+            if findSource == .clipboard {
+                clipActionSelection = nil
+                if oldValue != selection { cancelClipboardImageOCR() }
+            }
+        }
     }
     @Published var bucket: Bucket = .all {
         didSet { normalizeSelectionAfterSurfaceChange() }
@@ -298,10 +306,9 @@ final class AppState: ObservableObject {
     /// dialect and flipping back should not have quietly moved the shell sidebar's
     /// own selection.
     @Published var promptBucket: PromptBucket = .library
-    /// Which kind of thing FIND currently favors when there isn't enough query yet to
-    /// know: `.shell` for a terminal-shaped previous app, `.prompt` for an AI-native
-    /// one. Recomputed fresh on every summon by `ContextDetector`; ⇥ flips it by hand
-    /// from there, independent of whatever the guess said.
+    /// Which kind of thing FIND currently favors: `.shell` for a terminal-shaped
+    /// previous app, `.prompt` for an AI-native one. Recomputed fresh on every summon
+    /// by `ContextDetector`; ⇥ flips it by hand from there, independent of the guess.
     ///
     /// BOARD reads the same field to decide which deck is on screen — the shell keycap
     /// grid for `.shell`, the prompt card wall for `.prompt` — so opening on "the deck
@@ -361,6 +368,14 @@ final class AppState: ObservableObject {
     /// reaches the broker byte-exact without ever touching the actual clipboard.
     /// Swapping it changes nothing about the delivery pipeline itself.
     var pasteboard: PasteboardWriting = NSPasteboard.general
+
+    /// Local image OCR. Tests replace this with a deterministic fake, so they never
+    /// invoke Vision or read the system clipboard.
+    var clipboardImageTextRecognizer: ClipboardImageTextRecognizing =
+        VisionClipboardImageTextRecognizer()
+    @Published private(set) var clipboardImageOCRClipID: UUID?
+    private var clipboardImageOCRRequestID: UUID?
+    private var clipboardImageOCRTask: ClipboardImageTextRecognitionTask?
 
     /// Every prompt on disk, read once per summon in `prepareForShow` — a directory
     /// scan on every keystroke would be felt, the same reasoning `EntryStore` already
@@ -1373,7 +1388,12 @@ final class AppState: ObservableObject {
     /// replaced a plain history-only flag once clipboard became a second alternate
     /// source rather than inventing its own boolean beside it.
     @Published var findSource: FindSource = .aliases {
-        didSet { selection = 0; historyMemoQuery = nil; clipActionSelection = nil }
+        didSet {
+            if oldValue == .clipboard { cancelClipboardImageOCR() }
+            selection = 0
+            historyMemoQuery = nil
+            clipActionSelection = nil
+        }
     }
 
     /// Compatibility read for every call site that predates the three-way source
@@ -1475,12 +1495,12 @@ final class AppState: ObservableObject {
     /// to a caller to remember.
     @Published var clipActionSelection: Int?
 
-    /// FIND's clipboard rows: `ClipboardMonitor`'s SafeClip history, newest first,
-    /// exactly as the monitor already orders it, optionally narrowed by the live
+    /// FIND's clipboard rows: text plus session-only images, newest first, exactly
+    /// as the monitor orders them, optionally narrowed by the live
     /// query (plain substring match — a recency list, not a ranked search, so there
     /// is nothing here for `Ranker` to do).
-    var clipboardRows: [SafeClip] {
-        let all = clipboardMonitor?.history ?? []
+    var clipboardRows: [ClipboardHistoryItem] {
+        let all = clipboardMonitor?.items ?? []
         guard !query.isEmpty else { return all }
         let needle = query.lowercased()
         return all.filter { $0.content.lowercased().contains(needle) }
@@ -1498,7 +1518,7 @@ final class AppState: ObservableObject {
     /// "no fallback to first" rule, and nil outside the clipboard source so a
     /// selection index left over from another source's list can never be misread
     /// as a clip.
-    var selectedClip: SafeClip? {
+    var selectedClip: ClipboardHistoryItem? {
         guard findSource == .clipboard else { return nil }
         let rows = clipboardRows
         guard rows.indices.contains(selection) else { return nil }
@@ -1510,7 +1530,7 @@ final class AppState: ObservableObject {
     /// `ClipTransformer.actions` themselves, so Tab's cycling and what the pane
     /// draws can never disagree about how many actions there are.
     var clipboardActions: [ClipAction] {
-        guard let clip = selectedClip else { return [] }
+        guard let clip = selectedClip?.textClip else { return [] }
         return ClipTransformer.actions(for: clip.content)
     }
 
@@ -1540,7 +1560,11 @@ final class AppState: ObservableObject {
     /// uses, so clipboard delivery honors `enterAction`'s copy/paste half and
     /// `afterAction` identically to a shell or prompt result.
     func performClipboardEnter() {
-        guard let clip = selectedClip else { return }
+        guard let item = selectedClip else { return }
+        guard let clip = item.textClip else {
+            errorMessage = "Use Save as prompt to read text from this image."
+            return
+        }
         let pasting = settings.enterAction == .pasteName || settings.enterAction == .pasteCommand
         if let index = clipActionSelection, clipboardActions.indices.contains(index) {
             let action = clipboardActions[index]
@@ -1795,6 +1819,7 @@ final class AppState: ObservableObject {
     /// focus over it.
     func presentationWillClose() {
         invalidatePendingCopyDismissal()
+        cancelClipboardImageOCR()
     }
 
     /// Opens Settings through one state-owned route so its close cannot leave delayed
@@ -1813,6 +1838,7 @@ final class AppState: ObservableObject {
     /// Called every time the popover opens.
     func prepareForShow() {
         invalidatePendingCopyDismissal()
+        cancelClipboardImageOCR()
         store.reload()
         errorMessage = store.loadError
         mode = settings.defaultView
@@ -2485,12 +2511,27 @@ final class AppState: ObservableObject {
     /// Starts a new item from the clip currently selected inside AliasBar. Plain New
     /// never reads the system clipboard; this action is the only clipboard-to-Composer
     /// path, and its source is visible in the clipboard view before the user chooses it.
-    func createFromSelectedClip(kind: EditTarget.Kind) {
-        guard let clip = selectedClip else { return }
+    func createFromSelectedClip(kind: EditTarget.Kind, expectedID: UUID? = nil) {
+        guard let item = selectedClip else { return }
+        guard expectedID == nil || item.id == expectedID else {
+            errorMessage = "The clipboard selection changed. Select the item again."
+            return
+        }
         guard kind != .prompt || settings.promptFeaturesEnabled else {
             errorMessage = "Turn on prompts to save this clip as a prompt."
             return
         }
+
+        if let image = item.imageClip {
+            guard kind == .prompt else {
+                errorMessage = "Save image text as a prompt."
+                return
+            }
+            createPromptFromSelectedImage(image)
+            return
+        }
+
+        guard let clip = item.textClip else { return }
         guard let safe = Self.clipboardDraft(clip.content, for: kind) else {
             errorMessage = kind == .alias
                 ? "This clip is not a safe one-line alias command."
@@ -2500,6 +2541,79 @@ final class AppState: ObservableObject {
         errorMessage = nil
         openComposer(prefill: ComposerPrefill(kind: kind, body: safe,
                                               source: "selected-clipboard-clip"))
+    }
+
+    private func createPromptFromSelectedImage(_ image: ClipboardImageClip) {
+        guard let data = image.data else {
+            errorMessage = image.issueMessage ?? "AliasBar could not read this image."
+            return
+        }
+
+        cancelClipboardImageOCR()
+        let requestID = UUID()
+        clipboardImageOCRRequestID = requestID
+        clipboardImageOCRClipID = image.id
+        errorMessage = nil
+
+        let task = clipboardImageTextRecognizer.recognizeText(in: data) { [weak self] result in
+            let finish = {
+                guard let self, self.clipboardImageOCRRequestID == requestID else { return }
+                self.clipboardImageOCRRequestID = nil
+                self.clipboardImageOCRClipID = nil
+                self.clipboardImageOCRTask = nil
+
+                switch result {
+                case .failure:
+                    self.errorMessage = "AliasBar could not read text from this image."
+
+                case .success(let recognized):
+                    let text = ClipboardOCRText.normalize(recognized)
+                    guard !text.isEmpty else {
+                        self.errorMessage = "AliasBar found no readable text in this image."
+                        return
+                    }
+
+                    guard text.utf8.count <= 65_536 else {
+                        self.errorMessage = "The text in this image is too long for a prompt."
+                        return
+                    }
+
+                    if let reason = SensitiveContentClassifier.quarantineReason(in: text) {
+                        _ = self.clipboardMonitor?.quarantineImage(
+                            id: image.id, recognizedText: text, reason: reason)
+                        self.objectWillChange.send()
+                        self.errorMessage = "AliasBar removed this image from clipboard history because its text may contain a secret."
+                        return
+                    }
+
+                    self.errorMessage = nil
+                    self.openComposer(prefill: ComposerPrefill(
+                        kind: .prompt,
+                        body: text,
+                        source: "selected-clipboard-image"
+                    ))
+                }
+            }
+
+            if Thread.isMainThread {
+                finish()
+            } else {
+                DispatchQueue.main.async(execute: finish)
+            }
+        }
+        if clipboardImageOCRRequestID == requestID {
+            clipboardImageOCRTask = task
+        } else {
+            // A synchronous recognizer (used by tests) may already have completed.
+            task.cancel()
+        }
+    }
+
+    private func cancelClipboardImageOCR() {
+        clipboardImageOCRTask?.cancel()
+        clipboardImageOCRTask = nil
+        clipboardImageOCRRequestID = nil
+        clipboardImageOCRClipID = nil
     }
 
     /// The Composer's one entry point. Every route that opens the sheet — ⌘N,

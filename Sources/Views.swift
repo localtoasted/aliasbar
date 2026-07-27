@@ -882,12 +882,11 @@ struct FindView: View {
         settings.enterAction.needsAccessibility ? "paste prompt" : "copy prompt"
     }
 
-    /// Names the rest state honestly. With no shell history to rank by, calling the list
-    /// "most used" would be a lie — and with a bucket applied, so would any label that
-    /// is not the bucket's own name.
+    /// Names the rest state honestly. The selected library leads the mixed list; a
+    /// shell bucket keeps its own name because it narrows the list further.
     private var restLabel: String {
         if state.bucket != .all { return state.bucket.label.uppercased() }
-        return state.store.mostUsed.isEmpty ? "YOUR ALIASES" : "MOST USED"
+        return state.dialect == .prompt ? "PROMPTS FIRST" : "ALIASES FIRST"
     }
 
     /// Rebuilds the `RankedEntry` `PrimaryResult`/`AlternateRow` expect, from a
