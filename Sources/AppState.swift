@@ -402,8 +402,9 @@ final class AppState: ObservableObject {
     /// anywhere else shows up the next time the pane draws — kept honest by the file
     /// itself rather than by remembering to call a refresh.
     ///
-    /// Modification date *and* size, the same pair `loadHistoryIfNeeded` uses for
-    /// ~/.zsh_history: a same-second rewrite can leave the date looking unchanged at
+    /// Modification date *and* size, the same pair `SuggestionStamp` uses for
+    /// ~/.zsh_history (`loadHistoryIfNeeded` still keys on the date alone):
+    /// a same-second rewrite can leave the date looking unchanged at
     /// whatever resolution the volume records, and a rewrite that only reorders or
     /// re-hashes entries can leave the size unchanged, so neither field is sufficient
     /// alone. A missing or unreadable file stamps as all-nil, which is a real

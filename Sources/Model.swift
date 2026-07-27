@@ -502,20 +502,25 @@ struct Conflict: Identifiable, Hashable {
 ///
 /// Two things keep this honest rather than merely fast:
 ///
-///   - Every directory carries its modification date and size, and every request for
-///     the shared index (`ConflictDetector.executableIndex`) re-reads them. Creating
-///     or removing an entry moves a directory's mtime, so a `brew install` between two
-///     summons costs one re-listing of one directory and is visible immediately. The
-///     filesystem is the invalidation signal — there is no in-app dirty flag to forget
-///     to set, the same reasoning `loadHistoryIfNeeded` and the prompt-delivery
-///     snapshot already use. Date *and* size because a same-second change can leave
-///     the date looking untouched at whatever resolution the volume records.
+///   - Every directory carries its own `stat`, and every request for the shared index
+///     (`ConflictDetector.executableIndex`) re-reads it. Creating or removing an entry
+///     moves a directory's mtime, so a `brew install` between two summons costs one
+///     re-listing of one directory and is visible immediately. The filesystem is the
+///     invalidation signal — there is no in-app dirty flag to forget to set, the same
+///     reasoning `loadHistoryIfNeeded` and the prompt-delivery snapshot already use.
+///     Time *and* size because a same-second change can leave the time looking
+///     untouched at whatever resolution the volume records.
 ///   - A listing says a name *exists*, not that it is *executable*, and a `chmod`
 ///     moves no directory's mtime at all. So a name the listing knows about is still
 ///     confirmed with `isExecutableFile` before it is reported — the exact check the
 ///     old loop made, now made once per hit instead of once per (name, directory).
 ///     A directory that refuses to be listed (no read permission, or it is not a
 ///     directory) keeps the old per-name stat, so nothing it holds becomes invisible.
+///
+/// The listing is a filter on which directories are worth confirming, never an answer
+/// in its own right, so it has to be at least as permissive as the volume it describes
+/// — see `Listing.foldedNames`. Get that backwards and the `continue` fires before the
+/// confirming stat ever runs, and a real shadow goes unreported.
 ///
 /// The result is answer-for-answer identical to the loop it replaces, including which
 /// directory wins when several hold the same name: PATH order, first match.
@@ -524,10 +529,52 @@ struct PathExecutableIndex {
     /// key — an index built for injected test paths can never answer for the real PATH.
     let searchPaths: [String]
 
+    /// What a directory looked like when it was listed: modification time to the
+    /// nanosecond, and size. `nil` for a directory that could not be stat'd at all,
+    /// which is its own stable observation — a path that stays missing never re-lists,
+    /// and one that appears does.
+    private struct Stamp: Equatable {
+        var seconds: Int
+        var nanoseconds: Int
+        var size: Int64
+    }
+
+    /// Raw `stat(2)`, not `FileManager.attributesOfItem`, for two reasons that both
+    /// decide correctness or cost on the per-keystroke path:
+    ///
+    ///   - `stat` follows symbolic links; `attributesOfItem` does not (`lstat`
+    ///     semantics), while `contentsOfDirectory` does. A PATH entry that is itself a
+    ///     link to a directory — `~/bin -> ~/dotfiles/bin`, the ordinary dotfiles
+    ///     layout — would otherwise be stamped with the *link's* mtime and size, which
+    ///     the target's contents can never move. The stamp would never disagree, the
+    ///     directory would never re-list, and everything installed there after launch
+    ///     would stay invisible for the life of a process that stays resident for weeks.
+    ///   - `attributesOfItem` is not one stat: it builds a ~15-key dictionary including
+    ///     `getpwuid`/`getgrgid` account-name resolution. Measured over this machine's
+    ///     32-directory PATH, once per directory: 396 µs against 21 µs for the raw call,
+    ///     and 24 µs for the whole per-name loop this type exists to replace. Paying it
+    ///     inside `revalidate` made a keystroke in the Composer's name field 16x more
+    ///     expensive than doing no caching at all.
+    private static func stamp(of path: String) -> Stamp? {
+        var info = stat()
+        guard stat(path, &info) == 0 else { return nil }
+        return Stamp(seconds: info.st_mtimespec.tv_sec,
+                     nanoseconds: info.st_mtimespec.tv_nsec,
+                     size: info.st_size)
+    }
+
     private struct Listing {
-        var modified: Date?
-        var size: Int?
-        var names: Set<String>
+        var stamp: Stamp?
+        /// Lowercased, because the volume this app ships on is case-insensitive APFS by
+        /// default, so `isExecutableFile` is too and an exact-byte `Set` lookup is not.
+        /// `/usr/bin` alone ships `Rez`, `DeRez`, `SetFile`, `GetFileInfo`,
+        /// `networkQuality` and two dozen more; on an exact-byte set, asking about
+        /// `rez` skips the directory that holds it and the shadow advisory goes silent
+        /// on a name that really is taken. Folding can only ever add a candidate, and
+        /// the `isExecutableFile` confirm below still decides — so a genuinely
+        /// case-sensitive volume gets the same answer as before, at the price of one
+        /// extra stat on a fold collision.
+        var foldedNames: Set<String>
         /// False when the directory refused to be listed; lookups fall back to a
         /// direct `isExecutableFile` there, exactly as before this index existed.
         var listable: Bool
@@ -536,21 +583,18 @@ struct PathExecutableIndex {
 
     init(searchPaths: [String]) {
         self.searchPaths = searchPaths
-        self.listings = Array(repeating: Listing(modified: nil, size: nil,
-                                                 names: [], listable: false),
+        self.listings = Array(repeating: Listing(stamp: nil, foldedNames: [],
+                                                 listable: false),
                               count: searchPaths.count)
         for index in searchPaths.indices { load(index) }
     }
 
-    /// Re-lists only the directories whose stamp has moved. One stat per PATH
+    /// Re-lists only the directories whose stamp has moved. One `stat` per PATH
     /// directory; on an unchanged PATH that is the whole cost of a lookup, against
     /// one stat per (name, directory) before.
     mutating func revalidate() {
         for index in searchPaths.indices {
-            let attributes = try? FileManager.default.attributesOfItem(atPath: searchPaths[index])
-            let modified = attributes?[.modificationDate] as? Date
-            let size = attributes?[.size] as? Int
-            if modified != listings[index].modified || size != listings[index].size {
+            if Self.stamp(of: searchPaths[index]) != listings[index].stamp {
                 load(index)
             }
         }
@@ -562,11 +606,10 @@ struct PathExecutableIndex {
         // stamp looking older than the listing, so the next request re-lists and is
         // merely redundant. The other order would bake in a stamp that already
         // describes content this listing missed, and the miss would be permanent.
-        let attributes = try? FileManager.default.attributesOfItem(atPath: path)
+        let stamp = Self.stamp(of: path)
         let contents = try? FileManager.default.contentsOfDirectory(atPath: path)
-        listings[index] = Listing(modified: attributes?[.modificationDate] as? Date,
-                                  size: attributes?[.size] as? Int,
-                                  names: Set(contents ?? []),
+        listings[index] = Listing(stamp: stamp,
+                                  foldedNames: Set((contents ?? []).map { $0.lowercased() }),
                                   listable: contents != nil)
     }
 
@@ -577,11 +620,16 @@ struct PathExecutableIndex {
         // holding a separator (or nothing at all) is left to the filesystem, which is
         // what the old loop did for every name.
         let listable = !name.isEmpty && !name.contains("/")
+        let folded = name.lowercased()
         let fm = FileManager.default
         for (index, directory) in searchPaths.enumerated() {
-            if listable, listings[index].listable, !listings[index].names.contains(name) {
+            if listable, listings[index].listable,
+               !listings[index].foldedNames.contains(folded) {
                 continue
             }
+            // The on-disk spelling is deliberately not substituted here: the reported
+            // path is what `Conflict.shadowsBinary` shows the user, and the old loop
+            // reported the name they typed.
             let candidate = directory + "/" + name
             if fm.isExecutableFile(atPath: candidate) { return candidate }
         }

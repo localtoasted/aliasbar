@@ -11033,6 +11033,14 @@ print("\n49. PATH shadow lookups read a directory index, and the index cannot go
 // the directory stamp catches entries appearing and disappearing, and the
 // confirm-with-`isExecutableFile` step catches permission changes, which move no
 // directory's modification date at all.
+//
+// Staleness is not the only way a cache can be wrong about the filesystem, so the last
+// two blocks pin the two ways the *listing* can disagree with the volume it describes:
+// case, because the boot volume is case-insensitive and an exact-byte set is not, and
+// symlinked PATH entries, because the listing follows a link and a stamp read with
+// `lstat` semantics does not. Both fail silently and in the dangerous direction — no
+// warning where the old loop gave one — which is why they are pinned by behavior here
+// rather than left to the doc comment.
 
 /// A fresh, empty directory to stand in for a PATH entry.
 func pathIndexDirectory(_ label: String) -> String {
@@ -11159,6 +11167,78 @@ do {
           ConflictDetector.isShadowed("pre287onlyhere", searchPaths: [dir]))
     check("and the real PATH is not answered from the fake directory's cache",
           !ConflictDetector.isShadowed("pre287onlyhere"))
+}
+
+do {
+    // Case. The macOS boot volume is case-insensitive APFS by default, so
+    // `isExecutableFile` is too — `/usr/bin/rez` is executable because `/usr/bin/Rez`
+    // exists. The listing only decides whether a directory is worth confirming, and
+    // its `continue` fires *before* the confirm, so an exact-byte membership test
+    // hides a real shadow: the user is told nothing and writes an alias over the
+    // binary. The oracle is the loop this index replaced — whatever a direct
+    // `isExecutableFile` answers on this volume, the index has to answer too, which
+    // keeps this honest on a case-sensitive volume as well.
+    let dir = pathIndexDirectory("case")
+    let mixedOnDisk = writeFile(dir + "/Pre287Rez", executable: true)
+    writeFile(dir + "/pre287lower", executable: true)
+    let fm = FileManager.default
+
+    check("a mixed-case executable answers a lowercase query the way the old loop did",
+          (ConflictDetector.executableIndex(searchPaths: [dir])
+              .executablePath(for: "pre287rez") != nil)
+              == fm.isExecutableFile(atPath: dir + "/pre287rez"))
+    check("and a lowercase executable answers a mixed-case query the same way",
+          (ConflictDetector.executableIndex(searchPaths: [dir])
+              .executablePath(for: "Pre287Lower") != nil)
+              == fm.isExecutableFile(atPath: dir + "/Pre287Lower"))
+
+    // Spelled out for the volume this app actually ships on, so a regression here
+    // reads as the user-facing thing it is rather than as two tautologies.
+    if fm.isExecutableFile(atPath: dir + "/pre287rez") {
+        check("so on a case-insensitive volume a lowercase query finds the mixed-case binary",
+              ConflictDetector.isShadowed("pre287rez", searchPaths: [dir]))
+        check("and a mixed-case query finds the lowercase binary",
+              ConflictDetector.isShadowed("Pre287Lower", searchPaths: [dir]))
+        // What the conflict shows the user must stay the name they typed.
+        check("and the reported path is the queried spelling, not the on-disk one",
+              ConflictDetector.executableIndex(searchPaths: [dir])
+                  .executablePath(for: "pre287rez") == dir + "/pre287rez")
+    }
+
+    check("the exact on-disk spelling is still found",
+          ConflictDetector.executableIndex(searchPaths: [dir])
+              .executablePath(for: "Pre287Rez") == mixedOnDisk)
+    check("and folding does not turn a prefix into a shadow",
+          !ConflictDetector.isShadowed("Pre287Re", searchPaths: [dir]))
+}
+
+do {
+    // A PATH entry that is itself a symlink to a directory — `~/bin -> ~/dotfiles/bin`,
+    // the ordinary dotfiles layout. `contentsOfDirectory` follows the link, so the
+    // freshness stamp has to follow it too. A stamp read with `lstat` semantics records
+    // the *link's* own mtime and size, which nothing the target does can ever move: the
+    // stamp never disagrees, the directory never re-lists, and every binary installed
+    // there after launch stays invisible for the life of a process that stays resident
+    // for weeks.
+    let target = pathIndexDirectory("symlink-target")
+    let link = "\(sandbox)/path-index-symlink-\(caseIndex)"
+    try! FileManager.default.createSymbolicLink(atPath: link, withDestinationPath: target)
+    writeFile(target + "/pre287linked", executable: true)
+
+    check("a symlinked search-path directory reports what its target holds",
+          ConflictDetector.isShadowed("pre287linked", searchPaths: [link]))
+
+    // The cache is warm and keyed on the link. Now move the target underneath it.
+    let added = writeFile(target + "/pre287afterlink", executable: true)
+    check("a binary installed in the target after the cache was warmed is still found",
+          ConflictDetector.executableIndex(searchPaths: [link])
+              .executablePath(for: "pre287afterlink") == link + "/pre287afterlink")
+    check("and the one that was there before has not been lost in the re-listing",
+          ConflictDetector.isShadowed("pre287linked", searchPaths: [link]))
+
+    try! FileManager.default.removeItem(atPath: added)
+    check("a binary removed from the target stops being reported through the link",
+          !ConflictDetector.isShadowed("pre287afterlink", searchPaths: [link]))
 }
 
 // ---------------------------------------------------------------------------

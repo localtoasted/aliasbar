@@ -154,8 +154,8 @@ private struct PromptPreview: View {
     /// on summon and after every AliasBar-owned delivery mutation, and keyed on the
     /// registry file's own modification date and size. A read whose key no longer
     /// matches the file re-reads before answering, so an install made by another
-    /// process — the `ab` CLI, a second copy of AliasBar, a synced `~/.aliasbar` —
-    /// shows up here the next time this pane draws, exactly as before.
+    /// process — a second copy of AliasBar, a synced `~/.aliasbar` — shows up here the
+    /// next time this pane draws, exactly as before.
     private var status: AppState.PromptDeliveryStatus {
         state.promptDeliveryStatus(for: shortcut)
     }
