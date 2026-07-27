@@ -303,6 +303,7 @@ final class AppSettings: ObservableObject {
         static let historyUsageRankingEnabled = "historyUsageRankingEnabled"
         static let promptFeaturesEnabled = "promptFeaturesEnabled"
         static let hasShownPromptHint = "hasShownPromptHint"
+        static let hasDismissedPromptLibraryHint = "hasDismissedPromptLibraryHint"
         static let clipboardMonitoring = "clipboardMonitoring"
         static let clipboardPersistence = "clipboardPersistence"
         static let clipboardInSyncFile = "clipboardInSyncFile"
@@ -502,6 +503,14 @@ final class AppSettings: ObservableObject {
         didSet { defaults.set(hasShownPromptHint, forKey: Key.hasShownPromptHint) }
     }
 
+    /// The empty-prompt-library review CTA is setup help, not permanent chrome.
+    /// Once dismissed it stays gone across launches; the same value gates every
+    /// surface that can mention the review prompt.
+    @Published var hasDismissedPromptLibraryHint: Bool {
+        didSet { defaults.set(hasDismissedPromptLibraryHint,
+                              forKey: Key.hasDismissedPromptLibraryHint) }
+    }
+
     // MARK: Clipboard
 
     /// Whether `ClipboardMonitor` polls the pasteboard at all. Off by default — this
@@ -644,10 +653,9 @@ final class AppSettings: ObservableObject {
         enterAction = decode(Key.enterAction, EnterAction.pasteName)
         afterAction = decode(Key.afterAction, AfterAction.close)
         defaultView = decode(Key.defaultView, ViewMode.find)
-        // The key did not exist before the library preference shipped. Automatic is
-        // therefore both the fresh-install default and the migration for older users,
-        // preserving the context-aware behavior they already had.
-        defaultLibrary = decode(Key.defaultLibrary, DefaultLibrary.automatic)
+        // Prompts are the fresh-install default. A stored choice still wins, and
+        // `prepareForShow()` forces shell when prompt features are disabled.
+        defaultLibrary = decode(Key.defaultLibrary, DefaultLibrary.prompts)
         searchScope = decode(Key.searchScope, SearchScope.everything)
         sortOrder = decode(Key.sortOrder, SortOrder.usage)
         // A look stored by an older build, or by a build with a different set of fields,
@@ -683,6 +691,9 @@ final class AppSettings: ObservableObject {
         historyUsageRankingEnabled = store.object(forKey: Key.historyUsageRankingEnabled) as? Bool ?? true
         promptFeaturesEnabled = store.object(forKey: Key.promptFeaturesEnabled) as? Bool ?? true
         hasShownPromptHint = store.object(forKey: Key.hasShownPromptHint) as? Bool ?? false
+        hasDismissedPromptLibraryHint = store.object(
+            forKey: Key.hasDismissedPromptLibraryHint
+        ) as? Bool ?? false
         resultLimit = store.object(forKey: Key.resultLimit) as? Int ?? 6
         pinnedShortcutKeys = Set(store.stringArray(forKey: Key.pinnedShortcuts) ?? [])
 

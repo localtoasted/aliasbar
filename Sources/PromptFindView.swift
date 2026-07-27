@@ -22,8 +22,9 @@ struct PromptFindPreviewLayout<ListContent: View>: View {
             // shell entries, not prompts. Reusing `InfoBanner` (PromptManageView.swift)
             // rather than a full empty state: shell results are still genuinely
             // useful here, so this never replaces them, only sits above them.
-            if state.promptLibraryEmpty {
-                InfoBanner(text: AppState.promptLibraryEmptyHint)
+            if state.showsPromptLibraryHint {
+                DismissibleInfoBanner(text: AppState.promptLibraryEmptyHint,
+                                      onDismiss: state.dismissPromptLibraryHint)
                     .padding(10)
             }
             HStack(spacing: 0) {

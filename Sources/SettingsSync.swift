@@ -46,6 +46,7 @@ enum SettingsSync {
         case hotkeyEnabled
         case onboardingComplete
         case hasEverPasted
+        case hasDismissedPromptLibraryHint
         case clipboardMonitoring
         case clipboardPersistence
         case clipboardInSyncFile

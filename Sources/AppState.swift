@@ -680,6 +680,18 @@ final class AppState: ObservableObject {
     /// drift between the three call sites.
     var promptLibraryEmpty: Bool { promptCache.isEmpty }
 
+    /// Setup help only: once the user closes it, no prompt-empty surface may bring it
+    /// back. Keeping the policy here prevents FIND and MANAGE from drifting.
+    var showsPromptLibraryHint: Bool {
+        settings.promptFeaturesEnabled
+            && promptLibraryEmpty
+            && !settings.hasDismissedPromptLibraryHint
+    }
+
+    func dismissPromptLibraryHint() {
+        settings.hasDismissedPromptLibraryHint = true
+    }
+
     /// The consistent ⌘I hint shown in every "no prompts yet" empty state — worded
     /// once here so FIND's prompt dialect, MANAGE's Library bucket, and BOARD's
     /// prompt deck can never drift on what pressing it actually does.

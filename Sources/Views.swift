@@ -138,137 +138,144 @@ struct RootView: View {
 
     private var header: some View {
         VStack(spacing: 9) {
-            HStack(spacing: 8) {
-                AliasBarMark(size: 25)
-
-                ForEach(ViewMode.allCases) { mode in
-                    tab(mode)
-                }
-
-                // Not a fourth tab. History is a state FIND can be in, and showing it
-                // as a peer of the three views would say otherwise.
-                if state.historyMode {
-                    // Styled as a badge, not a tab: FIND is still the active view, and
-                    // two things wearing the active-tab treatment at once would say the
-                    // user is in two places.
-                    HStack(spacing: 4) {
-                        Image(systemName: "clock.arrow.circlepath")
-                            .font(.system(size: 9.5, weight: .semibold))
-                        Text("History")
-                            .font(.system(size: 11, weight: .semibold, design: theme.bodyDesign))
-                    }
-                    .foregroundStyle(theme.accent)
-                    .padding(.horizontal, 7)
-                    .padding(.vertical, 2.5)
-                    .background(theme.surface,
-                                in: RoundedRectangle(cornerRadius: theme.cornerRadius))
-                    .overlay(RoundedRectangle(cornerRadius: theme.cornerRadius)
-                        .strokeBorder(theme.accent.opacity(0.28), lineWidth: 1))
-                    .help("Searching shell history. Press ⌘H to return.")
-                }
-
-                // Clipboard's counterpart to the History badge above — same reasoning,
-                // same treatment, a third FIND source rather than a fourth tab.
-                if state.findSource == .clipboard {
-                    HStack(spacing: 4) {
-                        Image(systemName: "doc.on.clipboard")
-                            .font(.system(size: 9.5, weight: .semibold))
-                        Text("Clipboard")
-                            .font(.system(size: 11, weight: .semibold, design: theme.bodyDesign))
-                    }
-                    .foregroundStyle(theme.accent)
-                    .padding(.horizontal, 7)
-                    .padding(.vertical, 2.5)
-                    .background(theme.surface,
-                                in: RoundedRectangle(cornerRadius: theme.cornerRadius))
-                    .overlay(RoundedRectangle(cornerRadius: theme.cornerRadius)
-                        .strokeBorder(theme.accent.opacity(0.28), lineWidth: 1))
-                    .help("Browsing clipboard history. Press ⌘K to return.")
-                }
-
-                // A subset bucket needs a badge in FIND and BOARD because hiding
-                // things without saying so reads as data loss. `By file` only changes
-                // order, MANAGE names its bucket in the sidebar, and history/clipboard
-                // ignore buckets entirely.
-                if state.bucket.showsHeaderFilter(in: state.mode) && state.findSource == .aliases {
-                    HStack(spacing: 4) {
-                        Image(systemName: state.bucket.symbol)
-                            .font(.system(size: 9.5, weight: .semibold))
-                        Text(state.bucket.label)
-                            .font(.system(size: 11, weight: .semibold, design: theme.bodyDesign))
-                    }
-                    .foregroundStyle(theme.accent)
-                    .padding(.horizontal, 7)
-                    .padding(.vertical, 2.5)
-                    .background(theme.surface,
-                                in: RoundedRectangle(cornerRadius: theme.cornerRadius))
-                    .overlay(RoundedRectangle(cornerRadius: theme.cornerRadius)
-                        .strokeBorder(theme.accent.opacity(0.28), lineWidth: 1))
-                    .help("Showing \(state.bucket.label.lowercased()). Press ⌘↑↓ to change or Esc for all.")
-                }
-
-                // The inference copy, FIND only — it explains the dialect boost, which
-                // only affects FIND's ranking. Plain text, not a badge: this is a guess
-                // AliasBar is making, not a state you are "in" the way a bucket is.
-                if state.mode == .find, state.findSource == .aliases, let chip = state.contextChip {
-                    Text(chip)
-                        .font(.system(size: 10.5, design: theme.bodyDesign))
-                        .foregroundStyle(theme.faint)
-                        .lineLimit(1)
-                        .layoutPriority(-1)
-                        .help("Based on the previous app. AliasBar cannot see its content. Press ⇥ to switch.")
-                }
-
-                Spacer(minLength: 6)
-
-                Text(ZshrcParser.displayPath)
-                    .font(.system(size: 11, design: .monospaced))
-                    .foregroundStyle(theme.faint)
-                    .lineLimit(1)
-                    .truncationMode(.head)
-                    // Without both of these a long path (anything not under ~) pushes
-                    // the tabs off the left edge instead of truncating itself.
-                    .frame(maxWidth: 190, alignment: .trailing)
-                    .layoutPriority(-1)
-                    .help(ZshrcParser.path)
-
-                Button { state.requestOpenSettings() } label: {
-                    Image(systemName: "gearshape.fill")
-                        .font(.system(size: 11, weight: .semibold))
-                }
-                .liveButton()
-                .foregroundStyle(theme.dim)
-                .accessibilityLabel("Open settings")
-                .help("Settings. Press ⌘,.")
-            }
-
-            HStack(spacing: 7) {
-                Image(systemName: "magnifyingglass")
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(theme.dim)
-                TextField(searchPrompt, text: $state.query)
-                    .textFieldStyle(.plain)
-                    .font(.system(size: 15.5, design: theme.bodyDesign))
-                    .foregroundStyle(theme.text)
-                    .focused($searchFocused)
-                if !state.query.isEmpty {
-                    Text("\(state.searchMatchCount)")
-                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                        .foregroundStyle(theme.faint)
-                }
-            }
-            .padding(.horizontal, 11)
-            .padding(.vertical, 10)
-            .background(theme.surface, in: RoundedRectangle(cornerRadius: theme.cornerRadius + 2))
-            .overlay(
-                RoundedRectangle(cornerRadius: theme.cornerRadius + 2)
-                    .strokeBorder(theme.rule.opacity(0.5), lineWidth: 1)
-            )
+            searchField
+            navigationBar
         }
         .padding(.horizontal, 12)
         .padding(.top, 11)
         .padding(.bottom, 9)
         .frame(height: WindowLayout.headerHeight)
+    }
+
+    /// Search is the first thing the user acts on, so it sits above the view controls
+    /// without changing either control's existing treatment.
+    private var searchField: some View {
+        HStack(spacing: 7) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(theme.dim)
+            TextField(searchPrompt, text: $state.query)
+                .textFieldStyle(.plain)
+                .font(.system(size: 15.5, design: theme.bodyDesign))
+                .foregroundStyle(theme.text)
+                .focused($searchFocused)
+            if !state.query.isEmpty {
+                Text("\(state.searchMatchCount)")
+                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(theme.faint)
+            }
+        }
+        .padding(.horizontal, 11)
+        .padding(.vertical, 10)
+        .background(theme.surface, in: RoundedRectangle(cornerRadius: theme.cornerRadius + 2))
+        .overlay(
+            RoundedRectangle(cornerRadius: theme.cornerRadius + 2)
+                .strokeBorder(theme.rule.opacity(0.5), lineWidth: 1)
+        )
+    }
+
+    private var navigationBar: some View {
+        HStack(spacing: 8) {
+            AliasBarMark(size: 25)
+
+            ForEach(ViewMode.allCases) { mode in
+                tab(mode)
+            }
+
+            if showsLibrarySwitchHint {
+                KeyHint(keys: "⇥", label: state.dialect == .prompt ? "aliases" : "prompts")
+                    .help("Press Tab to switch between aliases and prompts.")
+            }
+
+            // Not a fourth tab. History is a state FIND can be in, and showing it
+            // as a peer of the three views would say otherwise.
+            if state.historyMode {
+                HStack(spacing: 4) {
+                    Image(systemName: "clock.arrow.circlepath")
+                        .font(.system(size: 9.5, weight: .semibold))
+                    Text("History")
+                        .font(.system(size: 11, weight: .semibold, design: theme.bodyDesign))
+                }
+                .foregroundStyle(theme.accent)
+                .padding(.horizontal, 7)
+                .padding(.vertical, 2.5)
+                .background(theme.surface,
+                            in: RoundedRectangle(cornerRadius: theme.cornerRadius))
+                .overlay(RoundedRectangle(cornerRadius: theme.cornerRadius)
+                    .strokeBorder(theme.accent.opacity(0.28), lineWidth: 1))
+                .help("Searching shell history. Press ⌘H to return.")
+            }
+
+            if state.findSource == .clipboard {
+                HStack(spacing: 4) {
+                    Image(systemName: "doc.on.clipboard")
+                        .font(.system(size: 9.5, weight: .semibold))
+                    Text("Clipboard")
+                        .font(.system(size: 11, weight: .semibold, design: theme.bodyDesign))
+                }
+                .foregroundStyle(theme.accent)
+                .padding(.horizontal, 7)
+                .padding(.vertical, 2.5)
+                .background(theme.surface,
+                            in: RoundedRectangle(cornerRadius: theme.cornerRadius))
+                .overlay(RoundedRectangle(cornerRadius: theme.cornerRadius)
+                    .strokeBorder(theme.accent.opacity(0.28), lineWidth: 1))
+                .help("Browsing clipboard history. Press ⌘K to return.")
+            }
+
+            if state.bucket.showsHeaderFilter(in: state.mode) && state.findSource == .aliases {
+                HStack(spacing: 4) {
+                    Image(systemName: state.bucket.symbol)
+                        .font(.system(size: 9.5, weight: .semibold))
+                    Text(state.bucket.label)
+                        .font(.system(size: 11, weight: .semibold, design: theme.bodyDesign))
+                }
+                .foregroundStyle(theme.accent)
+                .padding(.horizontal, 7)
+                .padding(.vertical, 2.5)
+                .background(theme.surface,
+                            in: RoundedRectangle(cornerRadius: theme.cornerRadius))
+                .overlay(RoundedRectangle(cornerRadius: theme.cornerRadius)
+                    .strokeBorder(theme.accent.opacity(0.28), lineWidth: 1))
+                .help("Showing \(state.bucket.label.lowercased()). Press ⌘↑↓ to change or Esc for all.")
+            }
+
+            if state.mode == .find, state.findSource == .aliases, let chip = state.contextChip {
+                Text(chip)
+                    .font(.system(size: 10.5, design: theme.bodyDesign))
+                    .foregroundStyle(theme.faint)
+                    .lineLimit(1)
+                    .layoutPriority(-1)
+                    .help("Based on the previous app. AliasBar cannot see its content. Press ⇥ to switch.")
+            }
+
+            Spacer(minLength: 6)
+
+            Text(ZshrcParser.displayPath)
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundStyle(theme.faint)
+                .lineLimit(1)
+                .truncationMode(.head)
+                .frame(maxWidth: 190, alignment: .trailing)
+                .layoutPriority(-1)
+                .help(ZshrcParser.path)
+
+            Button { state.requestOpenSettings() } label: {
+                Image(systemName: "gearshape.fill")
+                    .font(.system(size: 11, weight: .semibold))
+            }
+            .liveButton()
+            .foregroundStyle(theme.dim)
+            .accessibilityLabel("Open settings")
+            .help("Settings. Press ⌘,.")
+        }
+    }
+
+    /// History and clipboard give Tab another local job. Everywhere else, when prompt
+    /// features are on, this is the aliases/prompts switch the hint describes.
+    private var showsLibrarySwitchHint: Bool {
+        settings.promptFeaturesEnabled
+            && !(state.mode == .find && state.findSource != .aliases)
     }
 
     private var searchPrompt: String {
@@ -369,6 +376,7 @@ struct KeyHint: View {
             Text(label)
                 .font(.system(size: 10.5))
                 .foregroundStyle(theme.faint)
+                .lineLimit(1)
         }
     }
 }
@@ -419,6 +427,27 @@ struct PinButton: View {
         .liveButton()
         .accessibilityLabel("\(pinned ? "Unpin" : "Pin") \(name)")
         .help("\(pinned ? "Unpin" : "Pin") \(name). Press ⌘P.")
+    }
+}
+
+/// Result rows always reserve this trailing column. Selection changes only reveal the
+/// controls; they never steal width from the name or description and make text reflow.
+struct StableRowActionHints: View {
+    let visible: Bool
+    let primaryKeys: String
+    let primaryLabel: String
+    var secondaryKeys: String?
+    var secondaryLabel: String?
+
+    var body: some View {
+        SelectedActionHints(primaryKeys: primaryKeys,
+                            primaryLabel: primaryLabel,
+                            secondaryKeys: secondaryKeys,
+                            secondaryLabel: secondaryLabel)
+            .frame(width: 196, height: 24, alignment: .trailing)
+            .opacity(visible ? 1 : 0)
+            .accessibilityHidden(!visible)
+            .allowsHitTesting(false)
     }
 }
 
@@ -887,9 +916,10 @@ private struct PrimaryResult: View {
                         .help(conflicts.map(\.reason.headline).joined(separator: " · "))
                 }
                 Spacer(minLength: 4)
-                if selected && showsActions {
-                    SelectedActionHints(primaryKeys: "⏎", primaryLabel: primaryAction,
-                                        secondaryKeys: "⌘⏎", secondaryLabel: secondaryAction)
+                if showsActions {
+                    StableRowActionHints(visible: selected,
+                                         primaryKeys: "⏎", primaryLabel: primaryAction,
+                                         secondaryKeys: "⌘⏎", secondaryLabel: secondaryAction)
                 }
                 if entry.uses > 0 {
                     Text("\(entry.uses)×")
@@ -960,11 +990,10 @@ private struct HistoryRow: View {
                             .frame(width: 24)
                     }
                 )
-            if selected {
-                SelectedActionHints(primaryKeys: "⏎", primaryLabel: "run",
-                                    secondaryKeys: suggestion.isEmpty ? nil : "⌘⏎",
-                                    secondaryLabel: suggestion.isEmpty ? nil : "alias \(suggestion)")
-            }
+            StableRowActionHints(visible: selected,
+                                 primaryKeys: "⏎", primaryLabel: "run",
+                                 secondaryKeys: suggestion.isEmpty ? nil : "⌘⏎",
+                                 secondaryLabel: suggestion.isEmpty ? nil : "alias \(suggestion)")
             Text("\(command.count)×")
                 .font(.system(size: 9.5, design: .monospaced))
                 .monospacedDigit()
@@ -1048,9 +1077,10 @@ private struct AlternateRow: View {
                             .frame(width: 24)
                     }
                 )
-            if selected && showsActions {
-                SelectedActionHints(primaryKeys: "⏎", primaryLabel: primaryAction,
-                                    secondaryKeys: "⌘⏎", secondaryLabel: secondaryAction)
+            if showsActions {
+                StableRowActionHints(visible: selected,
+                                     primaryKeys: "⏎", primaryLabel: primaryAction,
+                                     secondaryKeys: "⌘⏎", secondaryLabel: secondaryAction)
             }
             if entry.uses > 0 {
                 Text("\(entry.uses)×")
@@ -1121,9 +1151,10 @@ private struct PromptRow: View {
                             .frame(width: 24)
                     }
                 )
-            if selected && showsActions {
-                SelectedActionHints(primaryKeys: "⏎", primaryLabel: primaryAction,
-                                    secondaryKeys: "⌘⏎", secondaryLabel: secondaryAction)
+            if showsActions {
+                StableRowActionHints(visible: selected,
+                                     primaryKeys: "⏎", primaryLabel: primaryAction,
+                                     secondaryKeys: "⌘⏎", secondaryLabel: secondaryAction)
             }
             if shortcut.uses > 0 {
                 Text("\(shortcut.uses)×")
