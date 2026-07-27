@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import SwiftUI
 import Carbon.HIToolbox
 
 // Test harness for AliasWriter. Runs against scratch files only.
@@ -10769,6 +10770,254 @@ do {
     state.beginEditPrompt(shipit)
     check("⌘E reflects an uninstall made out of process just as directly",
           state.editor?.deliverToClaudeCode == false)
+}
+
+// ---------------------------------------------------------------------------
+print("\n48. Theme.derive is a pure function of (Appearance, Bool), and the memo built on it")
+
+// `AppSettings.theme(systemIsDark:)` memoizes on `(Appearance, Bool)` compared by value.
+// That key is sound only because `Theme.derive(from:dark:)` consumes nothing else — no
+// AppSettings, no UserDefaults, no clock, no NSApp/NSScreen, no accumulator. If anything
+// else fed it, a value-equal key would serve a stale palette and the entire window would
+// render in the wrong colours until some unrelated edit happened to change the key. The
+// property is worth pinning rather than re-reading out of the source, because it is what
+// lets the memo ship with no invalidation hooks at all: every route that writes
+// `appearance` (the didSet, preset apply, paste-preset, applyRemoteSettings) changes the
+// key by construction, so no route can go stale.
+
+/// Names the first field on which two `Theme`s differ, or nil when they are identical.
+/// `Theme` is deliberately not Equatable — it is a render-time bag of SwiftUI values —
+/// so the comparison is spelled out here, which also makes a failure say what drifted.
+func themeFieldMismatch(_ a: Theme, _ b: Theme) -> String? {
+    if a.background != b.background { return "background" }
+    if a.surface != b.surface { return "surface" }
+    if a.rule != b.rule { return "rule" }
+    if a.text != b.text { return "text" }
+    if a.dim != b.dim { return "dim" }
+    if a.faint != b.faint { return "faint" }
+    if a.accent != b.accent { return "accent" }
+    if a.aliasTint != b.aliasTint { return "aliasTint" }
+    if a.functionTint != b.functionTint { return "functionTint" }
+    if a.onAccent != b.onAccent { return "onAccent" }
+    if a.onAliasTint != b.onAliasTint { return "onAliasTint" }
+    if a.onFunctionTint != b.onFunctionTint { return "onFunctionTint" }
+    if a.cornerRadius != b.cornerRadius { return "cornerRadius" }
+    if a.isLight != b.isLight { return "isLight" }
+    if a.bodyDesign != b.bodyDesign { return "bodyDesign" }
+    if a.nameDesign != b.nameDesign { return "nameDesign" }
+    switch (a.vibrancy, b.vibrancy) {
+    case (nil, nil): break
+    case let (lhs?, rhs?):
+        if lhs.material != rhs.material { return "vibrancy.material" }
+        if lhs.tint != rhs.tint { return "vibrancy.tint" }
+    default: return "vibrancy"
+    }
+    return nil
+}
+
+func themesAreIdentical(_ a: Theme, _ b: Theme) -> Bool { themeFieldMismatch(a, b) == nil }
+
+/// Deliberately awkward looks alongside the built-ins. The mid-grey is the case that
+/// exercises `contrastScale`'s compression branch (no ground can carry 11:1 there), and
+/// the two extremes make `legible` take both its short-circuit and its 40-step walk.
+let themePurityCorpus: [Appearance] = Appearance.builtIns + [
+    Appearance(id: "purity-mid", name: "Mid grey",
+               ground: HexColor(hex: "#808080")!, darkGround: HexColor(hex: "#202024")!,
+               accent: HexColor(hex: "#B03030")!, aliasTint: HexColor(hex: "#30B0A0")!,
+               functionTint: HexColor(hex: "#E8FA4A")!,
+               uiFont: .rounded, nameFont: .sans,
+               cornerRadius: 12, translucency: 0.9, isBuiltIn: false),
+    Appearance(id: "purity-paper", name: "Paper",
+               ground: HexColor(hex: "#FFFFFF")!, darkGround: nil,
+               accent: HexColor(hex: "#000000")!, aliasTint: HexColor(hex: "#101010")!,
+               functionTint: HexColor(hex: "#FFFF00")!,
+               uiFont: .mono, nameFont: .serif,
+               cornerRadius: 0, translucency: 0, isBuiltIn: false),
+    Appearance(id: "purity-void", name: "Void",
+               ground: HexColor(hex: "#000000")!, darkGround: HexColor(hex: "#000000")!,
+               accent: HexColor(hex: "#0B0B0B")!, aliasTint: HexColor(hex: "#FFFFFF")!,
+               functionTint: HexColor(hex: "#050505")!,
+               uiFont: .sans, nameFont: .rounded,
+               cornerRadius: 24, translucency: 0.01, isBuiltIn: false),
+]
+
+for candidate in themePurityCorpus {
+    for dark in [false, true] {
+        let first = Theme.derive(from: candidate, dark: dark)
+        let second = Theme.derive(from: candidate, dark: dark)
+        check("\(candidate.name) derives identically twice at dark=\(dark)",
+              themesAreIdentical(first, second),
+              themeFieldMismatch(first, second) ?? "")
+    }
+}
+
+do {
+    // Not just twice: many times, interleaved with derivations of other looks. A hidden
+    // accumulator, a memo inside derive itself, or a read of anything that drifts over
+    // wall-clock time would show up here and nowhere else.
+    let reference = Theme.derive(from: .clay, dark: false)
+    var stable = true
+    for round in 0..<64 {
+        _ = Theme.derive(from: themePurityCorpus[round % themePurityCorpus.count],
+                         dark: round.isMultiple(of: 2))
+        if !themesAreIdentical(Theme.derive(from: .clay, dark: false), reference) { stable = false }
+    }
+    check("derive stays byte-stable across 64 interleaved derivations of other looks", stable)
+}
+
+// The second argument genuinely reaches the output, so it belongs in the key.
+check("the dark flag changes the derived theme for a look that has a second ground",
+      !themesAreIdentical(Theme.derive(from: .clay, dark: true),
+                          Theme.derive(from: .clay, dark: false)))
+
+// Every Appearance field derive consumes has to move the Theme, or the memo would be
+// keyed on more than it needs and a real edit could come back cached.
+do {
+    let base = Appearance.clay
+    func mutated(_ label: String, dark: Bool = false,
+                 _ edit: (inout Appearance) -> Void) {
+        var copy = base
+        edit(&copy)
+        check("editing \(label) derives a different theme",
+              !themesAreIdentical(Theme.derive(from: copy, dark: dark),
+                                  Theme.derive(from: base, dark: dark)))
+    }
+    mutated("ground") { $0.ground = HexColor(hex: "#0A0B0D")! }
+    mutated("darkGround", dark: true) { $0.darkGround = HexColor(hex: "#2B0A0A")! }
+    mutated("accent") { $0.accent = HexColor(hex: "#1414EE")! }
+    mutated("aliasTint") { $0.aliasTint = HexColor(hex: "#E8FA4A")! }
+    mutated("functionTint") { $0.functionTint = HexColor(hex: "#1414EE")! }
+    mutated("uiFont") { $0.uiFont = .rounded }
+    mutated("nameFont") { $0.nameFont = .sans }
+    mutated("cornerRadius") { $0.cornerRadius = base.cornerRadius + 7 }
+    mutated("translucency") { $0.translucency = 0.6 }
+
+    // The other direction, which is what makes the key *conservative*: the identity
+    // fields are not rendering inputs, so keying on the whole Appearance strictly
+    // dominates derive's real inputs. Over-keying can only ever cause a redundant
+    // derivation, never a stale theme.
+    func identityOnly(_ label: String, _ edit: (inout Appearance) -> Void) {
+        var copy = base
+        edit(&copy)
+        check("editing \(label) leaves the derived theme untouched",
+              themesAreIdentical(Theme.derive(from: copy), Theme.derive(from: base)))
+    }
+    identityOnly("id") { $0.id = "clay-copy" }
+    identityOnly("name") { $0.name = "Clay (copy)" }
+    identityOnly("isBuiltIn") { $0.isBuiltIn = false }
+}
+
+do {
+    // Ambient independence. Everything derive could plausibly have reached for — a live
+    // AppSettings, its backing UserDefaults, the system-dark reading — is moved
+    // underneath it, and the same arguments still produce the same theme.
+    let before = Theme.derive(from: .clay, dark: false)
+    let (settings, defaults) = freshTestSettings()
+    settings.appearance = themePurityCorpus[3]   // the mid-grey
+    settings.followsSystemAppearance = true
+    settings.systemIsDark = true
+    defaults.set("#FF00FF", forKey: "appearance")
+    _ = settings.theme(systemIsDark: true)
+    check("derive ignores a live AppSettings, its defaults, and the system-dark reading",
+          themesAreIdentical(Theme.derive(from: .clay, dark: false), before),
+          themeFieldMismatch(Theme.derive(from: .clay, dark: false), before) ?? "")
+}
+
+// --- The memo itself: hits when the key matches, misses whenever it moves -----------
+
+do {
+    let (settings, _) = freshTestSettings()
+    settings.appearance = .clay
+    settings.followsSystemAppearance = false
+    settings.systemIsDark = false
+
+    let firstDerivations = settings.themeDerivationCount
+    let first = settings.theme(systemIsDark: false)
+    check("the first theme read derives exactly once",
+          settings.themeDerivationCount == firstDerivations + 1)
+    check("the first theme read is the uncached derivation",
+          themesAreIdentical(first, Theme.derive(from: .clay, dark: false)))
+
+    var repeatsAreFree = true
+    for _ in 0..<51 where !themesAreIdentical(settings.theme(systemIsDark: false), first) {
+        repeatsAreFree = false
+    }
+    check("51 further reads — one RootView body pass — reuse the memo",
+          settings.themeDerivationCount == firstDerivations + 1)
+    check("and every one of them returns the same theme", repeatsAreFree)
+
+    // Switching preset is the mutation the user makes most often; it must miss.
+    settings.appearance = .ultramarine
+    let switched = settings.theme(systemIsDark: false)
+    check("switching preset misses the memo",
+          settings.themeDerivationCount == firstDerivations + 2)
+    check("switching preset returns the uncached derivation",
+          themesAreIdentical(switched, Theme.derive(from: .ultramarine, dark: false)),
+          themeFieldMismatch(switched, Theme.derive(from: .ultramarine, dark: false)) ?? "")
+
+    // Editing one colour well in place, which goes through the same @Published setter
+    // but leaves the preset identity alone. Value equality is what catches this.
+    var edited = Appearance.ultramarine
+    edited.accent = HexColor(hex: "#EE1414")!
+    settings.appearance = edited
+    let afterEdit = settings.theme(systemIsDark: false)
+    check("editing a single colour well misses the memo",
+          settings.themeDerivationCount == firstDerivations + 3)
+    check("editing a single colour well returns the uncached derivation",
+          themesAreIdentical(afterEdit, Theme.derive(from: edited, dark: false)),
+          themeFieldMismatch(afterEdit, Theme.derive(from: edited, dark: false)) ?? "")
+
+    // A round trip back to a value-equal appearance is allowed to hit or miss; what is
+    // not allowed is returning the wrong theme.
+    settings.appearance = .ultramarine
+    check("a round trip back to an earlier look still renders that look",
+          themesAreIdentical(settings.theme(systemIsDark: false),
+                             Theme.derive(from: .ultramarine, dark: false)))
+}
+
+do {
+    // The second half of the key. `dark` is not the raw system reading — it is the
+    // three-way conjunction the accessor computes — so each of its three inputs has to
+    // be able to move the memo, and none of them may move it when the conjunction does
+    // not change.
+    let (settings, _) = freshTestSettings()
+    settings.appearance = .clay          // has a second ground
+    settings.followsSystemAppearance = false
+    settings.systemIsDark = false
+    _ = settings.theme(systemIsDark: false)
+    let baseline = settings.themeDerivationCount
+
+    settings.systemIsDark = true
+    let ignored = settings.theme(systemIsDark: true)
+    check("a system-dark flip while not following macOS does not even miss the memo",
+          settings.themeDerivationCount == baseline)
+    check("and keeps rendering the light ground",
+          themesAreIdentical(ignored, Theme.derive(from: .clay, dark: false)))
+
+    settings.followsSystemAppearance = true
+    let followed = settings.theme(systemIsDark: true)
+    check("opting into following macOS misses the memo",
+          settings.themeDerivationCount == baseline + 1)
+    check("and renders the second ground",
+          themesAreIdentical(followed, Theme.derive(from: .clay, dark: true)),
+          themeFieldMismatch(followed, Theme.derive(from: .clay, dark: true)) ?? "")
+
+    let backToLight = settings.theme(systemIsDark: false)
+    check("macOS returning to light misses the memo",
+          settings.themeDerivationCount == baseline + 2)
+    check("and renders the first ground again",
+          themesAreIdentical(backToLight, Theme.derive(from: .clay, dark: false)))
+
+    // A look with no second ground pins the `darkGround != nil` leg: the system reading
+    // is inert there, so it must not be able to invalidate anything.
+    settings.appearance = .graphite
+    _ = settings.theme(systemIsDark: false)
+    let graphiteBaseline = settings.themeDerivationCount
+    let graphiteDark = settings.theme(systemIsDark: true)
+    check("a one-ground look ignores the system reading without re-deriving",
+          settings.themeDerivationCount == graphiteBaseline)
+    check("a one-ground look renders its only ground either way",
+          themesAreIdentical(graphiteDark, Theme.derive(from: .graphite, dark: false)))
 }
 
 // ---------------------------------------------------------------------------
