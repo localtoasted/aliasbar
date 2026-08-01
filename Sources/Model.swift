@@ -537,7 +537,7 @@ struct FileStamp: Equatable {
 /// executable?" once per (entry, directory) pair. A 200-entry rc file over a
 /// 20-directory developer PATH is 4,000 stat calls, made from `EntryStore.reload()`
 /// on the main thread on the way to showing the popover. `SuggestionEngine` is worse
-/// still: `uniqueName` probes up to a thousand candidate names for a single
+/// still: `proposeName` probes up to a thousand candidate names for a single
 /// suggestion, each one its own walk of the whole PATH. One `contentsOfDirectory`
 /// per directory answers all of them at once.
 ///
@@ -694,7 +694,7 @@ enum ConflictDetector {
     /// The one PATH snapshot every shadow lookup in the process shares, re-stamped on
     /// every call (see `PathExecutableIndex`). Held rather than rebuilt because the
     /// per-keystroke callers — `ComposerState`'s live shadow advisory,
-    /// `SuggestionEngine.uniqueName`'s probe loop — each want one name, and building
+    /// `SuggestionEngine.proposeName`'s probe loop — each want one name, and building
     /// an index for one name would trade a stat storm for a listing storm.
     ///
     /// Rebuilt from scratch rather than revalidated whenever the caller asks about a
@@ -706,7 +706,7 @@ enum ConflictDetector {
     /// `-swift-version 6`, where a mutable static is an error unless the safety claim
     /// is stated. The claim: every reader is main-actor confined — `EntryStore.reload`
     /// (Store.swift:62), `ComposerState`'s shadow advisory (ComposerState.swift:164),
-    /// `SuggestionEngine.uniqueName` (SuggestionEngine.swift:186), and the tests' own
+    /// `SuggestionEngine.proposeName` (SuggestionEngine.swift:147), and the tests' own
     /// top-level code — while the CLI never references `ConflictDetector` at all. It is
     /// an annotation, not a lock; anything that later reads this off the main thread has
     /// to isolate it properly rather than inherit the exemption.

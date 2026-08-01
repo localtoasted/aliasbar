@@ -177,7 +177,7 @@ enum SuggestionEngine {
     /// construct its own `pathLookup` closure.
     ///
     /// The snapshot is taken once and closed over for the whole mine rather than
-    /// re-stamped per name: `uniqueName` alone can probe upwards of a thousand
+    /// re-stamped per name: `proposeName` alone can probe upwards of a thousand
     /// candidates for a single suggestion, and every one of them would otherwise
     /// re-stat every directory on PATH.
     static func suggest(history: String,

@@ -102,4 +102,8 @@ The build includes `.build/ab`:
 ./test.sh
 ```
 
+`./test.sh` has three legs: the writer/core suite, the `ab` CLI integration checks, and the
+SwiftPM test target. The third needs a full Xcode install — with Command Line Tools alone it
+is skipped, and the skip is reported on stderr naming the suites that did not run.
+
 Built with SwiftUI. MIT licensed.

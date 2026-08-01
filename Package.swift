@@ -21,9 +21,23 @@ import PackageDescription
 //   - The test target needs XCTest, which ships with Xcode. Command Line Tools alone
 //     are enough for build.sh and test.sh but not for `swift test`.
 
-// The shell builds keep these same flags in tools/swift-flags.sh, sourced by build.sh,
+// The shell builds keep the equivalent flags in tools/swift-flags.sh, sourced by build.sh,
 // test.sh and tools/release-cli.sh. A manifest is Swift, not shell, so it cannot source
 // that file — this is the one copy that has to be changed by hand alongside it.
+//
+// `.enableUpcomingFeature` rather than `.unsafeFlags`, and the difference is not cosmetic:
+// SwiftPM refuses to resolve ANY package whose product contains a target carrying unsafe
+// flags, so `.unsafeFlags` here would make `AliasBarCore` — a product this package has
+// advertised publicly since before this change — impossible to depend on. The failure
+// lands on whoever tries to consume it, never on a build run from inside this repo, so
+// build.sh, test.sh and `swift build` all stay green while the package is broken for
+// everyone else.
+let librarySwiftSettings: [SwiftSetting] = [
+    .enableUpcomingFeature("StrictConcurrency"),
+]
+
+// Test targets belong to no product, so the restriction above does not reach them and the
+// flags can match the shell builds exactly.
 let concurrencySwiftSettings: [SwiftSetting] = [
     .unsafeFlags(["-warn-concurrency", "-strict-concurrency=targeted"]),
 ]
@@ -54,7 +68,7 @@ let package = Package(
                 "SnippetCore.swift",
                 "SuggestionEngine.swift",
             ],
-            swiftSettings: concurrencySwiftSettings
+            swiftSettings: librarySwiftSettings
         ),
         .testTarget(
             name: "AliasBarCoreTests",
